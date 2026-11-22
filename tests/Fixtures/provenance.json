@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "source_repo": "axiomasoft/vaulter",
+  "source_commit": "00200679ab438d20c47318b908275459d791162e",
+  "files": [
+    {
+      "source_path": "plan/spec/schemas/office-v1.schema.json",
+      "target_path": "packages/core/resources/contracts/office-v1.schema.json",
+      "sha256": "d576508de51c2996c7e8b3d6e2aa9ad7b000e279dfb04d23e767e6b82d2b29ef",
+      "bytes": 29353
+    },
+    {
+      "source_path": "plan/examples/office-sdk.json",
+      "target_path": "tests/Fixtures/office-sdk.json",
+      "sha256": "ad0678a94058829f0d2682f56e0cca1b5971dbb3561108e678d6f02e6648641c",
+      "bytes": 48016
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vaulter-office"
+version = "0.1.0"
+description = "Thin stdlib HTTP client for the Vaulter Office SDK v1 wire protocol."
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vaulter_office*"]

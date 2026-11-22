@@ -1,0 +1,1689 @@
+{
+  "fixture_version": 1,
+  "scenarios": [
+    {
+      "id": "text_success",
+      "events": [
+        {
+          "before_step": 1,
+          "type": "seed_text",
+          "details": {
+            "resource_id": "contract-17",
+            "marker": {
+              "generation": 3,
+              "position": 27
+            },
+            "p42_segments": [
+              {
+                "text": "Покупатель оплачивает счёт в течение ",
+                "marks": []
+              },
+              {
+                "text": "15",
+                "marks": [
+                  "bold"
+                ]
+              },
+              {
+                "text": " рабочих дней.",
+                "marks": []
+              }
+            ],
+            "p71_text": "Срок рассмотрения претензии — 10 рабочих дней."
+          }
+        },
+        {
+          "before_step": 6,
+          "type": "human_edits_block",
+          "details": {
+            "resource_id": "contract-17",
+            "block_id": "p71",
+            "new_text": "Срок рассмотрения претензии — 12 рабочих дней.",
+            "marker": {
+              "generation": 3,
+              "position": 28
+            }
+          }
+        }
+      ],
+      "steps": [
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.search",
+            "input": {
+              "query": "договор",
+              "resource_type": "text",
+              "limit": 5
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.search",
+            "ok": true,
+            "result": {
+              "items": [
+                {
+                  "resource_id": "contract-17",
+                  "resource_type": "text",
+                  "title": "Договор поставки"
+                }
+              ],
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "contract-17",
+              "selector": {
+                "kind": "text_outline",
+                "query": "срок"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 3,
+                "position": 27
+              },
+              "read_token": "rt-outline-27",
+              "data": {
+                "kind": "text_outline",
+                "blocks": [
+                  {
+                    "block_id": "p42",
+                    "path": [
+                      "Расчёты",
+                      "4.2"
+                    ],
+                    "snippet": "Покупатель оплачивает счёт в течение…"
+                  },
+                  {
+                    "block_id": "p71",
+                    "path": [
+                      "Претензии",
+                      "7.1"
+                    ],
+                    "snippet": "Срок рассмотрения претензии…"
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "contract-17",
+              "selector": {
+                "kind": "text_block",
+                "block_id": "p42"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 3,
+                "position": 27
+              },
+              "read_token": "rt-text-27",
+              "data": {
+                "kind": "text_block",
+                "block_id": "p42",
+                "segments": [
+                  {
+                    "text": "Покупатель оплачивает счёт в течение ",
+                    "marks": []
+                  },
+                  {
+                    "text": "15",
+                    "marks": [
+                      "bold"
+                    ]
+                  },
+                  {
+                    "text": " рабочих дней.",
+                    "marks": []
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.describe",
+            "input": {
+              "resource_id": "contract-17",
+              "command": "text.replace_exact@1"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.describe",
+            "ok": true,
+            "result": {
+              "command": "text.replace_exact@1",
+              "effect": "single_resource_write",
+              "input_schema": {
+                "type": "object",
+                "required": [
+                  "block_id",
+                  "expected",
+                  "replacement"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "expected": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "replacement": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "verification": "text_and_marks"
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.prepare",
+            "input": {
+              "resource_id": "contract-17",
+              "command": "text.replace_exact@1",
+              "read_token": "rt-text-27",
+              "arguments": {
+                "block_id": "p42",
+                "expected": "15",
+                "replacement": "30"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.prepare",
+            "ok": true,
+            "result": {
+              "proposal_id": "proposal-text-1",
+              "base": {
+                "generation": 3,
+                "position": 27
+              },
+              "approval": "automatic",
+              "summary": "В пункте 4.2 заменить «15» на «30»",
+              "targets": [
+                "p42"
+              ],
+              "expires_at": "2026-11-21T12:00:00Z",
+              "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847"
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.commit",
+            "input": {
+              "resource_id": "contract-17",
+              "command_id": "edit-1",
+              "proposal_id": "proposal-text-1",
+              "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.commit",
+            "ok": true,
+            "result": {
+              "command_id": "edit-1",
+              "receipt_id": "receipt-text-29",
+              "state": "committed",
+              "marker": {
+                "generation": 3,
+                "position": 29
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.verify",
+            "input": {
+              "resource_id": "contract-17",
+              "receipt_id": "receipt-text-29",
+              "mode": "at_commit"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.verify",
+            "ok": true,
+            "result": {
+              "receipt_id": "receipt-text-29",
+              "mode": "at_commit",
+              "outcome": "passed",
+              "marker": {
+                "generation": 3,
+                "position": 29
+              },
+              "checks": [
+                {
+                  "name": "text_exact",
+                  "passed": true,
+                  "actual": "30"
+                },
+                {
+                  "name": "marks",
+                  "passed": true,
+                  "actual": [
+                    "bold"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "contract-17",
+              "selector": {
+                "kind": "text_block",
+                "block_id": "p71"
+              },
+              "after_receipt": "receipt-text-29"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 3,
+                "position": 29
+              },
+              "read_token": "rt-neighbor-29",
+              "data": {
+                "kind": "text_block",
+                "block_id": "p71",
+                "segments": [
+                  {
+                    "text": "Срок рассмотрения претензии — 12 рабочих дней.",
+                    "marks": []
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "sheet_fixed_members",
+      "events": [
+        {
+          "before_step": 1,
+          "type": "seed_table",
+          "details": {
+            "resource_id": "budget-8",
+            "sheet_id": "expenses",
+            "table_id": "costs",
+            "marker": {
+              "generation": 1,
+              "position": 11
+            },
+            "columns_by_address": {
+              "B": "plan",
+              "C": "actual",
+              "D": "delta"
+            },
+            "first_data_row": 2,
+            "rows": [
+              {
+                "row_id": "r-telecom",
+                "plan": 100,
+                "actual": 120,
+                "delta": null
+              },
+              {
+                "row_id": "r-travel",
+                "plan": 200,
+                "actual": 180,
+                "delta": null
+              },
+              {
+                "row_id": "r-fees",
+                "plan": 10,
+                "actual": 20,
+                "delta": 77
+              }
+            ]
+          }
+        },
+        {
+          "before_step": 4,
+          "type": "human_inserts_row",
+          "details": {
+            "resource_id": "budget-8",
+            "sheet_id": "expenses",
+            "table_id": "costs",
+            "before_row_id": "r-travel",
+            "row": {
+              "row_id": "r-telecom2",
+              "plan": 40,
+              "actual": 55,
+              "delta": null
+            },
+            "marker": {
+              "generation": 1,
+              "position": 12
+            }
+          }
+        },
+        {
+          "before_step": 5,
+          "type": "assert_cells_at_marker",
+          "details": {
+            "resource_id": "budget-8",
+            "sheet_id": "expenses",
+            "marker": {
+              "generation": 1,
+              "position": 13
+            },
+            "cells": {
+              "D3": {
+                "row_id": "r-telecom2",
+                "value": null,
+                "has_formula": false
+              },
+              "D5": {
+                "row_id": "r-fees",
+                "value": 77,
+                "has_formula": false
+              }
+            }
+          }
+        }
+      ],
+      "steps": [
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "budget-8",
+              "selector": {
+                "kind": "sheet_catalog"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 1,
+                "position": 11
+              },
+              "read_token": "rt-catalog-11",
+              "data": {
+                "kind": "sheet_catalog",
+                "tables": [
+                  {
+                    "sheet_id": "expenses",
+                    "sheet_title": "Расходы",
+                    "table_id": "costs",
+                    "table_title": "Бюджет",
+                    "columns": [
+                      {
+                        "column_id": "plan",
+                        "title": "План"
+                      },
+                      {
+                        "column_id": "actual",
+                        "title": "Факт"
+                      },
+                      {
+                        "column_id": "delta",
+                        "title": "Отклонение"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "budget-8",
+              "selector": {
+                "kind": "sheet_table",
+                "sheet_id": "expenses",
+                "table_id": "costs",
+                "columns": [
+                  "plan",
+                  "actual"
+                ],
+                "row_ids": [
+                  "r-telecom",
+                  "r-travel"
+                ]
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 1,
+                "position": 11
+              },
+              "read_token": "rt-budget-selected-11",
+              "data": {
+                "kind": "sheet_table",
+                "sheet_id": "expenses",
+                "table_id": "costs",
+                "rows": [
+                  {
+                    "row_id": "r-telecom",
+                    "values": {
+                      "plan": 100,
+                      "actual": 120
+                    }
+                  },
+                  {
+                    "row_id": "r-travel",
+                    "values": {
+                      "plan": 200,
+                      "actual": 180
+                    }
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.prepare",
+            "input": {
+              "resource_id": "budget-8",
+              "command": "sheet.fill_formula@1",
+              "read_token": "rt-budget-selected-11",
+              "arguments": {
+                "sheet_id": "expenses",
+                "table_id": "costs",
+                "scope": "fixed_members",
+                "destination_column_id": "delta",
+                "expression": {
+                  "op": "subtract",
+                  "left_column_id": "actual",
+                  "right_column_id": "plan"
+                }
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.prepare",
+            "ok": true,
+            "result": {
+              "proposal_id": "proposal-fixed-1",
+              "base": {
+                "generation": 1,
+                "position": 11
+              },
+              "approval": "automatic",
+              "summary": "Записать формулы в 2 выбранные строки",
+              "targets": [
+                "r-telecom",
+                "r-travel"
+              ],
+              "expires_at": "2026-11-21T12:00:00Z",
+              "digest": "7baa6a2e4c7f8e96d3249b68cac5f1a80332bf61ad892fa09b32f9c05bf9c637"
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.commit",
+            "input": {
+              "resource_id": "budget-8",
+              "command_id": "sheet-1",
+              "proposal_id": "proposal-fixed-1",
+              "digest": "7baa6a2e4c7f8e96d3249b68cac5f1a80332bf61ad892fa09b32f9c05bf9c637"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.commit",
+            "ok": true,
+            "result": {
+              "command_id": "sheet-1",
+              "receipt_id": "receipt-sheet-13",
+              "state": "committed",
+              "marker": {
+                "generation": 1,
+                "position": 13
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.verify",
+            "input": {
+              "resource_id": "budget-8",
+              "receipt_id": "receipt-sheet-13",
+              "mode": "at_commit"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.verify",
+            "ok": true,
+            "result": {
+              "receipt_id": "receipt-sheet-13",
+              "mode": "at_commit",
+              "outcome": "passed",
+              "marker": {
+                "generation": 1,
+                "position": 13
+              },
+              "checks": [
+                {
+                  "name": "row_ids",
+                  "passed": true,
+                  "actual": [
+                    "r-telecom",
+                    "r-travel"
+                  ]
+                },
+                {
+                  "name": "formulas",
+                  "passed": true,
+                  "actual": [
+                    "=C2-B2",
+                    "=C4-B4"
+                  ]
+                },
+                {
+                  "name": "calculated_values",
+                  "passed": true,
+                  "actual": [
+                    20,
+                    -20
+                  ]
+                },
+                {
+                  "name": "calculated_at",
+                  "passed": true,
+                  "actual": {
+                    "generation": 1,
+                    "position": 13
+                  }
+                },
+                {
+                  "name": "sum",
+                  "passed": true,
+                  "actual": 0
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "sheet_current_rows",
+      "events": [
+        {
+          "before_step": 1,
+          "type": "seed_table",
+          "details": {
+            "resource_id": "budget-8",
+            "sheet_id": "expenses",
+            "table_id": "costs",
+            "marker": {
+              "generation": 1,
+              "position": 11
+            },
+            "columns_by_address": {
+              "B": "plan",
+              "C": "actual",
+              "D": "delta"
+            },
+            "first_data_row": 2,
+            "rows": [
+              {
+                "row_id": "r-telecom",
+                "plan": 100,
+                "actual": 120,
+                "delta": null
+              },
+              {
+                "row_id": "r-travel",
+                "plan": 200,
+                "actual": 180,
+                "delta": null
+              }
+            ]
+          }
+        },
+        {
+          "before_step": 4,
+          "type": "human_inserts_row",
+          "details": {
+            "resource_id": "budget-8",
+            "sheet_id": "expenses",
+            "table_id": "costs",
+            "before_row_id": "r-travel",
+            "row": {
+              "row_id": "r-telecom2",
+              "plan": 40,
+              "actual": 55,
+              "delta": null
+            },
+            "marker": {
+              "generation": 1,
+              "position": 12
+            }
+          }
+        }
+      ],
+      "steps": [
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "budget-8",
+              "selector": {
+                "kind": "sheet_catalog"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 1,
+                "position": 11
+              },
+              "read_token": "rt-catalog-11",
+              "data": {
+                "kind": "sheet_catalog",
+                "tables": [
+                  {
+                    "sheet_id": "expenses",
+                    "sheet_title": "Расходы",
+                    "table_id": "costs",
+                    "table_title": "Бюджет",
+                    "columns": [
+                      {
+                        "column_id": "plan",
+                        "title": "План"
+                      },
+                      {
+                        "column_id": "actual",
+                        "title": "Факт"
+                      },
+                      {
+                        "column_id": "delta",
+                        "title": "Отклонение"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "budget-8",
+              "selector": {
+                "kind": "sheet_table",
+                "sheet_id": "expenses",
+                "table_id": "costs",
+                "columns": [
+                  "plan",
+                  "actual"
+                ]
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 1,
+                "position": 11
+              },
+              "read_token": "rt-budget-11",
+              "data": {
+                "kind": "sheet_table",
+                "sheet_id": "expenses",
+                "table_id": "costs",
+                "rows": [
+                  {
+                    "row_id": "r-telecom",
+                    "values": {
+                      "plan": 100,
+                      "actual": 120
+                    }
+                  },
+                  {
+                    "row_id": "r-travel",
+                    "values": {
+                      "plan": 200,
+                      "actual": 180
+                    }
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.prepare",
+            "input": {
+              "resource_id": "budget-8",
+              "command": "sheet.fill_formula@1",
+              "read_token": "rt-budget-11",
+              "arguments": {
+                "sheet_id": "expenses",
+                "table_id": "costs",
+                "scope": "current_rows",
+                "destination_column_id": "delta",
+                "expression": {
+                  "op": "subtract",
+                  "left_column_id": "actual",
+                  "right_column_id": "plan"
+                }
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.prepare",
+            "ok": true,
+            "result": {
+              "proposal_id": "proposal-current-1",
+              "base": {
+                "generation": 1,
+                "position": 11
+              },
+              "approval": "automatic",
+              "summary": "Записать формулы во все 2 строки",
+              "targets": [
+                "r-telecom",
+                "r-travel"
+              ],
+              "expires_at": "2026-11-21T12:00:00Z",
+              "digest": "d4b511cad302297ac94d3ab723b144b58923694baabf175a86369b93761ca83f"
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.commit",
+            "input": {
+              "resource_id": "budget-8",
+              "command_id": "sheet-2",
+              "proposal_id": "proposal-current-1",
+              "digest": "d4b511cad302297ac94d3ab723b144b58923694baabf175a86369b93761ca83f"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.commit",
+            "ok": false,
+            "error": {
+              "code": "scope_changed",
+              "retryable": false,
+              "next_action": "reread"
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "budget-8",
+              "selector": {
+                "kind": "sheet_table",
+                "sheet_id": "expenses",
+                "table_id": "costs",
+                "columns": [
+                  "plan",
+                  "actual"
+                ]
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 1,
+                "position": 12
+              },
+              "read_token": "rt-budget-12",
+              "data": {
+                "kind": "sheet_table",
+                "sheet_id": "expenses",
+                "table_id": "costs",
+                "rows": [
+                  {
+                    "row_id": "r-telecom",
+                    "values": {
+                      "plan": 100,
+                      "actual": 120
+                    }
+                  },
+                  {
+                    "row_id": "r-telecom2",
+                    "values": {
+                      "plan": 40,
+                      "actual": 55
+                    }
+                  },
+                  {
+                    "row_id": "r-travel",
+                    "values": {
+                      "plan": 200,
+                      "actual": 180
+                    }
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.prepare",
+            "input": {
+              "resource_id": "budget-8",
+              "command": "sheet.fill_formula@1",
+              "read_token": "rt-budget-12",
+              "arguments": {
+                "sheet_id": "expenses",
+                "table_id": "costs",
+                "scope": "current_rows",
+                "destination_column_id": "delta",
+                "expression": {
+                  "op": "subtract",
+                  "left_column_id": "actual",
+                  "right_column_id": "plan"
+                }
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.prepare",
+            "ok": true,
+            "result": {
+              "proposal_id": "proposal-current-2",
+              "base": {
+                "generation": 1,
+                "position": 12
+              },
+              "approval": "automatic",
+              "summary": "Записать формулы во все 3 строки",
+              "targets": [
+                "r-telecom",
+                "r-telecom2",
+                "r-travel"
+              ],
+              "expires_at": "2026-11-21T12:00:00Z",
+              "digest": "06bd19906a6fa339792d64a369c48f12616463970598e4e7ab30e3164225f967"
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.commit",
+            "input": {
+              "resource_id": "budget-8",
+              "command_id": "sheet-3",
+              "proposal_id": "proposal-current-2",
+              "digest": "06bd19906a6fa339792d64a369c48f12616463970598e4e7ab30e3164225f967"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.commit",
+            "ok": true,
+            "result": {
+              "command_id": "sheet-3",
+              "receipt_id": "receipt-current-13",
+              "state": "committed",
+              "marker": {
+                "generation": 1,
+                "position": 13
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.verify",
+            "input": {
+              "resource_id": "budget-8",
+              "receipt_id": "receipt-current-13",
+              "mode": "at_commit"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.verify",
+            "ok": true,
+            "result": {
+              "receipt_id": "receipt-current-13",
+              "mode": "at_commit",
+              "outcome": "passed",
+              "marker": {
+                "generation": 1,
+                "position": 13
+              },
+              "checks": [
+                {
+                  "name": "row_ids",
+                  "passed": true,
+                  "actual": [
+                    "r-telecom",
+                    "r-telecom2",
+                    "r-travel"
+                  ]
+                },
+                {
+                  "name": "formulas",
+                  "passed": true,
+                  "actual": [
+                    "=C2-B2",
+                    "=C3-B3",
+                    "=C4-B4"
+                  ]
+                },
+                {
+                  "name": "calculated_values",
+                  "passed": true,
+                  "actual": [
+                    20,
+                    15,
+                    -20
+                  ]
+                },
+                {
+                  "name": "calculated_at",
+                  "passed": true,
+                  "actual": {
+                    "generation": 1,
+                    "position": 13
+                  }
+                },
+                {
+                  "name": "sum",
+                  "passed": true,
+                  "actual": 15
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "lost_response",
+      "events": [
+        {
+          "before_step": 1,
+          "type": "seed_text",
+          "details": {
+            "resource_id": "contract-17",
+            "marker": {
+              "generation": 3,
+              "position": 27
+            },
+            "p42_segments": [
+              {
+                "text": "Покупатель оплачивает счёт в течение ",
+                "marks": []
+              },
+              {
+                "text": "15",
+                "marks": [
+                  "bold"
+                ]
+              },
+              {
+                "text": " рабочих дней.",
+                "marks": []
+              }
+            ],
+            "p71_text": "Срок рассмотрения претензии — 10 рабочих дней."
+          }
+        },
+        {
+          "before_step": 3,
+          "type": "human_edits_block",
+          "details": {
+            "resource_id": "contract-17",
+            "block_id": "p71",
+            "new_text": "Срок рассмотрения претензии — 12 рабочих дней.",
+            "marker": {
+              "generation": 3,
+              "position": 28
+            }
+          }
+        },
+        {
+          "before_step": 3,
+          "type": "drop_next_response",
+          "details": {
+            "operation": "office.commit",
+            "command_id": "edit-1",
+            "phase": "after_owner_commit_before_client_receives_response"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "contract-17",
+              "selector": {
+                "kind": "text_block",
+                "block_id": "p42"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 3,
+                "position": 27
+              },
+              "read_token": "rt-text-27",
+              "data": {
+                "kind": "text_block",
+                "block_id": "p42",
+                "segments": [
+                  {
+                    "text": "Покупатель оплачивает счёт в течение ",
+                    "marks": []
+                  },
+                  {
+                    "text": "15",
+                    "marks": [
+                      "bold"
+                    ]
+                  },
+                  {
+                    "text": " рабочих дней.",
+                    "marks": []
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.prepare",
+            "input": {
+              "resource_id": "contract-17",
+              "command": "text.replace_exact@1",
+              "read_token": "rt-text-27",
+              "arguments": {
+                "block_id": "p42",
+                "expected": "15",
+                "replacement": "30"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.prepare",
+            "ok": true,
+            "result": {
+              "proposal_id": "proposal-text-1",
+              "base": {
+                "generation": 3,
+                "position": 27
+              },
+              "approval": "automatic",
+              "summary": "В пункте 4.2 заменить «15» на «30»",
+              "targets": [
+                "p42"
+              ],
+              "expires_at": "2026-11-21T12:00:00Z",
+              "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847"
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.commit",
+            "input": {
+              "resource_id": "contract-17",
+              "command_id": "edit-1",
+              "proposal_id": "proposal-text-1",
+              "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.commit",
+            "ok": true,
+            "result": {
+              "command_id": "edit-1",
+              "receipt_id": "receipt-text-29",
+              "state": "committed",
+              "marker": {
+                "generation": 3,
+                "position": 29
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.status",
+            "input": {
+              "resource_id": "contract-17",
+              "command_id": "edit-1"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.status",
+            "ok": true,
+            "result": {
+              "command_id": "edit-1",
+              "receipt_id": "receipt-text-29",
+              "state": "committed",
+              "marker": {
+                "generation": 3,
+                "position": 29
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.commit",
+            "input": {
+              "resource_id": "contract-17",
+              "command_id": "edit-1",
+              "proposal_id": "proposal-text-1",
+              "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.commit",
+            "ok": true,
+            "result": {
+              "command_id": "edit-1",
+              "receipt_id": "receipt-text-29",
+              "state": "committed",
+              "marker": {
+                "generation": 3,
+                "position": 29
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.verify",
+            "input": {
+              "resource_id": "contract-17",
+              "receipt_id": "receipt-text-29",
+              "mode": "at_commit"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.verify",
+            "ok": true,
+            "result": {
+              "receipt_id": "receipt-text-29",
+              "mode": "at_commit",
+              "outcome": "passed",
+              "marker": {
+                "generation": 3,
+                "position": 29
+              },
+              "checks": [
+                {
+                  "name": "text_exact",
+                  "passed": true,
+                  "actual": "30"
+                },
+                {
+                  "name": "marks",
+                  "passed": true,
+                  "actual": [
+                    "bold"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "acl_revoked",
+      "events": [
+        {
+          "before_step": 1,
+          "type": "seed_text",
+          "details": {
+            "resource_id": "contract-17",
+            "marker": {
+              "generation": 3,
+              "position": 27
+            },
+            "p42_segments": [
+              {
+                "text": "Покупатель оплачивает счёт в течение ",
+                "marks": []
+              },
+              {
+                "text": "15",
+                "marks": [
+                  "bold"
+                ]
+              },
+              {
+                "text": " рабочих дней.",
+                "marks": []
+              }
+            ],
+            "p71_text": "Срок рассмотрения претензии — 10 рабочих дней."
+          }
+        },
+        {
+          "before_step": 3,
+          "type": "revoke_access",
+          "details": {
+            "resource_id": "contract-17",
+            "subject": "requester",
+            "permissions": [
+              "read",
+              "edit"
+            ]
+          }
+        }
+      ],
+      "steps": [
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "contract-17",
+              "selector": {
+                "kind": "text_block",
+                "block_id": "p42"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 3,
+                "position": 27
+              },
+              "read_token": "rt-text-27",
+              "data": {
+                "kind": "text_block",
+                "block_id": "p42",
+                "segments": [
+                  {
+                    "text": "Покупатель оплачивает счёт в течение ",
+                    "marks": []
+                  },
+                  {
+                    "text": "15",
+                    "marks": [
+                      "bold"
+                    ]
+                  },
+                  {
+                    "text": " рабочих дней.",
+                    "marks": []
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.prepare",
+            "input": {
+              "resource_id": "contract-17",
+              "command": "text.replace_exact@1",
+              "read_token": "rt-text-27",
+              "arguments": {
+                "block_id": "p42",
+                "expected": "15",
+                "replacement": "30"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.prepare",
+            "ok": true,
+            "result": {
+              "proposal_id": "proposal-text-1",
+              "base": {
+                "generation": 3,
+                "position": 27
+              },
+              "approval": "automatic",
+              "summary": "В пункте 4.2 заменить «15» на «30»",
+              "targets": [
+                "p42"
+              ],
+              "expires_at": "2026-11-21T12:00:00Z",
+              "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847"
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.commit",
+            "input": {
+              "resource_id": "contract-17",
+              "command_id": "edit-1",
+              "proposal_id": "proposal-text-1",
+              "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.commit",
+            "ok": false,
+            "error": {
+              "code": "resource_unavailable",
+              "retryable": false,
+              "next_action": "stop"
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.status",
+            "input": {
+              "resource_id": "contract-17",
+              "command_id": "edit-1"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.status",
+            "ok": false,
+            "error": {
+              "code": "resource_unavailable",
+              "retryable": false,
+              "next_action": "stop"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "text_conflict",
+      "events": [
+        {
+          "before_step": 1,
+          "type": "seed_text",
+          "details": {
+            "resource_id": "contract-17",
+            "marker": {
+              "generation": 3,
+              "position": 27
+            },
+            "p42_segments": [
+              {
+                "text": "Покупатель оплачивает счёт в течение ",
+                "marks": []
+              },
+              {
+                "text": "15",
+                "marks": [
+                  "bold"
+                ]
+              },
+              {
+                "text": " рабочих дней.",
+                "marks": []
+              }
+            ],
+            "p71_text": "Срок рассмотрения претензии — 10 рабочих дней."
+          }
+        },
+        {
+          "before_step": 3,
+          "type": "human_edits_block",
+          "details": {
+            "resource_id": "contract-17",
+            "block_id": "p42",
+            "replace": {
+              "expected": "рабочих",
+              "replacement": "календарных"
+            },
+            "marker": {
+              "generation": 3,
+              "position": 28
+            }
+          }
+        }
+      ],
+      "steps": [
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.read",
+            "input": {
+              "resource_id": "contract-17",
+              "selector": {
+                "kind": "text_block",
+                "block_id": "p42"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.read",
+            "ok": true,
+            "result": {
+              "marker": {
+                "generation": 3,
+                "position": 27
+              },
+              "read_token": "rt-text-27",
+              "data": {
+                "kind": "text_block",
+                "block_id": "p42",
+                "segments": [
+                  {
+                    "text": "Покупатель оплачивает счёт в течение ",
+                    "marks": []
+                  },
+                  {
+                    "text": "15",
+                    "marks": [
+                      "bold"
+                    ]
+                  },
+                  {
+                    "text": " рабочих дней.",
+                    "marks": []
+                  }
+                ]
+              },
+              "truncated": false,
+              "next_cursor": null
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.prepare",
+            "input": {
+              "resource_id": "contract-17",
+              "command": "text.replace_exact@1",
+              "read_token": "rt-text-27",
+              "arguments": {
+                "block_id": "p42",
+                "expected": "15",
+                "replacement": "30"
+              }
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.prepare",
+            "ok": true,
+            "result": {
+              "proposal_id": "proposal-text-1",
+              "base": {
+                "generation": 3,
+                "position": 27
+              },
+              "approval": "automatic",
+              "summary": "В пункте 4.2 заменить «15» на «30»",
+              "targets": [
+                "p42"
+              ],
+              "expires_at": "2026-11-21T12:00:00Z",
+              "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847"
+            }
+          }
+        },
+        {
+          "request": {
+            "version": 1,
+            "operation": "office.commit",
+            "input": {
+              "resource_id": "contract-17",
+              "command_id": "edit-1",
+              "proposal_id": "proposal-text-1",
+              "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847"
+            }
+          },
+          "response": {
+            "version": 1,
+            "operation": "office.commit",
+            "ok": false,
+            "error": {
+              "code": "precondition_failed",
+              "retryable": false,
+              "next_action": "reread"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

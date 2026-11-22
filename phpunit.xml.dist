@@ -7,20 +7,39 @@
          failOnEmptyTestSuite="false"
 >
     <testsuites>
+        <testsuite name="core">
+            <directory>packages/core/tests</directory>
+        </testsuite>
+        <testsuite name="documents">
+            <directory>packages/documents/tests</directory>
+        </testsuite>
         <testsuite name="repo">
             <directory>tests</directory>
+            <exclude>tests/Support</exclude>
+            <exclude>tests/Fixtures</exclude>
         </testsuite>
     </testsuites>
 
     <source>
         <include>
-            <directory>packages</directory>
+            <directory>packages/core/src</directory>
+            <directory>packages/documents/src</directory>
         </include>
     </source>
 
     <php>
+        <env name="APP_KEY" value="base64:tJ4mVwShl8LETWdRtTCwcoKS7MS2ipekchk9seHrIVc="/>
         <ini name="memory_limit" value="1G"/>
         <env name="APP_ENV" value="testing"/>
-        <env name="DB_CONNECTION" value="pgsql"/>
+        <env name="DB_CONNECTION" value="sqlite"/>
+        <env name="DB_DATABASE" value=":memory:"/>
+        <env name="CACHE_STORE" value="array"/>
+        <env name="CACHE_DRIVER" value="array"/>
+        <env name="QUEUE_CONNECTION" value="sync"/>
+        <env name="PGSQL_HOST" value="127.0.0.1"/>
+        <env name="PGSQL_PORT" value="54329"/>
+        <env name="PGSQL_DATABASE" value="vaulter_ai_test"/>
+        <env name="PGSQL_USERNAME" value="vaulter"/>
+        <env name="PGSQL_PASSWORD" value="vaulter"/>
     </php>
 </phpunit>

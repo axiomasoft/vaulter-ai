@@ -1,14 +1,63 @@
-# Root scaffold. Package trees arrive in later waves; until then there is no PHP under this root.
-# Vendor extensions are intentionally not included: nothing is installed yet.
+includes:
+    - vendor/larastan/larastan/extension.neon
+    - vendor/phpstan/phpstan-strict-rules/rules.neon
+    - vendor/spaze/phpstan-disallowed-calls/extension.neon
+
+rules:
+    - Vaulter\Ai\Ci\VaulterAiSqlStopRail
 
 parameters:
     level: max
     tmpDir: build/phpstan
     paths:
-        - .
+        - packages/core/src
+        - packages/core/database
+        - packages/documents/src
+        - packages/documents/database
     excludePaths:
         - vendor/*
         - node_modules/*
         - .github/*
         - release/*
+        - build/*
     inferPrivatePropertyTypeFromConstructor: true
+
+    disallowedStaticCalls:
+        -
+            method: 'Illuminate\Support\Facades\DB::transaction()'
+            message: 'Use VaulterDatabase::transaction() or OfficeDatabase::transaction().'
+
+    disallowedMethodCalls:
+        -
+            method: 'Illuminate\Database\Connection::transaction()'
+            message: 'Use VaulterDatabase::transaction() or OfficeDatabase::transaction().'
+            allowIn:
+                - packages/core/src/Persistence/OfficeDatabase.php
+        -
+            method: 'Illuminate\Database\ConnectionInterface::transaction()'
+            message: 'Use VaulterDatabase::transaction() or OfficeDatabase::transaction().'
+            allowIn:
+                - packages/core/src/Persistence/OfficeDatabase.php
+        -
+            method: 'ZipArchive::extractTo()'
+            message: 'Inspect a bounded ZIP directory before reading entries.'
+
+    disallowedFunctionCalls:
+        -
+            function: 'parse_url()'
+            message: 'Use purpose-specific URL validation.'
+        -
+            function: 'env()'
+            message: 'Read environment variables from configuration files.'
+            allowIn:
+                - '*/config/*.php'
+
+    disallowedNamespaces:
+        -
+            class: 'Illuminate\Foundation\Http\Middleware\VerifyCsrfToken'
+            message: 'Use Laravel 13 PreventRequestForgery.'
+
+    disallowedConstants:
+        -
+            constant: CURLOPT_RESOLVE
+            message: 'Pin connections explicitly without CURLOPT_RESOLVE.'
