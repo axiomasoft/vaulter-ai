@@ -23,3 +23,7 @@ __pycache__/
 /coverage/
 /coverage.xml
 /clover.xml
+
+# Consumer stand ephemeral run state
+/tests/consumers/office/.fixture/
+!/tests/consumers/office/.env.example

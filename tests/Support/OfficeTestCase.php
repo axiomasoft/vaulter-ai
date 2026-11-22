@@ -5,15 +5,23 @@ declare(strict_types=1);
 namespace Vaulter\Ai\Tests\Support;
 
 use Illuminate\Foundation\Application;
+use Laravel\Ai\AiServiceProvider;
 use Orchestra\Testbench\TestCase as OrchestraTestCase;
+use Vaulter\Ai\AgenTools\AgenToolsServiceProvider;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\OfficeServiceProvider;
+use Vaulter\Ai\Core\Operations\Commit;
 use Vaulter\Ai\Core\Operations\Describe;
 use Vaulter\Ai\Core\Operations\DispatchOfficeOperation;
+use Vaulter\Ai\Core\Operations\Prepare;
 use Vaulter\Ai\Core\Operations\Read;
+use Vaulter\Ai\Core\Operations\Status;
+use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
+use Vaulter\Ai\Core\Operations\Verify;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Documents\DocumentsAiServiceProvider;
+use Vaulter\Ai\LaravelAi\LaravelAiServiceProvider;
 use Vaulter\Documents\VaulterDocumentsServiceProvider;
 use Vaulter\Drive\VaulterDriveServiceProvider;
 use Vaulter\Media\VaulterMediaServiceProvider;
@@ -23,7 +31,7 @@ use Vaulter\Testing\Support\SuiteDatabaseConnection;
 use Vaulter\VaulterServiceProvider;
 
 /**
- * Shared Testbench harness booting Vaulter Core/Media/Drive/Documents and AI Core/Documents
+ * Shared Testbench harness booting Vaulter Core/Media/Drive/Documents and AI packages
  * across SQLite (:memory:) and PostgreSQL 18.
  */
 abstract class OfficeTestCase extends OrchestraTestCase
@@ -34,6 +42,10 @@ abstract class OfficeTestCase extends OrchestraTestCase
     protected bool $bootVaulterDomain = true;
 
     protected bool $bootDocumentsAi = true;
+
+    protected bool $bootLaravelAi = false;
+
+    protected bool $bootAgenTools = false;
 
     protected FixedClock $fixedClock;
 
@@ -61,6 +73,15 @@ abstract class OfficeTestCase extends OrchestraTestCase
 
         if ($this->bootDocumentsAi && $this->bootVaulterDomain) {
             $providers[] = DocumentsAiServiceProvider::class;
+        }
+
+        if ($this->bootLaravelAi) {
+            $providers[] = AiServiceProvider::class;
+            $providers[] = LaravelAiServiceProvider::class;
+        }
+
+        if ($this->bootAgenTools) {
+            $providers[] = AgenToolsServiceProvider::class;
         }
 
         return $providers;
@@ -103,8 +124,13 @@ abstract class OfficeTestCase extends OrchestraTestCase
         $this->app->instance(OfficeRegistry::class, $registry);
         $this->app->forgetInstance(Read::class);
         $this->app->forgetInstance(Describe::class);
+        $this->app->forgetInstance(Prepare::class);
+        $this->app->forgetInstance(Commit::class);
+        $this->app->forgetInstance(Status::class);
+        $this->app->forgetInstance(Verify::class);
         $this->app->forgetInstance(DispatchOfficeOperation::class);
         $this->app->forgetInstance(Office::class);
+        $this->app->forgetInstance(StepCommitCoordinator::class);
 
         return $registry;
     }

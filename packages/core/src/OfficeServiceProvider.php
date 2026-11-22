@@ -19,11 +19,14 @@ use Vaulter\Ai\Core\Operations\Describe;
 use Vaulter\Ai\Core\Operations\DispatchOfficeOperation;
 use Vaulter\Ai\Core\Operations\Read;
 use Vaulter\Ai\Core\Operations\Search;
+use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
 use Vaulter\Ai\Core\Persistence\ConfigHostPolicy;
 use Vaulter\Ai\Core\Persistence\DefaultTransactionRunner;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\PayloadCipher;
+use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\ReadTokens;
+use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Persistence\SearchPages;
 use Vaulter\Ai\Core\Persistence\SystemClock;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
@@ -63,6 +66,8 @@ final class OfficeServiceProvider extends ServiceProvider
         $this->app->singleton(OfficeCoreSchema::class);
         $this->app->singleton(SearchPages::class);
         $this->app->singleton(ReadTokens::class);
+        $this->app->singleton(Proposals::class);
+        $this->app->singleton(Runs::class);
 
         $this->app->singleton(HostPolicy::class, ConfigHostPolicy::class);
         $this->app->singleton(CallContextResolver::class, NullCallContextResolver::class);
@@ -71,6 +76,7 @@ final class OfficeServiceProvider extends ServiceProvider
         $this->app->singleton(Read::class);
         $this->app->singleton(Describe::class);
         $this->app->singleton(Office::class, DispatchOfficeOperation::class);
+        $this->app->singleton(StepCommitCoordinator::class);
     }
 
     public function boot(): void

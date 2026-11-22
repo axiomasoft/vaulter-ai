@@ -1,0 +1,11 @@
+# Browser smoke runtime pinned to Node >= 26.13.1 LTS with mandatory libatomic1 (engineering standards).
+FROM node:26.13.1-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 ca-certificates \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN node -e "process.exit(0)"
+
+WORKDIR /work

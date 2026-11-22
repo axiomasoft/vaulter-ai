@@ -22,7 +22,19 @@
                 "symlink": true,
                 "versions": {
                     "axiomasoft/vaulter-ai-core": "1.0.x-dev",
-                    "axiomasoft/vaulter-ai-documents": "1.0.x-dev"
+                    "axiomasoft/vaulter-ai-documents": "1.0.x-dev",
+                    "axiomasoft/vaulter-ai-laravel-ai": "1.0.x-dev",
+                    "axiomasoft/vaulter-ai-agentools": "1.0.x-dev"
+                }
+            }
+        },
+        {
+            "type": "path",
+            "url": "../agentools/php",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "agentools/sdk": "1.0.x-dev"
                 }
             }
         },
@@ -56,8 +68,10 @@
     ],
     "require": {
         "php": ">=8.4 <8.6",
+        "axiomasoft/vaulter-ai-agentools": "^1.0",
         "axiomasoft/vaulter-ai-core": "^1.0",
-        "axiomasoft/vaulter-ai-documents": "^1.0"
+        "axiomasoft/vaulter-ai-documents": "^1.0",
+        "axiomasoft/vaulter-ai-laravel-ai": "^1.0"
     },
     "require-dev": {
         "axiomasoft/vaulter-media": "^1.0",
@@ -76,7 +90,9 @@
             "Vaulter\\Ai\\Ci\\": "scripts/ci/",
             "Vaulter\\Ai\\Tests\\": "tests/",
             "Vaulter\\Ai\\Core\\Tests\\": "packages/core/tests/",
-            "Vaulter\\Ai\\Documents\\Tests\\": "packages/documents/tests/"
+            "Vaulter\\Ai\\Documents\\Tests\\": "packages/documents/tests/",
+            "Vaulter\\Ai\\LaravelAi\\Tests\\": "packages/laravel-ai/tests/",
+            "Vaulter\\Ai\\AgenTools\\Tests\\": "packages/agentools/tests/"
         }
     },
     "extra": {

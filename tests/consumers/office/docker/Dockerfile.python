@@ -1,0 +1,12 @@
+# Isolated remote Python OfficeClient test container (no PG credentials, no APP_KEY, no LLM secrets).
+FROM python:3.13-slim
+
+WORKDIR /client
+
+COPY clients/python /client/python_pkg
+COPY tests/remote_client.py /client/tests/remote_client.py
+
+ENV PYTHONPATH=/client/python_pkg
+ENV PYTHONDONTWRITEBYTECODE=1
+
+CMD ["python3", "-m", "unittest", "discover", "-s", "/client/tests", "-p", "remote_client.py"]

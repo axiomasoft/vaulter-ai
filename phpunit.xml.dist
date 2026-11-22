@@ -13,10 +13,17 @@
         <testsuite name="documents">
             <directory>packages/documents/tests</directory>
         </testsuite>
+        <testsuite name="laravel-ai">
+            <directory>packages/laravel-ai/tests</directory>
+        </testsuite>
+        <testsuite name="agentools">
+            <directory>packages/agentools/tests</directory>
+        </testsuite>
         <testsuite name="repo">
             <directory>tests</directory>
             <exclude>tests/Support</exclude>
             <exclude>tests/Fixtures</exclude>
+            <exclude>tests/consumers</exclude>
         </testsuite>
     </testsuites>
 
@@ -24,6 +31,8 @@
         <include>
             <directory>packages/core/src</directory>
             <directory>packages/documents/src</directory>
+            <directory>packages/laravel-ai/src</directory>
+            <directory>packages/agentools/src</directory>
         </include>
     </source>
 

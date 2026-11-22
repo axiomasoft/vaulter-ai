@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "ai-text": {
+      "description": "Isolated AI SDK core + documents + Laravel AI executor (no AgenTools).",
+      "composer_packages": [
+        "axiomasoft/vaulter-ai-core",
+        "axiomasoft/vaulter-ai-documents",
+        "axiomasoft/vaulter-ai-laravel-ai",
+        "axiomasoft/vaulter",
+        "axiomasoft/vaulter-core",
+        "axiomasoft/vaulter-drive",
+        "axiomasoft/vaulter-documents",
+        "axiomasoft/vaulter-media",
+        "axiomasoft/packman",
+        "axiomasoft/packman-plugins",
+        "axiomasoft/packman-schema"
+      ],
+      "forbidden_packages": [
+        "axiomasoft/vaulter-ai-agentools",
+        "agentools/sdk",
+        "handsontable",
+        "hyperformula",
+        "dunglas/mercure",
+        "minio/minio",
+        "libclamav"
+      ],
+      "required_tables": [
+        "v_ai_runs",
+        "v_ai_run_steps",
+        "v_ai_proposals",
+        "v_ai_owner_routes",
+        "v_ai_text_commands",
+        "v_outbox"
+      ],
+      "images": ["postgres"],
+      "compose_profiles": [],
+      "long_lived_services": [
+        "postgres",
+        "owner-http",
+        "agent-worker",
+        "projection-worker",
+        "scheduler"
+      ],
+      "executor": "laravel-ai",
+      "test_suites": ["laravel-ai", "python-remote"]
+    },
+    "ai-agentools": {
+      "description": "Isolated AI SDK core + documents + AgenTools ToolPort executor.",
+      "composer_packages": [
+        "axiomasoft/vaulter-ai-core",
+        "axiomasoft/vaulter-ai-documents",
+        "axiomasoft/vaulter-ai-agentools",
+        "agentools/sdk",
+        "axiomasoft/vaulter",
+        "axiomasoft/vaulter-core",
+        "axiomasoft/vaulter-drive",
+        "axiomasoft/vaulter-documents",
+        "axiomasoft/vaulter-media",
+        "axiomasoft/packman",
+        "axiomasoft/packman-plugins",
+        "axiomasoft/packman-schema"
+      ],
+      "forbidden_packages": [
+        "axiomasoft/vaulter-ai-laravel-ai",
+        "handsontable",
+        "hyperformula",
+        "dunglas/mercure",
+        "minio/minio",
+        "libclamav"
+      ],
+      "required_tables": [
+        "v_ai_runs",
+        "v_ai_run_steps",
+        "v_ai_proposals",
+        "v_ai_owner_routes",
+        "v_ai_text_commands",
+        "v_outbox"
+      ],
+      "images": ["postgres"],
+      "compose_profiles": [],
+      "long_lived_services": [
+        "postgres",
+        "owner-http",
+        "agent-worker",
+        "projection-worker",
+        "scheduler"
+      ],
+      "executor": "agentools",
+      "test_suites": ["agentools", "python-remote"]
+    }
+  }
+}
