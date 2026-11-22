@@ -13,5 +13,6 @@ final readonly class CommandScope
         public CallContext $context,
         public string $resourceId,
         public string $commandId,
+        public ?string $requestFingerprint = null,
     ) {}
 }

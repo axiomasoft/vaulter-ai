@@ -1,0 +1,54 @@
+{
+  "format": 1,
+  "note": "Shared vectors of text.replace_exact@1 for replace-exact.mjs (ProseMirror) and replace_exact.php (Tiptap JSON). Offsets are UTF-16 code units of the block text (non-text inline leaf = U+FFFC). p-split is deliberately not normalized: two adjacent text nodes with equal marks form one run.",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {"type": "heading", "attrs": {"level": 2, "blockId": "h-terms"}, "content": [{"type": "text", "text": "4. Сроки"}]},
+      {"type": "paragraph", "attrs": {"blockId": "p-terms"}, "content": [
+        {"type": "text", "text": "Оплата: 15 дней 🧾, приёмка: 15 дней — см. "},
+        {"type": "text", "marks": [{"type": "link", "attrs": {"href": "https://example.test/terms?a=1&b=2", "target": null, "rel": null, "class": null}}], "text": "условия"},
+        {"type": "text", "text": "."}
+      ]},
+      {"type": "paragraph", "attrs": {"blockId": "p-code"}, "content": [
+        {"type": "text", "text": "Код 1-1-1, "},
+        {"type": "text", "marks": [{"type": "bold"}], "text": "15"},
+        {"type": "hardBreak"},
+        {"type": "text", "text": "дней"}
+      ]},
+      {"type": "paragraph", "attrs": {"blockId": "p-split"}, "content": [
+        {"type": "text", "text": "Срок 1"},
+        {"type": "text", "text": "5 дней"}
+      ]},
+      {"type": "paragraph", "attrs": {"blockId": "p71"}, "content": [{"type": "text", "text": "Срок рассмотрения претензии — 10 рабочих дней."}]}
+    ]
+  },
+  "cases": [
+    {"id": "unique_after_astral", "args": {"blockId": "p-terms", "expected": "приёмка: 15 дней", "replacement": "приёмка: 10 дней"},
+     "ok": {"start_utf16": 20, "start_code_points": 19, "start_utf8_bytes": 32, "block_text": "Оплата: 15 дней 🧾, приёмка: 10 дней — см. условия.", "segments": [{"text": "Оплата: 15 дней 🧾, приёмка: 10 дней — см. ", "marks": []}, {"text": "условия", "marks": ["link"]}, {"text": ".", "marks": []}]}},
+    {"id": "ambiguous_similar", "args": {"blockId": "p-terms", "expected": "15 дней", "replacement": "10 дней"}, "error": ["invalid_input", "ambiguous_target"]},
+    {"id": "unique_with_astral", "args": {"blockId": "p-terms", "expected": "15 дней 🧾", "replacement": "10 дней 🧾"},
+     "ok": {"start_utf16": 8, "start_code_points": 8, "start_utf8_bytes": 14, "block_text": "Оплата: 10 дней 🧾, приёмка: 15 дней — см. условия.", "segments": [{"text": "Оплата: 10 дней 🧾, приёмка: 15 дней — см. ", "marks": []}, {"text": "условия", "marks": ["link"]}, {"text": ".", "marks": []}]}},
+    {"id": "inside_link_keeps_href", "args": {"blockId": "p-terms", "expected": "условия", "replacement": "условия договора"},
+     "ok": {"start_utf16": 43, "start_code_points": 42, "start_utf8_bytes": 70, "block_text": "Оплата: 15 дней 🧾, приёмка: 15 дней — см. условия договора.", "segments": [{"text": "Оплата: 15 дней 🧾, приёмка: 15 дней — см. ", "marks": []}, {"text": "условия договора", "marks": ["link"]}, {"text": ".", "marks": []}]}},
+    {"id": "crosses_link", "args": {"blockId": "p-terms", "expected": "см. условия", "replacement": "см. правила"}, "error": ["unsupported_content", "crosses_formatting_or_inline"]},
+    {"id": "deletion", "args": {"blockId": "p-terms", "expected": ", приёмка: 15 дней", "replacement": ""},
+     "ok": {"start_utf16": 18, "start_code_points": 17, "start_utf8_bytes": 30, "block_text": "Оплата: 15 дней 🧾 — см. условия.", "segments": [{"text": "Оплата: 15 дней 🧾 — см. ", "marks": []}, {"text": "условия", "marks": ["link"]}, {"text": ".", "marks": []}]}},
+    {"id": "overlapping_ambiguity", "args": {"blockId": "p-code", "expected": "1-1", "replacement": "2-2"}, "error": ["invalid_input", "ambiguous_target"]},
+    {"id": "bold_kept", "args": {"blockId": "p-code", "expected": "15", "replacement": "30"},
+     "ok": {"start_utf16": 11, "start_code_points": 11, "start_utf8_bytes": 14, "block_text": "Код 1-1-1, 30\uFFFCдней", "segments": [{"text": "Код 1-1-1, ", "marks": []}, {"text": "30", "marks": ["bold"]}, {"text": "\uFFFC", "marks": []}, {"text": "дней", "marks": []}]}},
+    {"id": "crosses_bold", "args": {"blockId": "p-code", "expected": ", 15", "replacement": ", 30"}, "error": ["unsupported_content", "crosses_formatting_or_inline"]},
+    {"id": "across_hard_break", "args": {"blockId": "p-code", "expected": "15дней", "replacement": "30дней"}, "error": ["precondition_failed", "expected_absent"]},
+    {"id": "leaf_placeholder_in_argument", "args": {"blockId": "p-code", "expected": "15\uFFFCдней", "replacement": "30"}, "error": ["invalid_input", "invalid_arguments"]},
+    {"id": "unnormalized_runs", "args": {"blockId": "p-split", "expected": "15", "replacement": "30"},
+     "ok": {"start_utf16": 5, "start_code_points": 5, "start_utf8_bytes": 9, "block_text": "Срок 30 дней", "segments": [{"text": "Срок 30 дней", "marks": []}]}},
+    {"id": "missing_block", "args": {"blockId": "p-none", "expected": "15", "replacement": "30"}, "error": ["precondition_failed", "block_missing"]},
+    {"id": "heading_target", "args": {"blockId": "h-terms", "expected": "Сроки", "replacement": "Сроки оплаты"},
+     "ok": {"start_utf16": 3, "start_code_points": 3, "start_utf8_bytes": 3, "block_text": "4. Сроки оплаты", "segments": [{"text": "4. Сроки оплаты", "marks": []}]}}
+  ],
+  "commit_after": [
+    {"id": "neighbour_block_edited", "case": "unique_after_astral", "edit": {"blockId": "p71", "expected": "10", "replacement": "12"}, "result": "ok"},
+    {"id": "first_similar_edited", "case": "unique_after_astral", "edit": {"blockId": "p-terms", "expected": "15 дней 🧾", "replacement": "20 дней 🧾"}, "result": ["precondition_failed", "target_changed"]},
+    {"id": "link_href_changed", "case": "unique_after_astral", "set_link_href": "https://example.test/other", "result": ["precondition_failed", "target_changed"]}
+  ]
+}

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vaulter\Ai\Documents\Schema;
 
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Arr;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Configuration\DatabaseOptions;
 use Vaulter\Database\VaulterDatabase;
@@ -59,7 +60,7 @@ final readonly class AiDocumentsSchema
             $table->string('effective_subject', 255);
             $ids->reference($table, 'resource_id');
             $ids->reference($table, 'document_id', nullable: true);
-            $table->getColumns()[array_key_last($table->getColumns())]->index(false);
+            Arr::last($table->getColumns())?->index(false);
             $table->string('command_id', 255);
 
             if ($driver === 'pgsql') {
@@ -126,7 +127,7 @@ final readonly class AiDocumentsSchema
             HostKeyColumns::add($table, 'tenant_id', nullable: false, index: false);
             $table->string('project_scope', 255);
             $ids->reference($table, 'document_id');
-            $table->getColumns()[array_key_last($table->getColumns())]->index(false);
+            Arr::last($table->getColumns())?->index(false);
 
             $table->bigInteger('source_generation');
             $table->bigInteger('source_position');
@@ -152,7 +153,7 @@ final readonly class AiDocumentsSchema
             HostKeyColumns::add($table, 'tenant_id', nullable: false, index: false);
             $table->string('project_scope', 255);
             $ids->reference($table, 'document_id');
-            $table->getColumns()[array_key_last($table->getColumns())]->index(false);
+            Arr::last($table->getColumns())?->index(false);
 
             $table->bigInteger('source_generation');
             if ($driver === 'pgsql') {

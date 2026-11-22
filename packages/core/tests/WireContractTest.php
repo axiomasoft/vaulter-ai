@@ -23,6 +23,7 @@ use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Enums\ResourceType;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Protocol\ProposalDigest;
+use Vaulter\Ai\Core\Protocol\RequestFingerprint;
 use Vaulter\Ai\Core\Protocol\WireValidator;
 use Vaulter\Ai\Tests\Support\InMemoryResourceDirectory;
 use Vaulter\Ai\Tests\Support\OfficeTestCase;
@@ -115,6 +116,36 @@ test('ProposalDigest matches office-sdk.json and RFC 8785 JCS edge vectors', fun
         ->toThrow(InvalidArgumentException::class);
     expect(static fn (): string => ProposalDigest::canonicalize((object) ['n' => 9007199254740992]))
         ->toThrow(InvalidArgumentException::class);
+});
+
+test('production ProposalDigest agrees with all pinned JCS and prepare exchange vectors', function (): void {
+    $raw = file_get_contents(dirname(__DIR__, 3).'/tests/Fixtures/proposal-digest-vectors.json');
+    expect(hash('sha256', $raw))->toBe('eb9b52791f5e525fe6d2c61e33b4528baa98ea13fe6b15d18c0a19963df540e8');
+    $vectors = json_decode($raw, false, 512, JSON_THROW_ON_ERROR);
+    expect($vectors->jcs)->toHaveCount(16)->and($vectors->proposals)->toHaveCount(5);
+    foreach ($vectors->jcs as $case) {
+        if ($case->profile === 'reject') {
+            try {
+                ProposalDigest::canonicalize(json_decode($case->input_json, false, 512, JSON_THROW_ON_ERROR));
+                $this->fail("Accepted {$case->id} outside the v1 profile.");
+            } catch (InvalidArgumentException|JsonException) {
+                continue;
+            }
+        }
+        $encoded = ProposalDigest::canonicalize(json_decode($case->input_json, false, 512, JSON_THROW_ON_ERROR));
+        expect($encoded)->toBe($case->jcs, $case->id)
+            ->and(bin2hex($encoded))->toBe($case->utf8_hex)
+            ->and(hash('sha256', $encoded))->toBe($case->sha256);
+        if ($case->id === 'request_fingerprint_text_success') {
+            $request = json_decode($case->input_json, false, 512, JSON_THROW_ON_ERROR);
+            expect(bin2hex(RequestFingerprint::of($request->command, $request->proposal_id, $request->digest)))->toBe($case->sha256);
+        }
+    }
+    foreach ($vectors->proposals as $case) {
+        expect(ProposalDigest::digest($case->prepare_request->input, $case->prepare_response->result))->toBe($case->digest)
+            ->and(ProposalDigest::canonicalize(json_decode($case->permuted_record_json, false, 512, JSON_THROW_ON_ERROR)))
+            ->toBe($case->canonical_record);
+    }
 });
 
 test('HTTP enforces all three transport boundaries and rejects body authority injection', function (): void {

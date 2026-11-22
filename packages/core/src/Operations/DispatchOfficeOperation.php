@@ -24,6 +24,10 @@ final readonly class DispatchOfficeOperation implements Office
         private Search $search,
         private Read $read,
         private Describe $describe,
+        private Prepare $prepare,
+        private Commit $commit,
+        private Status $status,
+        private Verify $verify,
         private WireErrorMapper $errorMapper,
     ) {}
 
@@ -47,10 +51,10 @@ final readonly class DispatchOfficeOperation implements Office
                 OfficeOperation::Search => $this->search->handle($context, $request),
                 OfficeOperation::Read => $this->read->handle($context, $request),
                 OfficeOperation::Describe => $this->describe->handle($context, $request),
-                OfficeOperation::Prepare,
-                OfficeOperation::Commit,
-                OfficeOperation::Status,
-                OfficeOperation::Verify => throw OfficeException::operationUnknown(),
+                OfficeOperation::Prepare => $this->prepare->handle($context, $request),
+                OfficeOperation::Commit => $this->commit->handle($context, $request),
+                OfficeOperation::Status => $this->status->handle($context, $request),
+                OfficeOperation::Verify => $this->verify->handle($context, $request),
             };
         } catch (OfficeException $e) {
             return $this->errorMapper->toResponse($request->operation, $e->errorCode, 1);

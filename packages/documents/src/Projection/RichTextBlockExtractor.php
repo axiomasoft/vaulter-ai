@@ -276,7 +276,7 @@ final readonly class RichTextBlockExtractor
     }
 
     /** @param array<mixed> $marks */
-    private static function markSignature(array $marks): string
+    public static function markSignature(array $marks): string
     {
         if ($marks === []) {
             return '';
@@ -294,7 +294,7 @@ final readonly class RichTextBlockExtractor
         return implode("\n", $encoded);
     }
 
-    private static function sortRecursive(mixed $value): mixed
+    public static function sortRecursive(mixed $value): mixed
     {
         if (! is_array($value)) {
             return $value;

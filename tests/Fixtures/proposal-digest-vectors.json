@@ -1,0 +1,366 @@
+{
+ "format": 1,
+ "profile": "Office v1 proposal digest = lowercase hex SHA-256 of the UTF-8 RFC 8785 text of {version:1,prepare_input,plan}; numbers only safe integers by value",
+ "jcs": [
+  {
+   "id": "rfc8785_3_2_2_values",
+   "note": "Published RFC 8785 §3.2.2 example; fractions are outside the v1 digest profile",
+   "input_json": "{\"numbers\":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001],\"string\":\"\\u20ac$\\u000F\\u000aA'\\u0042\\u0022\\u005c\\\\\\\"\\/\",\"literals\":[null,true,false]}",
+   "jcs": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"€$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}",
+   "profile": "reject",
+   "utf8_hex": "7b226c69746572616c73223a5b6e756c6c2c747275652c66616c73655d2c226e756d62657273223a5b3333333333333333332e333333333333332c31652b33302c342e352c302e3030322c31652d32375d2c22737472696e67223a22e282ac245c75303030665c6e4127425c225c5c5c5c5c222f227d",
+   "sha256": "2d5e01a318d0f0879ab568c4be289c8b1f64ef8921a53c6277d5e069978baacb"
+  },
+  {
+   "id": "rfc8785_3_2_3_sorting",
+   "note": "Published RFC 8785 §3.2.3 order: U+1F600 (D83D DE00) before U+FB33",
+   "input_json": "{\"\\u20ac\":\"Euro Sign\",\"\\r\":\"Carriage Return\",\"\\ufb33\":\"Hebrew Letter Dalet With Dagesh\",\"1\":\"One\",\"\\ud83d\\ude00\":\"Emoji: Grinning Face\",\"\\u0080\":\"Control\",\"\\u00f6\":\"Latin Small Letter O With Diaeresis\"}",
+   "jcs": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\":\"Control\",\"ö\":\"Latin Small Letter O With Diaeresis\",\"€\":\"Euro Sign\",\"😀\":\"Emoji: Grinning Face\",\"דּ\":\"Hebrew Letter Dalet With Dagesh\"}",
+   "profile": "accept",
+   "utf8_hex": "7b225c72223a2243617272696167652052657475726e222c2231223a224f6e65222c22c280223a22436f6e74726f6c222c22c3b6223a224c6174696e20536d616c6c204c6574746572204f205769746820446961657265736973222c22e282ac223a224575726f205369676e222c22f09f9880223a22456d6f6a693a204772696e6e696e672046616365222c22efacb3223a22486562726577204c65747465722044616c6574205769746820446167657368227d",
+   "sha256": "5e321556d22018a9656991a9e94f77ec175fa193e52a2429d312f8419ec8b08c"
+  },
+  {
+   "id": "utf16_vs_code_point_order",
+   "note": "UTF-16 puts the astral key before U+E000; code point / UTF-8 byte order (Python sort_keys, PHP ksort/strcmp) puts it last",
+   "input_json": "{\"\\ufb33\":\"FB33\",\"\\ud83d\\ude00\":\"1F600\",\"\\ue000\":\"E000\",\"\\u00e9\":\"E9\",\"a\":\"61\"}",
+   "jcs": "{\"a\":\"61\",\"é\":\"E9\",\"😀\":\"1F600\",\"\":\"E000\",\"דּ\":\"FB33\"}",
+   "profile": "accept",
+   "utf8_hex": "7b2261223a223631222c22c3a9223a224539222c22f09f9880223a223146363030222c22ee8080223a2245303030222c22efacb3223a2246423333227d",
+   "sha256": "8ca2b1a5313c51350da281c9a203d7f1d2c6011c65b3b65c628ceacca44b9ddc"
+  },
+  {
+   "id": "escapes_and_raw_line_separators",
+   "note": "Short escapes, lowercase \\u001f, '/' DEL U+2028 U+2029 and non-ASCII stay raw",
+   "input_json": "{\"s\":\"\\u0000\\b\\t\\n\\f\\r\\u001F\\\"\\\\\\/\\u007f\\u2028\\u2029\\u00e9\\ud83e\\uddfe\"}",
+   "jcs": "{\"s\":\"\\u0000\\b\\t\\n\\f\\r\\u001f\\\"\\\\/  é🧾\"}",
+   "profile": "accept",
+   "utf8_hex": "7b2273223a225c75303030305c625c745c6e5c665c725c75303031665c225c5c2f7fe280a8e280a9c3a9f09fa7be227d",
+   "sha256": "7add1f8d48dc9fd2fa58c034bbcd4e79a030726e0693ebda8c0d2bb96b3f3dc9"
+  },
+  {
+   "id": "safe_integer_max",
+   "note": "2^53-1, schema counter maximum",
+   "input_json": "{\"position\":9007199254740991}",
+   "jcs": "{\"position\":9007199254740991}",
+   "profile": "accept",
+   "utf8_hex": "7b22706f736974696f6e223a393030373139393235343734303939317d",
+   "sha256": "a55b7482692c98792f1f49a3fd663d801f1631e3d3e63238c2bfd8731a92a193"
+  },
+  {
+   "id": "integer_2_pow_53",
+   "note": "Representable double but outside the safe profile",
+   "input_json": "{\"position\":9007199254740992}",
+   "jcs": "{\"position\":9007199254740992}",
+   "profile": "reject",
+   "utf8_hex": "7b22706f736974696f6e223a393030373139393235343734303939327d",
+   "sha256": "0772c1d70dab9f6441925de521a1069986eeb19304adf3beff4808386bffab1a"
+  },
+  {
+   "id": "integer_double_rounding",
+   "note": "JCS works on IEEE doubles: Node yields ...992, exact-int parsers (PHP, Python) would print ...993; the profile rejects",
+   "input_json": "{\"position\":9007199254740993}",
+   "jcs": "{\"position\":9007199254740992}",
+   "profile": "reject",
+   "utf8_hex": "7b22706f736974696f6e223a393030373139393235343734303939327d",
+   "sha256": "0772c1d70dab9f6441925de521a1069986eeb19304adf3beff4808386bffab1a"
+  },
+  {
+   "id": "integral_numbers_by_value",
+   "note": "Value semantics: 27.0 is 27, -0 is 0; mmccook 1.0.0 prints 10.0 as 1",
+   "input_json": "{\"a\":27.0,\"b\":2.7e1,\"c\":-0,\"d\":-0.0,\"e\":1.0000000000000001,\"f\":10.0}",
+   "jcs": "{\"a\":27,\"b\":27,\"c\":0,\"d\":0,\"e\":1,\"f\":10}",
+   "profile": "accept",
+   "utf8_hex": "7b2261223a32372c2262223a32372c2263223a302c2264223a302c2265223a312c2266223a31307d",
+   "sha256": "4bc4aaa56646740f4ab4d479a02fc94541ad9304e98e701ba0bc547ab142f58b"
+  },
+  {
+   "id": "fraction",
+   "note": "Valid JCS, outside the v1 digest profile",
+   "input_json": "{\"n\":1.5}",
+   "jcs": "{\"n\":1.5}",
+   "profile": "reject",
+   "utf8_hex": "7b226e223a312e357d",
+   "sha256": "cb14d55cfe562fd6592d919f5dfacfa8708687b746a1d110c6dd5529c410e772"
+  },
+  {
+   "id": "large_and_small_exponents",
+   "note": "ECMAScript layout; mmccook 1.0.0 prints 1.5e20 as 15",
+   "input_json": "{\"a\":1.5e20,\"b\":1e21,\"c\":1e-7}",
+   "jcs": "{\"a\":150000000000000000000,\"b\":1e+21,\"c\":1e-7}",
+   "profile": "reject",
+   "utf8_hex": "7b2261223a3135303030303030303030303030303030303030302c2262223a31652b32312c2263223a31652d377d",
+   "sha256": "d12cca5d51890936784771701e55872dcedb79e3ca1279867b62f874b7437f42"
+  },
+  {
+   "id": "infinity_literal_overflow",
+   "note": "Overflows to Infinity in every parser",
+   "input_json": "{\"n\":1e400}",
+   "jcs": null,
+   "profile": "reject"
+  },
+  {
+   "id": "lone_surrogate_value",
+   "note": "I-JSON: lone surrogate",
+   "input_json": "{\"s\":\"\\ud800\"}",
+   "jcs": null,
+   "profile": "reject"
+  },
+  {
+   "id": "lone_surrogate_key",
+   "note": "I-JSON: lone surrogate in a member name",
+   "input_json": "{\"\\udc00\":1}",
+   "jcs": null,
+   "profile": "reject"
+  },
+  {
+   "id": "empty_containers",
+   "note": "{} must stay an object: PHP assoc decoding (ContentHasher) turns it into []",
+   "input_json": "{\"c\":[{}],\"b\":[],\"a\":{}}",
+   "jcs": "{\"a\":{},\"b\":[],\"c\":[{}]}",
+   "profile": "accept",
+   "utf8_hex": "7b2261223a7b7d2c2262223a5b5d2c2263223a5b7b7d5d7d",
+   "sha256": "6bcb8f419955b7bfbceaf421fa8b479f85a0ca351ace0d486c1ca4de932b551c"
+  },
+  {
+   "id": "numeric_member_names",
+   "note": "Names are strings: '10' < '2'; PHP assoc + array_is_list turns {\"0\":..,\"1\":..} into a list",
+   "input_json": "{\"o\":{\"1\":\"b\",\"0\":\"a\"},\"p\":{\"2\":\"d\",\"10\":\"c\"}}",
+   "jcs": "{\"o\":{\"0\":\"a\",\"1\":\"b\"},\"p\":{\"10\":\"c\",\"2\":\"d\"}}",
+   "profile": "accept",
+   "utf8_hex": "7b226f223a7b2230223a2261222c2231223a2262227d2c2270223a7b223130223a2263222c2232223a2264227d7d",
+   "sha256": "5cf0a7e001e547bee8c3952bb47afe6fcbcb8c2dea525a836e03598223d77d73"
+  },
+  {
+   "id": "request_fingerprint_text_success",
+   "note": "request_fingerprint input of area 1 (sha256 of this JCS)",
+   "input_json": "{\"proposal_id\":\"proposal-text-1\",\"digest\":\"73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847\",\"command\":\"text.replace_exact@1\"}",
+   "jcs": "{\"command\":\"text.replace_exact@1\",\"digest\":\"73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847\",\"proposal_id\":\"proposal-text-1\"}",
+   "profile": "accept",
+   "utf8_hex": "7b22636f6d6d616e64223a22746578742e7265706c6163655f65786163744031222c22646967657374223a2237336165303635336463376233333931353165323935363239373735633232343339353836326162316362623032363765376330393834393833346537383437222c2270726f706f73616c5f6964223a2270726f706f73616c2d746578742d31227d",
+   "sha256": "961c0d021099ee980f5eb7d0160e9de9ecabbdb18f1e6b0f16084a4fb4a132ca"
+  }
+ ],
+ "proposals": [
+  {
+   "id": "text_success",
+   "note": "office-sdk.json text_success step 5 (Cyrillic, «»)",
+   "prepare_request": {
+    "version": 1,
+    "operation": "office.prepare",
+    "input": {
+     "resource_id": "contract-17",
+     "command": "text.replace_exact@1",
+     "read_token": "rt-text-27",
+     "arguments": {
+      "block_id": "p42",
+      "expected": "15",
+      "replacement": "30"
+     }
+    }
+   },
+   "prepare_response": {
+    "version": 1,
+    "operation": "office.prepare",
+    "ok": true,
+    "result": {
+     "proposal_id": "proposal-text-1",
+     "base": {
+      "generation": 3,
+      "position": 27
+     },
+     "approval": "automatic",
+     "summary": "В пункте 4.2 заменить «15» на «30»",
+     "targets": [
+      "p42"
+     ],
+     "expires_at": "2026-11-21T12:00:00Z",
+     "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847"
+    }
+   },
+   "canonical_record": "{\"plan\":{\"approval\":\"automatic\",\"base\":{\"generation\":3,\"position\":27},\"expires_at\":\"2026-11-21T12:00:00Z\",\"proposal_id\":\"proposal-text-1\",\"summary\":\"В пункте 4.2 заменить «15» на «30»\",\"targets\":[\"p42\"]},\"prepare_input\":{\"arguments\":{\"block_id\":\"p42\",\"expected\":\"15\",\"replacement\":\"30\"},\"command\":\"text.replace_exact@1\",\"read_token\":\"rt-text-27\",\"resource_id\":\"contract-17\"},\"version\":1}",
+   "utf8_hex": "7b22706c616e223a7b22617070726f76616c223a226175746f6d61746963222c2262617365223a7b2267656e65726174696f6e223a332c22706f736974696f6e223a32377d2c22657870697265735f6174223a22323032362d31312d32315431323a30303a30305a222c2270726f706f73616c5f6964223a2270726f706f73616c2d746578742d31222c2273756d6d617279223a22d09220d0bfd183d0bdd0bad182d0b520342e3220d0b7d0b0d0bcd0b5d0bdd0b8d182d18c20c2ab3135c2bb20d0bdd0b020c2ab3330c2bb222c2274617267657473223a5b22703432225d7d2c22707265706172655f696e707574223a7b22617267756d656e7473223a7b22626c6f636b5f6964223a22703432222c226578706563746564223a223135222c227265706c6163656d656e74223a223330227d2c22636f6d6d616e64223a22746578742e7265706c6163655f65786163744031222c22726561645f746f6b656e223a2272742d746578742d3237222c227265736f757263655f6964223a22636f6e74726163742d3137227d2c2276657273696f6e223a317d",
+   "digest": "73ae0653dc7b339151e295629775c224395862ab1cbb0267e7c09849834e7847",
+   "permuted_record_json": "{\"plan\": {\"expires_at\": \"2026-11-21T12:00:00Z\", \"targets\": [\"p42\"], \"summary\": \"В пункте 4.2 заменить «15» на «30»\", \"approval\": \"automatic\", \"base\": {\"position\": 27, \"generation\": 3}, \"proposal_id\": \"proposal-text-1\"}, \"prepare_input\": {\"arguments\": {\"replacement\": \"30\", \"expected\": \"15\", \"block_id\": \"p42\"}, \"read_token\": \"rt-text-27\", \"command\": \"text.replace_exact@1\", \"resource_id\": \"contract-17\"}, \"version\": 1}"
+  },
+  {
+   "id": "sheet_fixed_members",
+   "note": "office-sdk.json sheet_fixed_members step 3",
+   "prepare_request": {
+    "version": 1,
+    "operation": "office.prepare",
+    "input": {
+     "resource_id": "budget-8",
+     "command": "sheet.fill_formula@1",
+     "read_token": "rt-budget-selected-11",
+     "arguments": {
+      "sheet_id": "expenses",
+      "table_id": "costs",
+      "scope": "fixed_members",
+      "destination_column_id": "delta",
+      "expression": {
+       "op": "subtract",
+       "left_column_id": "actual",
+       "right_column_id": "plan"
+      }
+     }
+    }
+   },
+   "prepare_response": {
+    "version": 1,
+    "operation": "office.prepare",
+    "ok": true,
+    "result": {
+     "proposal_id": "proposal-fixed-1",
+     "base": {
+      "generation": 1,
+      "position": 11
+     },
+     "approval": "automatic",
+     "summary": "Записать формулы в 2 выбранные строки",
+     "targets": [
+      "r-telecom",
+      "r-travel"
+     ],
+     "expires_at": "2026-11-21T12:00:00Z",
+     "digest": "7baa6a2e4c7f8e96d3249b68cac5f1a80332bf61ad892fa09b32f9c05bf9c637"
+    }
+   },
+   "canonical_record": "{\"plan\":{\"approval\":\"automatic\",\"base\":{\"generation\":1,\"position\":11},\"expires_at\":\"2026-11-21T12:00:00Z\",\"proposal_id\":\"proposal-fixed-1\",\"summary\":\"Записать формулы в 2 выбранные строки\",\"targets\":[\"r-telecom\",\"r-travel\"]},\"prepare_input\":{\"arguments\":{\"destination_column_id\":\"delta\",\"expression\":{\"left_column_id\":\"actual\",\"op\":\"subtract\",\"right_column_id\":\"plan\"},\"scope\":\"fixed_members\",\"sheet_id\":\"expenses\",\"table_id\":\"costs\"},\"command\":\"sheet.fill_formula@1\",\"read_token\":\"rt-budget-selected-11\",\"resource_id\":\"budget-8\"},\"version\":1}",
+   "utf8_hex": "7b22706c616e223a7b22617070726f76616c223a226175746f6d61746963222c2262617365223a7b2267656e65726174696f6e223a312c22706f736974696f6e223a31317d2c22657870697265735f6174223a22323032362d31312d32315431323a30303a30305a222c2270726f706f73616c5f6964223a2270726f706f73616c2d66697865642d31222c2273756d6d617279223a22d097d0b0d0bfd0b8d181d0b0d182d18c20d184d0bed180d0bcd183d0bbd18b20d0b2203220d0b2d18bd0b1d180d0b0d0bdd0bdd18bd0b520d181d182d180d0bed0bad0b8222c2274617267657473223a5b22722d74656c65636f6d222c22722d74726176656c225d7d2c22707265706172655f696e707574223a7b22617267756d656e7473223a7b2264657374696e6174696f6e5f636f6c756d6e5f6964223a2264656c7461222c2265787072657373696f6e223a7b226c6566745f636f6c756d6e5f6964223a2261637475616c222c226f70223a227375627472616374222c2272696768745f636f6c756d6e5f6964223a22706c616e227d2c2273636f7065223a2266697865645f6d656d62657273222c2273686565745f6964223a22657870656e736573222c227461626c655f6964223a22636f737473227d2c22636f6d6d616e64223a2273686565742e66696c6c5f666f726d756c614031222c22726561645f746f6b656e223a2272742d6275646765742d73656c65637465642d3131222c227265736f757263655f6964223a226275646765742d38227d2c2276657273696f6e223a317d",
+   "digest": "7baa6a2e4c7f8e96d3249b68cac5f1a80332bf61ad892fa09b32f9c05bf9c637",
+   "permuted_record_json": "{\"plan\": {\"expires_at\": \"2026-11-21T12:00:00Z\", \"targets\": [\"r-telecom\", \"r-travel\"], \"summary\": \"Записать формулы в 2 выбранные строки\", \"approval\": \"automatic\", \"base\": {\"position\": 11, \"generation\": 1}, \"proposal_id\": \"proposal-fixed-1\"}, \"prepare_input\": {\"arguments\": {\"expression\": {\"right_column_id\": \"plan\", \"left_column_id\": \"actual\", \"op\": \"subtract\"}, \"destination_column_id\": \"delta\", \"scope\": \"fixed_members\", \"table_id\": \"costs\", \"sheet_id\": \"expenses\"}, \"read_token\": \"rt-budget-selected-11\", \"command\": \"sheet.fill_formula@1\", \"resource_id\": \"budget-8\"}, \"version\": 1}"
+  },
+  {
+   "id": "sheet_current_rows_retry",
+   "note": "office-sdk.json sheet_current_rows step 6 (three rows)",
+   "prepare_request": {
+    "version": 1,
+    "operation": "office.prepare",
+    "input": {
+     "resource_id": "budget-8",
+     "command": "sheet.fill_formula@1",
+     "read_token": "rt-budget-12",
+     "arguments": {
+      "sheet_id": "expenses",
+      "table_id": "costs",
+      "scope": "current_rows",
+      "destination_column_id": "delta",
+      "expression": {
+       "op": "subtract",
+       "left_column_id": "actual",
+       "right_column_id": "plan"
+      }
+     }
+    }
+   },
+   "prepare_response": {
+    "version": 1,
+    "operation": "office.prepare",
+    "ok": true,
+    "result": {
+     "proposal_id": "proposal-current-2",
+     "base": {
+      "generation": 1,
+      "position": 12
+     },
+     "approval": "automatic",
+     "summary": "Записать формулы во все 3 строки",
+     "targets": [
+      "r-telecom",
+      "r-telecom2",
+      "r-travel"
+     ],
+     "expires_at": "2026-11-21T12:00:00Z",
+     "digest": "06bd19906a6fa339792d64a369c48f12616463970598e4e7ab30e3164225f967"
+    }
+   },
+   "canonical_record": "{\"plan\":{\"approval\":\"automatic\",\"base\":{\"generation\":1,\"position\":12},\"expires_at\":\"2026-11-21T12:00:00Z\",\"proposal_id\":\"proposal-current-2\",\"summary\":\"Записать формулы во все 3 строки\",\"targets\":[\"r-telecom\",\"r-telecom2\",\"r-travel\"]},\"prepare_input\":{\"arguments\":{\"destination_column_id\":\"delta\",\"expression\":{\"left_column_id\":\"actual\",\"op\":\"subtract\",\"right_column_id\":\"plan\"},\"scope\":\"current_rows\",\"sheet_id\":\"expenses\",\"table_id\":\"costs\"},\"command\":\"sheet.fill_formula@1\",\"read_token\":\"rt-budget-12\",\"resource_id\":\"budget-8\"},\"version\":1}",
+   "utf8_hex": "7b22706c616e223a7b22617070726f76616c223a226175746f6d61746963222c2262617365223a7b2267656e65726174696f6e223a312c22706f736974696f6e223a31327d2c22657870697265735f6174223a22323032362d31312d32315431323a30303a30305a222c2270726f706f73616c5f6964223a2270726f706f73616c2d63757272656e742d32222c2273756d6d617279223a22d097d0b0d0bfd0b8d181d0b0d182d18c20d184d0bed180d0bcd183d0bbd18b20d0b2d0be20d0b2d181d0b5203320d181d182d180d0bed0bad0b8222c2274617267657473223a5b22722d74656c65636f6d222c22722d74656c65636f6d32222c22722d74726176656c225d7d2c22707265706172655f696e707574223a7b22617267756d656e7473223a7b2264657374696e6174696f6e5f636f6c756d6e5f6964223a2264656c7461222c2265787072657373696f6e223a7b226c6566745f636f6c756d6e5f6964223a2261637475616c222c226f70223a227375627472616374222c2272696768745f636f6c756d6e5f6964223a22706c616e227d2c2273636f7065223a2263757272656e745f726f7773222c2273686565745f6964223a22657870656e736573222c227461626c655f6964223a22636f737473227d2c22636f6d6d616e64223a2273686565742e66696c6c5f666f726d756c614031222c22726561645f746f6b656e223a2272742d6275646765742d3132222c227265736f757263655f6964223a226275646765742d38227d2c2276657273696f6e223a317d",
+   "digest": "06bd19906a6fa339792d64a369c48f12616463970598e4e7ab30e3164225f967",
+   "permuted_record_json": "{\"plan\": {\"expires_at\": \"2026-11-21T12:00:00Z\", \"targets\": [\"r-telecom\", \"r-telecom2\", \"r-travel\"], \"summary\": \"Записать формулы во все 3 строки\", \"approval\": \"automatic\", \"base\": {\"position\": 12, \"generation\": 1}, \"proposal_id\": \"proposal-current-2\"}, \"prepare_input\": {\"arguments\": {\"expression\": {\"right_column_id\": \"plan\", \"left_column_id\": \"actual\", \"op\": \"subtract\"}, \"destination_column_id\": \"delta\", \"scope\": \"current_rows\", \"table_id\": \"costs\", \"sheet_id\": \"expenses\"}, \"read_token\": \"rt-budget-12\", \"command\": \"sheet.fill_formula@1\", \"resource_id\": \"budget-8\"}, \"version\": 1}"
+  },
+  {
+   "id": "text_link_astral",
+   "note": "text-replace/exchange.json step 3",
+   "prepare_request": {
+    "version": 1,
+    "operation": "office.prepare",
+    "input": {
+     "resource_id": "contract-17",
+     "command": "text.replace_exact@1",
+     "read_token": "rt-terms-40",
+     "arguments": {
+      "block_id": "p-terms",
+      "expected": "приёмка: 15 дней",
+      "replacement": "приёмка: 10 дней"
+     }
+    }
+   },
+   "prepare_response": {
+    "version": 1,
+    "operation": "office.prepare",
+    "ok": true,
+    "result": {
+     "proposal_id": "proposal-terms-1",
+     "base": {
+      "generation": 3,
+      "position": 40
+     },
+     "approval": "automatic",
+     "summary": "В абзаце p-terms заменить «приёмка: 15 дней» на «приёмка: 10 дней»",
+     "targets": [
+      "p-terms"
+     ],
+     "expires_at": "2026-11-21T12:00:00Z",
+     "digest": "d5033072e999a1a4f94ce46dea370ec44c4081dac4cfccc774df068c5f81aedb"
+    }
+   },
+   "canonical_record": "{\"plan\":{\"approval\":\"automatic\",\"base\":{\"generation\":3,\"position\":40},\"expires_at\":\"2026-11-21T12:00:00Z\",\"proposal_id\":\"proposal-terms-1\",\"summary\":\"В абзаце p-terms заменить «приёмка: 15 дней» на «приёмка: 10 дней»\",\"targets\":[\"p-terms\"]},\"prepare_input\":{\"arguments\":{\"block_id\":\"p-terms\",\"expected\":\"приёмка: 15 дней\",\"replacement\":\"приёмка: 10 дней\"},\"command\":\"text.replace_exact@1\",\"read_token\":\"rt-terms-40\",\"resource_id\":\"contract-17\"},\"version\":1}",
+   "utf8_hex": "7b22706c616e223a7b22617070726f76616c223a226175746f6d61746963222c2262617365223a7b2267656e65726174696f6e223a332c22706f736974696f6e223a34307d2c22657870697265735f6174223a22323032362d31312d32315431323a30303a30305a222c2270726f706f73616c5f6964223a2270726f706f73616c2d7465726d732d31222c2273756d6d617279223a22d09220d0b0d0b1d0b7d0b0d186d0b520702d7465726d7320d0b7d0b0d0bcd0b5d0bdd0b8d182d18c20c2abd0bfd180d0b8d191d0bcd0bad0b03a20313520d0b4d0bdd0b5d0b9c2bb20d0bdd0b020c2abd0bfd180d0b8d191d0bcd0bad0b03a20313020d0b4d0bdd0b5d0b9c2bb222c2274617267657473223a5b22702d7465726d73225d7d2c22707265706172655f696e707574223a7b22617267756d656e7473223a7b22626c6f636b5f6964223a22702d7465726d73222c226578706563746564223a22d0bfd180d0b8d191d0bcd0bad0b03a20313520d0b4d0bdd0b5d0b9222c227265706c6163656d656e74223a22d0bfd180d0b8d191d0bcd0bad0b03a20313020d0b4d0bdd0b5d0b9227d2c22636f6d6d616e64223a22746578742e7265706c6163655f65786163744031222c22726561645f746f6b656e223a2272742d7465726d732d3430222c227265736f757263655f6964223a22636f6e74726163742d3137227d2c2276657273696f6e223a317d",
+   "digest": "d5033072e999a1a4f94ce46dea370ec44c4081dac4cfccc774df068c5f81aedb",
+   "permuted_record_json": "{\"plan\": {\"expires_at\": \"2026-11-21T12:00:00Z\", \"targets\": [\"p-terms\"], \"summary\": \"В абзаце p-terms заменить «приёмка: 15 дней» на «приёмка: 10 дней»\", \"approval\": \"automatic\", \"base\": {\"position\": 40, \"generation\": 3}, \"proposal_id\": \"proposal-terms-1\"}, \"prepare_input\": {\"arguments\": {\"replacement\": \"приёмка: 10 дней\", \"expected\": \"приёмка: 15 дней\", \"block_id\": \"p-terms\"}, \"read_token\": \"rt-terms-40\", \"command\": \"text.replace_exact@1\", \"resource_id\": \"contract-17\"}, \"version\": 1}"
+  },
+  {
+   "id": "text_astral_line_separator",
+   "note": "Schema-valid prepare whose replacement holds U+1F9FE and U+2028; members deliberately unsorted",
+   "prepare_request": {
+    "version": 1,
+    "operation": "office.prepare",
+    "input": {
+     "arguments": {
+      "replacement": "10 дней 🧾 «см. условия»",
+      "expected": "15 дней 🧾",
+      "block_id": "p-terms"
+     },
+     "read_token": "rt-terms-40",
+     "command": "text.replace_exact@1",
+     "resource_id": "contract-17"
+    }
+   },
+   "prepare_response": {
+    "version": 1,
+    "operation": "office.prepare",
+    "ok": true,
+    "result": {
+     "targets": [
+      "p-terms"
+     ],
+     "summary": "В абзаце p-terms заменить «15 дней 🧾»",
+     "proposal_id": "proposal-terms-2",
+     "expires_at": "2026-11-21T12:00:00Z",
+     "base": {
+      "position": 40,
+      "generation": 3
+     },
+     "approval": "human",
+     "digest": "c0c0f28764068739b1153df14d192c967fe437ad08d9ec59a40f0b1ccd5f5114"
+    }
+   },
+   "canonical_record": "{\"plan\":{\"approval\":\"human\",\"base\":{\"generation\":3,\"position\":40},\"expires_at\":\"2026-11-21T12:00:00Z\",\"proposal_id\":\"proposal-terms-2\",\"summary\":\"В абзаце p-terms заменить «15 дней 🧾»\",\"targets\":[\"p-terms\"]},\"prepare_input\":{\"arguments\":{\"block_id\":\"p-terms\",\"expected\":\"15 дней 🧾\",\"replacement\":\"10 дней 🧾 «см. условия»\"},\"command\":\"text.replace_exact@1\",\"read_token\":\"rt-terms-40\",\"resource_id\":\"contract-17\"},\"version\":1}",
+   "utf8_hex": "7b22706c616e223a7b22617070726f76616c223a2268756d616e222c2262617365223a7b2267656e65726174696f6e223a332c22706f736974696f6e223a34307d2c22657870697265735f6174223a22323032362d31312d32315431323a30303a30305a222c2270726f706f73616c5f6964223a2270726f706f73616c2d7465726d732d32222c2273756d6d617279223a22d09220d0b0d0b1d0b7d0b0d186d0b520702d7465726d7320d0b7d0b0d0bcd0b5d0bdd0b8d182d18c20c2ab313520d0b4d0bdd0b5d0b920f09fa7bec2bb222c2274617267657473223a5b22702d7465726d73225d7d2c22707265706172655f696e707574223a7b22617267756d656e7473223a7b22626c6f636b5f6964223a22702d7465726d73222c226578706563746564223a22313520d0b4d0bdd0b5d0b920f09fa7be222c227265706c6163656d656e74223a22313020d0b4d0bdd0b5d0b920f09fa7bee280a8c2abd181d0bc2e20d183d181d0bbd0bed0b2d0b8d18fc2bb227d2c22636f6d6d616e64223a22746578742e7265706c6163655f65786163744031222c22726561645f746f6b656e223a2272742d7465726d732d3430222c227265736f757263655f6964223a22636f6e74726163742d3137227d2c2276657273696f6e223a317d",
+   "digest": "c0c0f28764068739b1153df14d192c967fe437ad08d9ec59a40f0b1ccd5f5114",
+   "permuted_record_json": "{\"plan\": {\"approval\": \"human\", \"base\": {\"generation\": 3, \"position\": 40}, \"expires_at\": \"2026-11-21T12:00:00Z\", \"proposal_id\": \"proposal-terms-2\", \"summary\": \"В абзаце p-terms заменить «15 дней 🧾»\", \"targets\": [\"p-terms\"]}, \"prepare_input\": {\"resource_id\": \"contract-17\", \"command\": \"text.replace_exact@1\", \"read_token\": \"rt-terms-40\", \"arguments\": {\"block_id\": \"p-terms\", \"expected\": \"15 дней 🧾\", \"replacement\": \"10 дней 🧾 «см. условия»\"}}, \"version\": 1}"
+  }
+ ]
+}

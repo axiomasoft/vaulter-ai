@@ -24,6 +24,7 @@ use Vaulter\Ai\Documents\Projection\TextProjectionOutboxConsumer;
 use Vaulter\Ai\Documents\Projection\TextProjectionReader;
 use Vaulter\Ai\Documents\Read\TextReader;
 use Vaulter\Ai\Documents\Schema\AiDocumentsSchema;
+use Vaulter\Ai\Documents\Writing\SingleTextOwner;
 use Vaulter\Documents\Events\Documents\DocumentContentUpdated;
 use Vaulter\Documents\Events\Documents\DocumentCreated;
 use Vaulter\Documents\Events\Revisions\DocumentRestored;
@@ -78,6 +79,7 @@ final class DocumentsAiServiceProvider extends ServiceProvider
         if (! $registry->isFrozen()) {
             $registry->registerReader($this->app->make(TextReader::class));
             $registry->registerCommand($this->app->make(ReplaceExact::class));
+            $registry->registerOwner(ReplaceExact::COMMAND, 'snapshot', $this->app->make(SingleTextOwner::class));
         }
 
         $this->registerProjectionListeners();

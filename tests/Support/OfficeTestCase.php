@@ -4,9 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\Ai\Tests\Support;
 
-use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Application;
-use Illuminate\Support\Facades\Schema;
 use Orchestra\Testbench\TestCase as OrchestraTestCase;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\Office;
@@ -89,16 +87,14 @@ abstract class OfficeTestCase extends OrchestraTestCase
     {
         SuiteDatabaseConnection::skipOnForeignEngine($this);
 
-        if ($this->bootVaulterDomain) {
-            $this->ensureHostFixtureTables();
-            $this->loadMigrationsFrom(SuiteDatabaseConnection::migrationPaths($this->app));
-        }
-
-        $this->loadMigrationsFrom(dirname(__DIR__, 2).'/packages/core/database/migrations');
-
+        $paths = $this->bootVaulterDomain
+            ? [__DIR__.'/database', ...SuiteDatabaseConnection::migrationPaths($this->app)]
+            : [];
+        $paths[] = dirname(__DIR__, 2).'/packages/core/database/migrations';
         if ($this->bootDocumentsAi && $this->bootVaulterDomain) {
-            $this->loadMigrationsFrom(dirname(__DIR__, 2).'/packages/documents/database/migrations');
+            $paths[] = dirname(__DIR__, 2).'/packages/documents/database/migrations';
         }
+        $this->loadMigrationsFrom($paths);
     }
 
     protected function freshRegistry(): OfficeRegistry
@@ -111,25 +107,5 @@ abstract class OfficeTestCase extends OrchestraTestCase
         $this->app->forgetInstance(Office::class);
 
         return $registry;
-    }
-
-    private function ensureHostFixtureTables(): void
-    {
-        $schema = Schema::connection('testing');
-
-        if (! $schema->hasTable('users')) {
-            $schema->create('users', static function (Blueprint $table): void {
-                $table->id();
-                $table->string('name');
-                $table->string('email')->unique();
-            });
-        }
-
-        if (! $schema->hasTable('ai_test_owners')) {
-            $schema->create('ai_test_owners', static function (Blueprint $table): void {
-                $table->id();
-                $table->string('name');
-            });
-        }
     }
 }

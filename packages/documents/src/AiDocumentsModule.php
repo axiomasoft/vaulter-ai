@@ -11,12 +11,18 @@ use Packman\Plugins\Contracts\Registry\ExtensionPlugin;
 use Packman\Plugins\Data\Plugin\PluginManifest;
 use Packman\Plugins\Laravel\PluginRegistrar;
 use Vaulter\Ai\Documents\Projection\TextProjectionOutboxConsumer;
+use Vaulter\Ai\Documents\Writing\DriveDocumentMutation;
+use Vaulter\Ai\Documents\Writing\TextCommandEventType;
+use Vaulter\Drive\Contracts\DriveExtension;
 use Vaulter\Events\Outbox\OutboxConsumer;
+use Vaulter\Modules\Activation;
+use Vaulter\Modules\PluginModuleSpec;
+use Vaulter\Modules\WithModuleRuntime;
 
 /**
  * Vaulter extension plugin declaring the durable AI Documents OutboxConsumer contribution.
  */
-final class AiDocumentsModule implements ExtensionPlugin, WithSlots
+final class AiDocumentsModule implements ExtensionPlugin, WithModuleRuntime, WithSlots
 {
     use ContributesToSlots;
 
@@ -33,11 +39,26 @@ final class AiDocumentsModule implements ExtensionPlugin, WithSlots
     #[Override]
     public function register(PluginRegistrar $registrar): void {}
 
+    public function moduleRuntime(): PluginModuleSpec
+    {
+        return new PluginModuleSpec(
+            plugin: self::class,
+            activation: Activation::Auto,
+            events: [TextCommandEventType::class],
+        );
+    }
+
     /** @return list<array{slot: class-string, id: string, implementation: class-string, priority?: int, key?: string|null}> */
     #[Override]
     public function slotContributions(): array
     {
         return [
+            [
+                'slot' => DriveExtension::class,
+                'id' => 'ai-documents.text-mutation',
+                'implementation' => DriveDocumentMutation::class,
+                'key' => DriveDocumentMutation::class,
+            ],
             [
                 'slot' => OutboxConsumer::class,
                 'id' => TextProjectionOutboxConsumer::ID,
