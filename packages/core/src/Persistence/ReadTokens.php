@@ -44,22 +44,32 @@ final readonly class ReadTokens
             aadParts: $this->aad($context, $resourceId, $tokenHashHex),
         );
 
-        $this->db->query('ai_read_tokens')->insert([
-            'token_hash' => $this->db->binaryLiteral($tokenHash),
-            'tenant_id' => $context->tenantId,
-            'project_scope' => $context->projectScope,
-            'effective_subject' => $context->effectiveSubject,
-            'resource_id' => $resourceId,
-            'selector_kind' => $page->selectorKind,
-            'source_generation' => $page->marker->generation,
-            'source_position' => $page->marker->position,
-            'schema_revision' => $page->schemaRevision,
-            'complete_scope' => $page->completeScope,
-            'issued_at' => $this->db->utcTimestamp($now),
-            'expires_at' => $this->db->utcTimestamp($expiresAt),
-            'key_id' => $encrypted['key_id'],
-            'encrypted_selector_dependencies' => $this->db->binaryLiteral($encrypted['ciphertext']),
-        ]);
+        $this->db->transaction(function () use (
+            $tokenHash,
+            $context,
+            $resourceId,
+            $page,
+            $now,
+            $expiresAt,
+            $encrypted,
+        ): void {
+            $this->db->query('ai_read_tokens')->insert([
+                'token_hash' => $this->db->binaryLiteral($tokenHash),
+                'tenant_id' => $context->tenantId,
+                'project_scope' => $context->projectScope,
+                'effective_subject' => $context->effectiveSubject,
+                'resource_id' => $resourceId,
+                'selector_kind' => $page->selectorKind,
+                'source_generation' => $page->marker->generation,
+                'source_position' => $page->marker->position,
+                'schema_revision' => $page->schemaRevision,
+                'complete_scope' => $page->completeScope,
+                'issued_at' => $this->db->utcTimestamp($now),
+                'expires_at' => $this->db->utcTimestamp($expiresAt),
+                'key_id' => $encrypted['key_id'],
+                'encrypted_selector_dependencies' => $this->db->binaryLiteral($encrypted['ciphertext']),
+            ]);
+        }, tenantId: $context->tenantId);
 
         return $rawToken;
     }
@@ -73,23 +83,26 @@ final readonly class ReadTokens
         $tokenHash = hash('sha256', $rawToken, true);
         $tokenHashHex = bin2hex($tokenHash);
 
-        $row = $this->db->query('ai_read_tokens')
-            ->where('token_hash', $this->db->binaryLiteral($tokenHash))
-            ->first([
-                'tenant_id',
-                'project_scope',
-                'effective_subject',
-                'resource_id',
-                'selector_kind',
-                'source_generation',
-                'source_position',
-                'schema_revision',
-                'complete_scope',
-                'issued_at',
-                'expires_at',
-                'key_id',
-                'encrypted_selector_dependencies',
-            ]);
+        $row = $this->db->transaction(
+            fn (): ?object => $this->db->query('ai_read_tokens')
+                ->where('token_hash', $this->db->binaryLiteral($tokenHash))
+                ->first([
+                    'tenant_id',
+                    'project_scope',
+                    'effective_subject',
+                    'resource_id',
+                    'selector_kind',
+                    'source_generation',
+                    'source_position',
+                    'schema_revision',
+                    'complete_scope',
+                    'issued_at',
+                    'expires_at',
+                    'key_id',
+                    'encrypted_selector_dependencies',
+                ]),
+            tenantId: $context->tenantId,
+        );
 
         if ($row === null) {
             throw OfficeException::readTokenExpired();

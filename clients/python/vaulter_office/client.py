@@ -5,7 +5,22 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Refuse all HTTP redirects so Authorization headers never leave the configured origin."""
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
 
 
 class OfficeProtocolError(RuntimeError):
@@ -29,6 +44,7 @@ class OfficeClient:
         self._endpoint = endpoint
         self._credentials_provider = credentials_provider
         self._timeout = timeout
+        self._opener = build_opener(_NoRedirectHandler())
 
     def call(self, operation: str, payload_input: dict[str, Any], *, version: int = 1) -> dict[str, Any]:
         envelope = {
@@ -45,14 +61,19 @@ class OfficeClient:
         req = Request(self._endpoint, data=data, headers=headers, method="POST")
 
         try:
-            with urlopen(req, timeout=self._timeout) as resp:
+            with self._opener.open(req, timeout=self._timeout) as resp:
                 raw = resp.read().decode("utf-8")
                 decoded = json.loads(raw)
                 if not isinstance(decoded, dict):
                     raise OfficeProtocolError(resp.status, decoded)
                 return decoded
         except HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
+            try:
+                raw = exc.read().decode("utf-8", errors="replace")
+            finally:
+                exc.close()
+            if 300 <= exc.code < 400:
+                raise OfficeProtocolError(exc.code, raw) from exc
             try:
                 decoded = json.loads(raw)
             except json.JSONDecodeError as parse_err:

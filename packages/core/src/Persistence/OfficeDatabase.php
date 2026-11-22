@@ -13,6 +13,7 @@ use Illuminate\Database\Connection;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Str;
+use Vaulter\Ai\Core\Contracts\TransactionRunner;
 
 /**
  * Resolves the configured AI Core database connection, table names, binary literals, and transactions.
@@ -24,6 +25,7 @@ final readonly class OfficeDatabase
     public function __construct(
         private DatabaseManager $db,
         private ConfigRepository $config,
+        private ?TransactionRunner $transactions = null,
     ) {}
 
     public function connection(): Connection
@@ -56,11 +58,30 @@ final readonly class OfficeDatabase
      * @template TReturn
      *
      * @param  Closure(): TReturn  $callback
+     * @param  int<1, max>  $attempts
      * @return TReturn
      */
-    public function transaction(Closure $callback): mixed
+    public function transaction(Closure $callback, ?string $tenantId = null, int $attempts = 3): mixed
     {
-        return $this->connection()->transaction($callback);
+        return $this->runner()->run(
+            connection: $this->connection(),
+            callback: static fn (Connection $_connection): mixed => $callback(),
+            tenantId: $tenantId,
+            attempts: $attempts,
+        );
+    }
+
+    /**
+     * @param  Closure(): void  $callback
+     */
+    public function afterCommit(Closure $callback): void
+    {
+        $this->runner()->afterCommit($this->connection(), $callback);
+    }
+
+    private function runner(): TransactionRunner
+    {
+        return $this->transactions ?? new DefaultTransactionRunner;
     }
 
     public function newUuid(): string

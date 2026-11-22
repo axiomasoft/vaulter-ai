@@ -9,15 +9,18 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Support\ServiceProvider;
 use Override;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
+use Vaulter\Ai\Core\Contracts\TransactionRunner;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Documents\Commands\ReplaceExact;
 use Vaulter\Ai\Documents\Console\RebuildTextIndex;
 use Vaulter\Ai\Documents\Contracts\DocumentScopeResolver;
 use Vaulter\Ai\Documents\Host\VaulterResourceDirectory;
 use Vaulter\Ai\Documents\Persistence\TextCommands;
+use Vaulter\Ai\Documents\Persistence\VaulterTransactionRunner;
 use Vaulter\Ai\Documents\Projection\DefaultDocumentScopeResolver;
 use Vaulter\Ai\Documents\Projection\IndexText;
 use Vaulter\Ai\Documents\Projection\RichTextBlockExtractor;
+use Vaulter\Ai\Documents\Projection\TextProjectionOutboxConsumer;
 use Vaulter\Ai\Documents\Projection\TextProjectionReader;
 use Vaulter\Ai\Documents\Read\TextReader;
 use Vaulter\Ai\Documents\Schema\AiDocumentsSchema;
@@ -25,6 +28,7 @@ use Vaulter\Documents\Events\Documents\DocumentContentUpdated;
 use Vaulter\Documents\Events\Documents\DocumentCreated;
 use Vaulter\Documents\Events\Revisions\DocumentRestored;
 use Vaulter\Drive\Events\Nodes\NodeRestored;
+use Vaulter\Laravel\VaulterPluginRegistrar;
 
 /**
  * Service provider for axiomasoft/vaulter-ai-documents.
@@ -42,13 +46,20 @@ final class DocumentsAiServiceProvider extends ServiceProvider
         $this->app->singleton(DocumentScopeResolver::class, DefaultDocumentScopeResolver::class);
 
         $this->app->singleton(AiDocumentsSchema::class);
+        $this->app->singleton(VaulterTransactionRunner::class);
+        $this->app->singleton(TransactionRunner::class, VaulterTransactionRunner::class);
         $this->app->singleton(TextCommands::class);
         $this->app->singleton(IndexText::class);
+        $this->app->singleton(TextProjectionOutboxConsumer::class);
         $this->app->singleton(TextProjectionReader::class);
         $this->app->singleton(TextReader::class);
         $this->app->singleton(ReplaceExact::class);
 
         $this->app->singleton(ResourceDirectory::class, VaulterResourceDirectory::class);
+
+        if (class_exists(VaulterPluginRegistrar::class)) {
+            VaulterPluginRegistrar::register($this->app, AiDocumentsModule::class, dirname(__DIR__).'/composer.json');
+        }
     }
 
     public function boot(): void

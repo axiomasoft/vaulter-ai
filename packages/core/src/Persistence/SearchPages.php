@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Vaulter\Ai\Core\Persistence;
 
 use DateTimeImmutable;
+use Illuminate\Support\Collection;
 use JsonException;
+use stdClass;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
@@ -71,7 +73,7 @@ final readonly class SearchPages
                     $this->db->query('ai_search_items')->insert($chunk);
                 }
             }
-        });
+        }, tenantId: $context->tenantId);
 
         return $this->sliceSnapshot(
             context: $context,
@@ -99,12 +101,15 @@ final readonly class SearchPages
         $decoded = $this->decodeCursor($context, $cursor, $queryHashBinary);
         $now = $this->clock->now();
 
-        $pageRow = $this->db->query('ai_search_pages')
-            ->where('snapshot_id', $decoded['snapshot_id'])
-            ->where('tenant_id', $context->tenantId)
-            ->where('project_scope', $context->projectScope)
-            ->where('effective_subject', $context->effectiveSubject)
-            ->first(['snapshot_id', 'query_hash', 'expires_at']);
+        $pageRow = $this->db->transaction(
+            fn (): ?object => $this->db->query('ai_search_pages')
+                ->where('snapshot_id', $decoded['snapshot_id'])
+                ->where('tenant_id', $context->tenantId)
+                ->where('project_scope', $context->projectScope)
+                ->where('effective_subject', $context->effectiveSubject)
+                ->first(['snapshot_id', 'query_hash', 'expires_at']),
+            tenantId: $context->tenantId,
+        );
 
         if ($pageRow === null) {
             throw OfficeException::cursorExpired();
@@ -150,12 +155,16 @@ final readonly class SearchPages
         $chunkSize = max($limit * 2, 20);
 
         while (true) {
-            $rows = $this->db->query('ai_search_items')
-                ->where('snapshot_id', $snapshotId)
-                ->where('ordinal', '>', $cursorOrdinal)
-                ->orderBy('ordinal')
-                ->limit($chunkSize)
-                ->get(['ordinal', 'resource_id', 'resource_type']);
+            /** @var Collection<int, stdClass> $rows */
+            $rows = $this->db->transaction(
+                fn (): Collection => $this->db->query('ai_search_items')
+                    ->where('snapshot_id', $snapshotId)
+                    ->where('ordinal', '>', $cursorOrdinal)
+                    ->orderBy('ordinal')
+                    ->limit($chunkSize)
+                    ->get(['ordinal', 'resource_id', 'resource_type']),
+                tenantId: $context->tenantId,
+            );
 
             if ($rows->isEmpty()) {
                 break;

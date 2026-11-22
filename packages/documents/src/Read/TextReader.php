@@ -129,19 +129,19 @@ final readonly class TextReader implements ResourceReader
 
         if ($head === null || $head['generation'] !== $snapshot->epoch) {
             if ($useLiveFallback) {
-                return $this->serveFromLiveSnapshot($context, $snapshot, $liveBlocks, $kind, $selector, $limit, $cursor);
+                return $this->serveFromLiveSnapshot($context, $snapshot, $liveBlocks, $kind, $selector, $limit, $cursor, $requiredMarker);
             }
             throw OfficeException::projectionPending();
         }
 
         if ($requiredMarker !== null && $head['position'] < $requiredMarker->position) {
             if ($useLiveFallback) {
-                return $this->serveFromLiveSnapshot($context, $snapshot, $liveBlocks, $kind, $selector, $limit, $cursor);
+                return $this->serveFromLiveSnapshot($context, $snapshot, $liveBlocks, $kind, $selector, $limit, $cursor, $requiredMarker);
             }
             throw OfficeException::projectionPending();
         }
 
-        return $this->serveFromProjection($context, $scope['tenant_id'], $scope['project_scope'], $documentKey, $resource, $snapshot, $kind, $selector, $limit, $cursor);
+        return $this->serveFromProjection($context, $scope['tenant_id'], $scope['project_scope'], $documentKey, $resource, $snapshot, $kind, $selector, $limit, $cursor, $requiredMarker);
     }
 
     private function serveFromProjection(
@@ -155,6 +155,7 @@ final readonly class TextReader implements ResourceReader
         stdClass $selector,
         ?int $limit,
         ?string $cursor,
+        ?Marker $requiredMarker,
     ): ReadPage {
         $schemaRevision = (string) $snapshot->schemaVersion;
 
@@ -174,6 +175,8 @@ final readonly class TextReader implements ResourceReader
             if ($outline === null) {
                 throw OfficeException::projectionPending();
             }
+
+            $this->assertMarkerSatisfiesReceipt($requiredMarker, $outline['marker']);
 
             $blocksData = array_map(
                 static fn (array $b): stdClass => (object) [
@@ -206,8 +209,16 @@ final readonly class TextReader implements ResourceReader
 
         $found = $this->projection->readBlock($tenantKey, $projectScope, $documentKey, $blockId);
         if ($found === null) {
+            if ($requiredMarker !== null) {
+                $latestHead = $this->projection->head($tenantKey, $projectScope, $documentKey);
+                if ($latestHead !== null && $latestHead['generation'] > $requiredMarker->generation) {
+                    throw OfficeException::generationChanged('Document generation moved after receipt.');
+                }
+            }
             throw OfficeException::resourceUnavailable();
         }
+
+        $this->assertMarkerSatisfiesReceipt($requiredMarker, $found['marker']);
 
         $segmentObjects = array_map(
             static fn (array $seg): stdClass => (object) [
@@ -250,8 +261,10 @@ final readonly class TextReader implements ResourceReader
         stdClass $selector,
         ?int $limit,
         ?string $cursor,
+        ?Marker $requiredMarker,
     ): ReadPage {
         $marker = new Marker($snapshot->epoch, $snapshot->stateVersion);
+        $this->assertMarkerSatisfiesReceipt($requiredMarker, $marker);
         $schemaRevision = (string) $snapshot->schemaVersion;
 
         if ($kind === 'text_outline') {
@@ -373,6 +386,21 @@ final readonly class TextReader implements ResourceReader
                 'schema_version' => $snapshot->schemaVersion,
             ],
         );
+    }
+
+    private function assertMarkerSatisfiesReceipt(?Marker $requiredMarker, Marker $actualMarker): void
+    {
+        if ($requiredMarker === null) {
+            return;
+        }
+
+        if ($actualMarker->generation > $requiredMarker->generation) {
+            throw OfficeException::generationChanged('Document generation moved after receipt.');
+        }
+
+        if ($actualMarker->generation < $requiredMarker->generation || $actualMarker->position < $requiredMarker->position) {
+            throw OfficeException::projectionPending();
+        }
     }
 
     private function defaultOutlineLimit(): int

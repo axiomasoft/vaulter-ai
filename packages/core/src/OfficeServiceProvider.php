@@ -13,12 +13,14 @@ use Vaulter\Ai\Core\Contracts\CallContextResolver;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\Office;
+use Vaulter\Ai\Core\Contracts\TransactionRunner;
 use Vaulter\Ai\Core\Http\NullCallContextResolver;
 use Vaulter\Ai\Core\Operations\Describe;
 use Vaulter\Ai\Core\Operations\DispatchOfficeOperation;
 use Vaulter\Ai\Core\Operations\Read;
 use Vaulter\Ai\Core\Operations\Search;
 use Vaulter\Ai\Core\Persistence\ConfigHostPolicy;
+use Vaulter\Ai\Core\Persistence\DefaultTransactionRunner;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\PayloadCipher;
 use Vaulter\Ai\Core\Persistence\ReadTokens;
@@ -45,9 +47,13 @@ final class OfficeServiceProvider extends ServiceProvider
         $this->app->singleton(WireErrorMapper::class);
         $this->app->singleton(OfficeRegistry::class);
 
+        $this->app->singletonIf(DefaultTransactionRunner::class);
+        $this->app->singletonIf(TransactionRunner::class, DefaultTransactionRunner::class);
+
         $this->app->singleton(OfficeDatabase::class, static fn (Container $app): OfficeDatabase => new OfficeDatabase(
             $app->make(DatabaseManager::class),
             $app->make(ConfigRepository::class),
+            $app->make(TransactionRunner::class),
         ));
 
         $this->app->singleton(PayloadCipher::class, static fn (Container $app): PayloadCipher => new PayloadCipher(

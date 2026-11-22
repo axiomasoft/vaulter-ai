@@ -15,6 +15,8 @@ use Vaulter\Ai\Core\Enums\OfficeOperation;
  */
 final readonly class OfficeResponse
 {
+    public const int WIRE_JSON_OPTIONS = JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES;
+
     private function __construct(
         public int $version,
         public OfficeOperation $operation,
@@ -79,17 +81,26 @@ final readonly class OfficeResponse
         ];
     }
 
+    public function toJson(): string
+    {
+        try {
+            return json_encode($this->toStdClass(), self::WIRE_JSON_OPTIONS);
+        } catch (JsonException $e) {
+            throw new \RuntimeException('Failed to serialize OfficeResponse.', 0, $e);
+        }
+    }
+
+    public function wireBytes(): int
+    {
+        return strlen($this->toJson());
+    }
+
     /** @return array<string, mixed> */
     public function toArray(): array
     {
         try {
             /** @var array<string, mixed> $decoded */
-            $decoded = json_decode(
-                json_encode($this->toStdClass(), JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                true,
-                512,
-                JSON_THROW_ON_ERROR,
-            );
+            $decoded = json_decode($this->toJson(), true, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException $e) {
             throw new \RuntimeException('Failed to serialize OfficeResponse.', 0, $e);
         }

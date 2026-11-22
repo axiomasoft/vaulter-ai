@@ -8,7 +8,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-from vaulter_office import OfficeClient
+from vaulter_office import OfficeClient, OfficeProtocolError
 
 
 class _MockOfficeHandler(BaseHTTPRequestHandler):
@@ -112,6 +112,71 @@ class OfficeClientWireTest(unittest.TestCase):
         _MockOfficeHandler.next_response = (400, {"error": "invalid_request"})
         bad = client.call("office.unknown", {})
         self.assertEqual(bad, {"error": "invalid_request"})
+
+    def test_refuses_redirects_without_forwarding_credentials_to_other_origin(self) -> None:
+        captured_second: list[dict[str, str]] = []
+
+        class _RedirectHandler(BaseHTTPRequestHandler):
+            redirect_target = ""
+            redirect_code = 302
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                body = json.dumps({"ok": True}).encode("utf-8")
+                self.send_response(type(self).redirect_code)
+                self.send_header("Location", type(self).redirect_target)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                return
+
+        class _SecondOriginHandler(BaseHTTPRequestHandler):
+            def _record(self) -> None:
+                captured_second.append({k.lower(): v for k, v in self.headers.items()})
+                self.send_response(200)
+                self.end_headers()
+
+            def do_GET(self) -> None:  # noqa: N802
+                self._record()
+
+            def do_POST(self) -> None:  # noqa: N802
+                self._record()
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                return
+
+        origin_one = HTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        origin_two = HTTPServer(("127.0.0.1", 0), _SecondOriginHandler)
+        _RedirectHandler.redirect_target = f"http://127.0.0.1:{origin_two.server_port}/steal"
+
+        t1 = threading.Thread(target=origin_one.serve_forever, daemon=True)
+        t2 = threading.Thread(target=origin_two.serve_forever, daemon=True)
+        t1.start()
+        t2.start()
+
+        try:
+            client = OfficeClient(
+                endpoint=f"http://127.0.0.1:{origin_one.server_port}/api/vaulter-ai/v1/operations",
+                credentials_provider=lambda: {"Authorization": "Bearer top-secret-host-token"},
+            )
+            for code in (302, 307):
+                _RedirectHandler.redirect_code = code
+                with self.assertRaises(OfficeProtocolError) as ctx:
+                    client.search("договор")
+                self.assertEqual(ctx.exception.status, code)
+
+            self.assertEqual(captured_second, [])
+        finally:
+            origin_one.shutdown()
+            origin_one.server_close()
+            origin_two.shutdown()
+            origin_two.server_close()
+            t1.join(timeout=2.0)
+            t2.join(timeout=2.0)
 
 
 if __name__ == "__main__":

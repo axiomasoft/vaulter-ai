@@ -109,6 +109,7 @@ test('ReadTokens store hashed encrypted dependencies bound to scope and fail clo
 
     // Payload exceeding byte limit stops with limit_exceeded before issuing a read_token.
     Config::set('vaulter-ai.limits.read_max_bytes', 32);
+    $countBefore = $db->query('ai_read_tokens')->count();
     $tooBig = $office->handle($ctx, new OfficeRequest(1, OfficeOperation::Read, (object) [
         'resource_id' => 'doc-1',
         'selector' => (object) ['kind' => 'text_block', 'block_id' => 'p42'],
@@ -116,4 +117,5 @@ test('ReadTokens store hashed encrypted dependencies bound to scope and fail clo
     expect($tooBig->ok)->toBeFalse();
     expect($tooBig->errorCode)->toBe(ErrorCode::LimitExceeded);
     expect($tooBig->nextAction)->toBe(NextAction::Narrow);
+    expect($db->query('ai_read_tokens')->count())->toBe($countBefore);
 });

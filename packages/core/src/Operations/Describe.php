@@ -35,22 +35,20 @@ final readonly class Describe
             throw OfficeException::invalidInput('describe.resource_id and describe.command must be non-empty strings.');
         }
 
-        $entry = $this->directory->findAccessible($context, $resourceId, 'view');
-        if ($entry === null) {
-            throw OfficeException::resourceUnavailable();
-        }
-
-        if (! $this->policy->allowsCommand($context, $entry, $commandName)) {
-            throw OfficeException::resourceUnavailable();
-        }
-
         $command = $this->registry->command($commandName);
         if ($command === null) {
             throw OfficeException::resourceUnavailable();
         }
 
         $descriptor = $command->descriptor();
-        if ($descriptor->resourceType !== $entry->resourceType) {
+        $requiredPermission = $descriptor->requiredPermission !== '' ? $descriptor->requiredPermission : 'view';
+
+        $entry = $this->directory->findAccessible($context, $resourceId, $requiredPermission);
+        if ($entry === null) {
+            throw OfficeException::resourceUnavailable();
+        }
+
+        if ($descriptor->resourceType !== $entry->resourceType || ! $this->policy->allowsCommand($context, $entry, $commandName)) {
             throw OfficeException::resourceUnavailable();
         }
 

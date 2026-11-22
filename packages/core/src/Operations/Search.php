@@ -127,9 +127,10 @@ final readonly class Search
             'next_cursor' => $page['next_cursor'],
         ];
 
-        $this->assertWithinResponseBytes($result);
+        $response = OfficeResponse::success(OfficeOperation::Search, $result);
+        $this->assertWithinResponseBytes($response);
 
-        return OfficeResponse::success(OfficeOperation::Search, $result);
+        return $response;
     }
 
     /**
@@ -151,11 +152,10 @@ final readonly class Search
         return $entries;
     }
 
-    private function assertWithinResponseBytes(stdClass $result): void
+    private function assertWithinResponseBytes(OfficeResponse $response): void
     {
         $maxBytes = $this->intLimit('read_max_bytes', 16384);
-        $encoded = json_encode($result, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        if (strlen($encoded) > $maxBytes) {
+        if ($response->wireBytes() > $maxBytes) {
             throw OfficeException::limitExceeded('Search result exceeds response byte limit; narrow limit or query.');
         }
     }

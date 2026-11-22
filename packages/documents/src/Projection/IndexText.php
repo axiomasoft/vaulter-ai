@@ -21,10 +21,16 @@ use Vaulter\Documents\DocumentsManager;
 use Vaulter\Documents\Events\Documents\DocumentContentUpdated;
 use Vaulter\Documents\Events\Documents\DocumentCreated;
 use Vaulter\Documents\Events\Revisions\DocumentRestored;
+use Vaulter\Documents\Exceptions\DocumentContentDegradedException;
+use Vaulter\Documents\Exceptions\DocumentTypeUnavailableException;
+use Vaulter\Documents\Exceptions\NotADocumentException;
+use Vaulter\Drive\Contracts\DriveHandle;
 use Vaulter\Drive\Data\ListOptions;
 use Vaulter\Drive\Data\Snapshots\NodeSnapshot;
 use Vaulter\Drive\Enums\NodeKind;
 use Vaulter\Drive\Events\Nodes\NodeRestored;
+use Vaulter\Drive\Exceptions\DriveArchivedException;
+use Vaulter\Drive\Exceptions\Nodes\NodeNotFoundException;
 use Vaulter\Drive\Vaulter;
 use Vaulter\Support\Identity;
 use Vaulter\Tenancy\Tenancy;
@@ -117,6 +123,42 @@ final readonly class IndexText
         return $this->publishSnapshot($tenantKey, $projectScope, $snapshot, $minGeneration);
     }
 
+    public function projectRestoredNode(
+        string|int $driveId,
+        string|int $nodeId,
+        int|string $tenantKey,
+        string $projectScope,
+    ): int {
+        return Tenancy::without(function () use ($driveId, $nodeId, $tenantKey, $projectScope): int {
+            $drive = $this->vaulter->findDriveById($driveId);
+            if ($drive === null) {
+                return 0;
+            }
+            $systemDrive = $drive->asSystem('vaulter-ai.index-text');
+
+            try {
+                $node = $systemDrive->nodes()->find($nodeId);
+            } catch (NodeNotFoundException|DriveArchivedException) {
+                return 0;
+            }
+
+            if ($node->kind === NodeKind::Document) {
+                $snapshot = $this->loadSnapshotFromSystemDrive($systemDrive, $node->id);
+                if ($snapshot === null) {
+                    return 0;
+                }
+
+                return $this->publishSnapshot($tenantKey, $projectScope, $snapshot) !== null ? 1 : 0;
+            }
+
+            if ($node->kind === NodeKind::Folder) {
+                return $this->indexSubtree($systemDrive, $node->id, $tenantKey, $projectScope, force: false);
+            }
+
+            return 0;
+        });
+    }
+
     private function projectNodeWithCurrentContext(
         string|int $driveId,
         string|int $nodeId,
@@ -139,11 +181,21 @@ final readonly class IndexText
         if ($drive === null) {
             return null;
         }
-        $systemDrive = $drive->asSystem('vaulter-ai.index-text');
 
+        return $this->loadSnapshotFromSystemDrive($drive->asSystem('vaulter-ai.index-text'), $nodeId);
+    }
+
+    private function loadSnapshotFromSystemDrive(DriveHandle $systemDrive, string|int $nodeId): ?DocumentSnapshot
+    {
         try {
             return $this->documents->in($systemDrive)->content($nodeId);
-        } catch (\Throwable) {
+        } catch (
+            NodeNotFoundException
+            |NotADocumentException
+            |DriveArchivedException
+            |DocumentTypeUnavailableException
+            |DocumentContentDegradedException
+        ) {
             return null;
         }
     }
@@ -212,13 +264,18 @@ final readonly class IndexText
                     return null;
                 }
 
-                if (
-                    ! $forceRebuild
-                    && $headGen === $snapshot->epoch
-                    && $headPos >= $snapshot->stateVersion
-                    && $headProjVersion >= $projectorVersion
-                ) {
-                    return null;
+                if ($headGen === $snapshot->epoch) {
+                    if ($headPos > $snapshot->stateVersion) {
+                        return null;
+                    }
+
+                    if (
+                        ! $forceRebuild
+                        && $headPos === $snapshot->stateVersion
+                        && $headProjVersion >= $projectorVersion
+                    ) {
+                        return null;
+                    }
                 }
             }
 
@@ -302,39 +359,49 @@ final readonly class IndexText
             if ($drive === null) {
                 return 0;
             }
-            $systemDrive = $drive->asSystem('vaulter-ai.rebuild-text-index');
-            $indexed = 0;
 
-            $queue = [null];
-            while ($queue !== []) {
-                $folderId = array_shift($queue);
-                $cursor = null;
-                do {
-                    $page = $systemDrive->nodes()->children(
-                        $folderId,
-                        ListOptions::make()->perPage(100)->cursor($cursor),
-                    );
-                    foreach ($page->items as $node) {
-                        /** @var NodeSnapshot $node */
-                        if ($node->kind === NodeKind::Folder) {
-                            $queue[] = $node->id;
+            return $this->indexSubtree($drive->asSystem('vaulter-ai.rebuild-text-index'), null, $tenantKey, $projectScope, $force);
+        });
+    }
 
-                            continue;
-                        }
-                        if ($node->kind === NodeKind::Document) {
-                            $snapshot = $this->documents->in($systemDrive)->content($node->id);
-                            if ($snapshot->type === 'vaulter/rich-text') {
-                                $this->publishSnapshot($tenantKey, $projectScope, $snapshot, null, $force);
+    private function indexSubtree(
+        DriveHandle $systemDrive,
+        string|int|null $rootFolderId,
+        int|string $tenantKey,
+        string $projectScope,
+        bool $force,
+    ): int {
+        $indexed = 0;
+        $queue = [$rootFolderId];
+        while ($queue !== []) {
+            $folderId = array_shift($queue);
+            $cursor = null;
+            do {
+                $page = $systemDrive->nodes()->children(
+                    $folderId,
+                    ListOptions::make()->perPage(100)->cursor($cursor),
+                );
+                foreach ($page->items as $node) {
+                    /** @var NodeSnapshot $node */
+                    if ($node->kind === NodeKind::Folder) {
+                        $queue[] = $node->id;
+
+                        continue;
+                    }
+                    if ($node->kind === NodeKind::Document) {
+                        $snapshot = $this->loadSnapshotFromSystemDrive($systemDrive, $node->id);
+                        if ($snapshot !== null && $snapshot->type === 'vaulter/rich-text') {
+                            if ($this->publishSnapshot($tenantKey, $projectScope, $snapshot, null, $force) !== null) {
                                 $indexed++;
                             }
                         }
                     }
-                    $cursor = $page->nextCursor;
-                } while ($cursor !== null);
-            }
+                }
+                $cursor = $page->nextCursor;
+            } while ($cursor !== null);
+        }
 
-            return $indexed;
-        });
+        return $indexed;
     }
 
     private function projectorVersion(): int

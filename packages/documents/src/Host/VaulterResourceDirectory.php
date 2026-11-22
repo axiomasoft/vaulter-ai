@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\Ai\Documents\Host;
 
+use Generator;
 use Illuminate\Contracts\Auth\Access\Authorizable;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
@@ -98,7 +99,6 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
                     $scope['tenant_id'],
                     $scope['project_scope'],
                     $trimmed,
-                    $maxCandidates,
                 );
 
                 if ($matchingDocIds !== [] || ! $isPgsql) {
@@ -106,9 +106,10 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
                     foreach ($matchingDocIds as $docId) {
                         $docSet[(string) $docId] = true;
                     }
+                    $remainingDocs = $docSet;
                     $queryLower = mb_strtolower($trimmed);
 
-                    foreach ($this->visibleDocuments($acting, $maxCandidates * 4) as $node) {
+                    foreach ($this->visibleDocuments($acting) as $node) {
                         if (isset($found[$node->id])) {
                             continue;
                         }
@@ -137,12 +138,16 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
 
                         $docKey = (string) (Identity::key($snapshot->documentId) ?? $snapshot->documentId);
                         if (isset($docSet[$docKey])) {
+                            unset($remainingDocs[$docKey]);
                             $entry = $this->toEntry($node);
                             if ($entry !== null) {
                                 $found[$entry->resourceId] = $entry;
                                 if (count($found) >= $maxCandidates) {
                                     return array_values($found);
                                 }
+                            }
+                            if ($isPgsql && $remainingDocs === []) {
+                                break;
                             }
                         }
                     }
@@ -217,7 +222,7 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
     {
         if ($context->driveId !== null && $context->driveId !== '') {
             $drive = $this->vaulter->findDriveById($context->driveId);
-            if ($drive === null || ! $this->matchesTenantScope($context, $drive)) {
+            if ($drive === null || ! $this->matchesScope($context, $drive)) {
                 return [];
             }
 
@@ -230,7 +235,7 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
             $page = $this->vaulter->drives($actor, ListOptions::make()->perPage(50)->cursor($cursor));
             foreach ($page->items as $snapshot) {
                 $handle = $this->vaulter->findDriveById($snapshot->id);
-                if ($handle !== null && $this->matchesTenantScope($context, $handle)) {
+                if ($handle !== null && $this->matchesScope($context, $handle)) {
                     $drives[] = $handle;
                 }
             }
@@ -240,23 +245,23 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
         return $drives;
     }
 
-    private function matchesTenantScope(CallContext $context, DriveHandle $drive): bool
+    private function matchesScope(CallContext $context, DriveHandle $drive): bool
     {
         $snapshot = $drive->snapshot();
         $driveScope = $this->scopes->forDriveEvent($snapshot->tenantId, $snapshot->id);
         $callerScope = $this->scopes->forContext($context, $snapshot->id);
 
-        return (string) $driveScope['tenant_id'] === (string) $callerScope['tenant_id'];
+        return (string) $driveScope['tenant_id'] === (string) $callerScope['tenant_id']
+            && $driveScope['project_scope'] === $callerScope['project_scope'];
     }
 
     /**
-     * @return list<NodeSnapshot>
+     * @return Generator<int, NodeSnapshot>
      */
-    private function visibleDocuments(DriveHandle $actingDrive, int $cap): array
+    private function visibleDocuments(DriveHandle $actingDrive): Generator
     {
-        $docs = [];
         $queue = [null];
-        while ($queue !== [] && count($docs) < $cap) {
+        while ($queue !== []) {
             $folderId = array_shift($queue);
             $cursor = null;
             do {
@@ -276,17 +281,12 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
                         continue;
                     }
                     if ($node->kind === NodeKind::Document && $node->document !== null) {
-                        $docs[] = $node;
-                        if (count($docs) >= $cap) {
-                            return $docs;
-                        }
+                        yield $node;
                     }
                 }
                 $cursor = $page->nextCursor;
             } while ($cursor !== null);
         }
-
-        return $docs;
     }
 
     private function toEntry(NodeSnapshot $node): ?ResourceEntry

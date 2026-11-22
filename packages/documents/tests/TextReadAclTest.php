@@ -2,19 +2,25 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Config;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
 use Vaulter\Ai\Core\Contracts\Office;
+use Vaulter\Ai\Core\Contracts\TransactionRunner;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\NextAction;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
+use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Protocol\WireValidator;
+use Vaulter\Ai\Documents\Persistence\VaulterTransactionRunner;
+use Vaulter\Ai\Documents\Projection\DefaultDocumentScopeResolver;
 use Vaulter\Ai\Tests\Support\OfficeTestCase;
 use Vaulter\Ai\Tests\Support\TestActor;
 use Vaulter\Ai\Tests\Support\TestOwner;
+use Vaulter\Database\VaulterDatabase;
 use Vaulter\Documents\Facades\Documents;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
 use Vaulter\Drive\Access\ValueObjects\Subject;
@@ -294,4 +300,260 @@ test('search, outline p42/p71, block segments, and ACL isolation behave identica
     ], JSON_THROW_ON_ERROR));
     $revokedHttp->assertStatus(404);
     expect($revokedHttp->json('error.code'))->toBe('resource_unavailable');
+});
+
+test('two-project scope isolation blocks cross-project drives even when actor has Drive access in both', function (): void {
+    Config::set('vaulter-ai-documents.default_tenant_id', '61');
+
+    $actor = TestActor::query()->create(['name' => 'Dual Project User', 'email' => 'dual@example.test']);
+    $ownerA = TestOwner::query()->create(['name' => 'Org Project A']);
+    $ownerB = TestOwner::query()->create(['name' => 'Org Project B']);
+
+    $driveA = Vaulter::drive($ownerA)->asSystem('seed');
+    $driveB = Vaulter::drive($ownerB)->asSystem('seed');
+    $driveA->access()->grant($driveA->root()->id, new GrantInput(Subject::ofModel($actor), RoleRegistry::READER));
+    $driveB->access()->grant($driveB->root()->id, new GrantInput(Subject::ofModel($actor), RoleRegistry::READER));
+
+    $scopes = $this->app->make(DefaultDocumentScopeResolver::class);
+    $scopes->bindDriveScope($driveA->snapshot()->id, 61, 'project-a');
+    $scopes->bindDriveScope($driveB->snapshot()->id, 61, 'project-b');
+
+    $docContent = static fn (string $text): array => [
+        'type' => 'doc',
+        'content' => [[
+            'type' => 'paragraph',
+            'attrs' => ['blockId' => 'p1'],
+            'content' => [['type' => 'text', 'text' => $text]],
+        ]],
+    ];
+
+    $docA = Documents::in($driveA)->create('Договор проект Альфа', 'vaulter/rich-text', $docContent('Текст Альфа'));
+    $docB = Documents::in($driveB)->create('Договор проект Бета', 'vaulter/rich-text', $docContent('Текст Бета'));
+
+    $office = $this->app->make(Office::class);
+    $ctxProjectAAll = new CallContext('61', 'project-a', 'user/'.$actor->getKey(), 'documents', '1', null, $actor);
+    $ctxProjectAExplicitB = new CallContext('61', 'project-a', 'user/'.$actor->getKey(), 'documents', '1', $driveB->snapshot()->id, $actor);
+    $ctxProjectBAll = new CallContext('61', 'project-b', 'user/'.$actor->getKey(), 'documents', '1', null, $actor);
+
+    $searchA = $office->handle($ctxProjectAAll, new OfficeRequest(1, OfficeOperation::Search, (object) ['query' => 'Договор', 'limit' => 10]));
+    expect($searchA->ok)->toBeTrue();
+    expect(array_map(static fn (stdClass $i): string => $i->resource_id, $searchA->result?->items ?? []))->toBe([$docA->id]);
+
+    $searchExplicitBFromA = $office->handle($ctxProjectAExplicitB, new OfficeRequest(1, OfficeOperation::Search, (object) ['query' => 'Договор', 'limit' => 10]));
+    expect($searchExplicitBFromA->ok)->toBeTrue();
+    expect($searchExplicitBFromA->result?->items)->toBe([]);
+
+    $readBFromA = $office->handle($ctxProjectAAll, new OfficeRequest(1, OfficeOperation::Read, (object) [
+        'resource_id' => $docB->id,
+        'selector' => (object) ['kind' => 'text_block', 'block_id' => 'p1'],
+    ]));
+    expect($readBFromA->ok)->toBeFalse();
+    expect($readBFromA->errorCode)->toBe(ErrorCode::ResourceUnavailable);
+
+    $searchB = $office->handle($ctxProjectBAll, new OfficeRequest(1, OfficeOperation::Search, (object) ['query' => 'Договор', 'limit' => 10]));
+    expect($searchB->ok)->toBeTrue();
+    expect(array_map(static fn (stdClass $i): string => $i->resource_id, $searchB->result?->items ?? []))->toBe([$docB->id]);
+});
+
+test('office.describe requires edit permission before disclosing text.replace_exact@1 schema', function (): void {
+    Config::set('vaulter-ai-documents.default_tenant_id', '61');
+
+    $viewer = TestActor::query()->create(['name' => 'Viewer', 'email' => 'viewer@example.test']);
+    $owner = TestOwner::query()->create(['name' => 'Org View']);
+    $drive = Vaulter::drive($owner)->asSystem('seed');
+    $drive->access()->grant($drive->root()->id, new GrantInput(Subject::ofModel($viewer), RoleRegistry::PREVIEWER));
+
+    $doc = Documents::in($drive)->create('Договор просмотр', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [[
+            'type' => 'paragraph',
+            'attrs' => ['blockId' => 'p1'],
+            'content' => [['type' => 'text', 'text' => 'Только чтение']],
+        ]],
+    ]);
+
+    $viewerCtx = new CallContext('61', 'default', 'user/'.$viewer->getKey(), 'documents', '1', $drive->snapshot()->id, $viewer);
+    $office = $this->app->make(Office::class);
+
+    $readOk = $office->handle($viewerCtx, new OfficeRequest(1, OfficeOperation::Read, (object) [
+        'resource_id' => $doc->id,
+        'selector' => (object) ['kind' => 'text_block', 'block_id' => 'p1'],
+    ]));
+    expect($readOk->ok)->toBeTrue();
+
+    $describeDenied = $office->handle($viewerCtx, new OfficeRequest(1, OfficeOperation::Describe, (object) [
+        'resource_id' => $doc->id,
+        'command' => 'text.replace_exact@1',
+    ]));
+    expect($describeDenied->ok)->toBeFalse();
+    expect($describeDenied->errorCode)->toBe(ErrorCode::ResourceUnavailable);
+
+    $this->app->instance(CallContextResolver::class, new class($viewerCtx) implements CallContextResolver
+    {
+        public function __construct(private readonly CallContext $ctx) {}
+
+        public function resolve(Request $request): ?CallContext
+        {
+            return $this->ctx;
+        }
+    });
+
+    $httpDescribe = $this->call('POST', '/api/vaulter-ai/v1/operations', [], [], [], ['CONTENT_TYPE' => 'application/json'], json_encode([
+        'version' => 1,
+        'operation' => 'office.describe',
+        'input' => ['resource_id' => $doc->id, 'command' => 'text.replace_exact@1'],
+    ], JSON_THROW_ON_ERROR));
+    $httpDescribe->assertStatus(404);
+    expect($httpDescribe->json('error.code'))->toBe('resource_unavailable');
+});
+
+test('search applies candidate cap to authorized body matches rather than truncating traversal early', function (): void {
+    Config::set('vaulter-ai-documents.default_tenant_id', '61');
+    Config::set('vaulter.ids.host_keys', 'bigint');
+
+    $actor = TestActor::query()->create(['name' => 'Searcher', 'email' => 'searcher@example.test']);
+    $owner = TestOwner::query()->create(['name' => 'Org Search']);
+    $drive = Vaulter::drive($owner)->asSystem('seed');
+    $drive->access()->grant($drive->root()->id, new GrantInput(Subject::ofModel($actor), RoleRegistry::READER));
+
+    // Seed 9 visible non-matching documents before the matching 10th document, plus 2 restricted matching docs.
+    for ($i = 1; $i <= 9; $i++) {
+        Documents::in($drive)->create(sprintf('A-%02d Обычный файл', $i), 'vaulter/rich-text', [
+            'type' => 'doc',
+            'content' => [[
+                'type' => 'paragraph',
+                'attrs' => ['blockId' => 'p1'],
+                'content' => [['type' => 'text', 'text' => 'Обычный текст без совпадения']],
+            ]],
+        ]);
+    }
+
+    $secretFolder = $drive->folders()->create('Hidden');
+    $drive->access()->restrictInheritance($secretFolder->id, InheritanceRestriction::Empty);
+    for ($i = 1; $i <= 2; $i++) {
+        Documents::in($drive)->create("Secret {$i}", 'vaulter/rich-text', [
+            'type' => 'doc',
+            'content' => [[
+                'type' => 'paragraph',
+                'attrs' => ['blockId' => 'p1'],
+                'content' => [['type' => 'text', 'text' => 'Скрытый эксклюзивный термин']],
+            ]],
+        ], $secretFolder->id);
+    }
+
+    $tenth = Documents::in($drive)->create('Z-10 Целевой документ', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [[
+            'type' => 'paragraph',
+            'attrs' => ['blockId' => 'p1'],
+            'content' => [['type' => 'text', 'text' => 'Содержит эксклюзивный термин только в теле']],
+        ]],
+    ]);
+
+    Config::set('vaulter-ai.limits.search_max_candidates', 1);
+
+    $office = $this->app->make(Office::class);
+    $ctx = new CallContext('61', 'default', 'user/'.$actor->getKey(), 'documents', '1', $drive->snapshot()->id, $actor);
+
+    $res = $office->handle($ctx, new OfficeRequest(1, OfficeOperation::Search, (object) [
+        'query' => 'эксклюзивный',
+        'resource_type' => 'text',
+        'limit' => 5,
+    ]));
+    expect($res->ok)->toBeTrue();
+    expect(array_map(static fn (stdClass $i): string => $i->resource_id, $res->result?->items ?? []))->toBe([$tenth->id]);
+
+    // Adding a second visible authorized match exceeds search_max_candidates=1 cleanly.
+    Documents::in($drive)->create('Z-11 Второй матч', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [[
+            'type' => 'paragraph',
+            'attrs' => ['blockId' => 'p1'],
+            'content' => [['type' => 'text', 'text' => 'Ещё один эксклюзивный термин']],
+        ]],
+    ]);
+
+    $tooMany = $office->handle($ctx, new OfficeRequest(1, OfficeOperation::Search, (object) [
+        'query' => 'эксклюзивный',
+        'resource_type' => 'text',
+        'limit' => 5,
+    ]));
+    expect($tooMany->ok)->toBeFalse();
+    expect($tooMany->errorCode)->toBe(ErrorCode::LimitExceeded);
+});
+
+test('HTTP enforces byte limit on the exact UTF-8 envelope sent over HTTP for Cyrillic text', function (): void {
+    Config::set('vaulter-ai-documents.default_tenant_id', '61');
+
+    $actor = TestActor::query()->create(['name' => 'Cyrillic Reader', 'email' => 'cyrillic@example.test']);
+    $owner = TestOwner::query()->create(['name' => 'Org Cyrillic']);
+    $drive = Vaulter::drive($owner)->asSystem('seed');
+    $drive->access()->grant($drive->root()->id, new GrantInput(Subject::ofModel($actor), RoleRegistry::READER));
+
+    $doc = Documents::in($drive)->create('Кириллица', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [
+            [
+                'type' => 'paragraph',
+                'attrs' => ['blockId' => 'p-4k'],
+                'content' => [['type' => 'text', 'text' => str_repeat('Б', 4000)]],
+            ],
+            [
+                'type' => 'paragraph',
+                'attrs' => ['blockId' => 'p-9k'],
+                'content' => [['type' => 'text', 'text' => str_repeat('Б', 9000)]],
+            ],
+        ],
+    ]);
+
+    $ctx = new CallContext('61', 'default', 'user/'.$actor->getKey(), 'documents', '1', $drive->snapshot()->id, $actor);
+    $this->app->instance(CallContextResolver::class, new class($ctx) implements CallContextResolver
+    {
+        public function __construct(private readonly CallContext $ctx) {}
+
+        public function resolve(Request $request): ?CallContext
+        {
+            return $this->ctx;
+        }
+    });
+
+    $okResp = $this->call('POST', '/api/vaulter-ai/v1/operations', [], [], [], ['CONTENT_TYPE' => 'application/json'], json_encode([
+        'version' => 1,
+        'operation' => 'office.read',
+        'input' => ['resource_id' => $doc->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p-4k']],
+    ], JSON_THROW_ON_ERROR));
+    $okResp->assertStatus(200);
+    $rawOk = (string) $okResp->getContent();
+    expect(strlen($rawOk))->toBeLessThanOrEqual(16384);
+    expect($rawOk)->toContain('ББББ');
+
+    $officeDb = $this->app->make(OfficeDatabase::class);
+    $tokensBefore = $officeDb->query('ai_read_tokens')->count();
+
+    $tooLarge = $this->call('POST', '/api/vaulter-ai/v1/operations', [], [], [], ['CONTENT_TYPE' => 'application/json'], json_encode([
+        'version' => 1,
+        'operation' => 'office.read',
+        'input' => ['resource_id' => $doc->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p-9k']],
+    ], JSON_THROW_ON_ERROR));
+    $tooLarge->assertStatus(413);
+    expect($tooLarge->json('error.code'))->toBe('limit_exceeded');
+    expect($officeDb->query('ai_read_tokens')->count())->toBe($tokensBefore);
+
+    // Search snapshot creation uses VaulterTransactionRunner and propagates tenant context inside PG transaction.
+    expect($this->app->make(TransactionRunner::class))->toBeInstanceOf(VaulterTransactionRunner::class);
+    if ($officeDb->driver() === 'pgsql') {
+        $vDb = $this->app->make(VaulterDatabase::class);
+        $observedTenant = null;
+        $conn = $vDb->connection();
+        $conn->listen(function (QueryExecuted $query) use ($conn, &$observedTenant): void {
+            if ($observedTenant === null && str_contains($query->sql, 'ai_search_pages') && str_starts_with(strtolower(ltrim($query->sql)), 'insert')) {
+                $observedTenant = $conn->selectOne("SELECT NULLIF(current_setting('vaulter.tenant_id', true), '') AS t")?->t;
+            }
+        });
+
+        $office = $this->app->make(Office::class);
+        $search = $office->handle($ctx, new OfficeRequest(1, OfficeOperation::Search, (object) ['query' => 'Кириллица', 'limit' => 5]));
+        expect($search->ok)->toBeTrue();
+        expect($observedTenant)->toBe('61');
+    }
 });

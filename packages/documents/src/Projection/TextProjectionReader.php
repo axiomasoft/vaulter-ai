@@ -69,99 +69,127 @@ final readonly class TextProjectionReader
         int $limit,
         ?string $cursor,
     ): ?array {
-        $head = $this->head($tenantKey, $projectScope, $documentId);
-        if ($head === null) {
-            return null;
-        }
-
         $queryString = $query ?? '';
+        $cursorData = null;
         $afterOrdinal = -1;
         if ($cursor !== null) {
             $cursorData = $this->decodeCursor($context, $cursor, $resourceId, $queryString);
-            if ($cursorData['build_id'] !== $head['build_id'] || $cursorData['generation'] !== $head['generation']) {
-                throw OfficeException::cursorExpired('Projection build changed; restart outline read.');
-            }
             $afterOrdinal = $cursorData['last_ordinal'];
         }
 
         $headsTable = $this->vaulterDbOptions->table('ai_text_projection_heads');
         $blocksTable = $this->vaulterDbOptions->table('ai_text_blocks');
+        $trimmedQuery = trim($queryString);
+        $driver = $this->database->driver();
+        $terms = $trimmedQuery === '' ? [] : $this->tokenize($trimmedQuery);
 
+        if ($trimmedQuery !== '' && $terms === []) {
+            $headRow = $this->database->connection()
+                ->table($headsTable)
+                ->where('tenant_id', $tenantKey)
+                ->where('project_scope', $projectScope)
+                ->where('document_id', $documentId)
+                ->first(['source_generation', 'source_position', 'build_id']);
+
+            if ($headRow === null) {
+                return null;
+            }
+
+            $generation = QueryRecord::int($headRow, 'source_generation');
+            $position = QueryRecord::int($headRow, 'source_position');
+            $buildId = QueryRecord::str($headRow, 'build_id');
+            if ($cursorData !== null && ($cursorData['build_id'] !== $buildId || $cursorData['generation'] !== $generation)) {
+                throw OfficeException::cursorExpired('Projection build changed; restart outline read.');
+            }
+
+            return [
+                'marker' => new Marker($generation, $position),
+                'build_id' => $buildId,
+                'blocks' => [],
+                'truncated' => false,
+                'next_cursor' => null,
+            ];
+        }
+
+        // Read head and matching blocks in one atomic LEFT JOIN statement so build publication
+        // between a separate head() check and block query cannot silently return an empty page.
         $builder = $this->database->connection()
-            ->table($blocksTable.' as b')
-            ->join($headsTable.' as h', static function (JoinClause $join): void {
+            ->table($headsTable.' as h')
+            ->leftJoin($blocksTable.' as b', static function (JoinClause $join) use ($afterOrdinal, $trimmedQuery, $driver): void {
                 $join->on('b.tenant_id', '=', 'h.tenant_id')
                     ->on('b.project_scope', '=', 'h.project_scope')
                     ->on('b.document_id', '=', 'h.document_id')
                     ->on('b.source_generation', '=', 'h.source_generation')
-                    ->on('b.build_id', '=', 'h.build_id');
+                    ->on('b.build_id', '=', 'h.build_id')
+                    ->where('b.ordinal', '>', $afterOrdinal);
+
+                if ($trimmedQuery !== '' && $driver === 'pgsql') {
+                    $join->whereRaw("to_tsvector('simple'::regconfig, b.search_text) @@ plainto_tsquery('simple'::regconfig, ?)", [$trimmedQuery]);
+                }
             })
             ->where('h.tenant_id', $tenantKey)
             ->where('h.project_scope', $projectScope)
             ->where('h.document_id', $documentId)
-            ->where('h.build_id', $head['build_id'])
-            ->where('h.source_generation', $head['generation'])
-            ->where('b.ordinal', '>', $afterOrdinal)
             ->orderBy('b.ordinal');
 
-        $trimmedQuery = trim($queryString);
-        $driver = $this->database->driver();
+        $cols = [
+            'h.source_generation',
+            'h.source_position',
+            'h.build_id',
+            'b.block_id',
+            'b.ordinal',
+            'b.node_kind',
+            'b.heading_path',
+            'b.search_text',
+            'b.formatted_node',
+        ];
 
-        if ($trimmedQuery !== '' && $driver === 'pgsql') {
-            $terms = $this->tokenize($trimmedQuery);
-            if ($terms === []) {
-                return [
-                    'marker' => new Marker($head['generation'], $head['position']),
-                    'build_id' => $head['build_id'],
-                    'blocks' => [],
-                    'truncated' => false,
-                    'next_cursor' => null,
-                ];
-            }
-            $builder->whereRaw("to_tsvector('simple'::regconfig, b.search_text) @@ plainto_tsquery('simple'::regconfig, ?)", [$trimmedQuery]);
+        $rows = ($trimmedQuery !== '' && $driver !== 'pgsql')
+            ? $builder->get($cols)
+            : $builder->limit($limit + 1)->get($cols);
+
+        $firstRow = $rows->first();
+        if ($firstRow === null) {
+            return null;
         }
 
-        $cols = ['b.block_id', 'b.ordinal', 'b.node_kind', 'b.heading_path', 'b.search_text', 'b.formatted_node', 'h.source_generation', 'h.source_position', 'h.build_id'];
+        $generation = QueryRecord::int($firstRow, 'source_generation');
+        $position = QueryRecord::int($firstRow, 'source_position');
+        $buildId = QueryRecord::str($firstRow, 'build_id');
+
+        if ($cursorData !== null && ($cursorData['build_id'] !== $buildId || $cursorData['generation'] !== $generation)) {
+            throw OfficeException::cursorExpired('Projection build changed; restart outline read.');
+        }
 
         $entries = [];
         $lastOrdinal = $afterOrdinal;
         $hasMore = false;
 
-        if ($trimmedQuery !== '' && $driver !== 'pgsql') {
-            // SQLite does not support PG tsvector GIN; evaluate token matching deterministically over ordered blocks.
-            $rows = $builder->get($cols);
-            $terms = $this->tokenize($trimmedQuery);
-            foreach ($rows as $row) {
+        foreach ($rows as $row) {
+            if (QueryRecord::raw($row, 'block_id') === null) {
+                continue;
+            }
+            if ($trimmedQuery !== '' && $driver !== 'pgsql') {
                 $searchLower = mb_strtolower(QueryRecord::str($row, 'search_text'));
                 if (! $this->matchesAllTerms($searchLower, $terms)) {
                     continue;
                 }
-                if (count($entries) >= $limit) {
-                    $hasMore = true;
-                    break;
-                }
-                $entries[] = $this->formatOutlineEntry($row, $trimmedQuery);
-                $lastOrdinal = QueryRecord::int($row, 'ordinal');
             }
-        } else {
-            $rows = $builder->limit($limit + 1)->get($cols);
-            foreach ($rows as $row) {
-                if (count($entries) >= $limit) {
-                    $hasMore = true;
-                    break;
-                }
-                $entries[] = $this->formatOutlineEntry($row, $trimmedQuery);
-                $lastOrdinal = QueryRecord::int($row, 'ordinal');
+            if (count($entries) >= $limit) {
+                $hasMore = true;
+                break;
             }
+            $entries[] = $this->formatOutlineEntry($row, $trimmedQuery);
+            $lastOrdinal = QueryRecord::int($row, 'ordinal');
         }
 
         $nextCursor = $hasMore
-            ? $this->encodeCursor($context, $resourceId, $queryString, $head['generation'], $head['build_id'], $lastOrdinal)
+            ? $this->encodeCursor($context, $resourceId, $queryString, $generation, $buildId, $lastOrdinal)
             : null;
 
         return [
-            'marker' => new Marker($head['generation'], $head['position']),
-            'build_id' => $head['build_id'],
+            'marker' => new Marker($generation, $position),
+            'build_id' => $buildId,
             'blocks' => $entries,
             'truncated' => $hasMore,
             'next_cursor' => $nextCursor,
@@ -225,7 +253,7 @@ final readonly class TextProjectionReader
         int|string $tenantKey,
         string $projectScope,
         string $query,
-        int $limit,
+        ?int $limit = null,
     ): array {
         $trimmed = trim($query);
         if ($trimmed === '') {
@@ -253,13 +281,16 @@ final readonly class TextProjectionReader
                 return [];
             }
 
-            $plucked = $builder
+            $pgQuery = $builder
                 ->whereRaw("to_tsvector('simple'::regconfig, b.search_text) @@ plainto_tsquery('simple'::regconfig, ?)", [$trimmed])
                 ->select('h.document_id')
-                ->distinct()
-                ->limit($limit)
-                ->pluck('h.document_id')
-                ->all();
+                ->distinct();
+
+            if ($limit !== null) {
+                $pgQuery->limit($limit);
+            }
+
+            $plucked = $pgQuery->pluck('h.document_id')->all();
 
             $ids = [];
             foreach ($plucked as $docId) {
@@ -284,7 +315,7 @@ final readonly class TextProjectionReader
                 if (is_int($docId) || is_string($docId)) {
                     $matched[(string) $docId] = $docId;
                 }
-                if (count($matched) >= $limit) {
+                if ($limit !== null && count($matched) >= $limit) {
                     break;
                 }
             }

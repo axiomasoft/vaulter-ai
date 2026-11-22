@@ -85,29 +85,29 @@ final readonly class Read
             afterReceipt: $afterReceipt,
         );
 
-        $dataBytes = strlen(json_encode($page->data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-        $maxBytes = $this->intLimit('read_max_bytes', 16384);
-        if ($dataBytes > $maxBytes) {
-            throw OfficeException::limitExceeded('Read payload exceeds configured byte limit; narrow selector.');
-        }
-
-        $ttlSeconds = $this->intLimit('read_token_ttl_seconds', 900);
-        $readToken = $this->tokens->issue($context, $entry->resourceId, $page, $ttlSeconds);
-
-        $result = (object) [
+        $makeResult = static fn (string $token): stdClass => (object) [
             'marker' => $page->marker->toStdClass(),
-            'read_token' => $readToken,
+            'read_token' => $token,
             'data' => $page->data,
             'truncated' => $page->truncated,
             'next_cursor' => $page->nextCursor,
         ];
 
-        $resultBytes = strlen(json_encode($result, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-        if ($resultBytes > $maxBytes) {
+        $maxBytes = $this->intLimit('read_max_bytes', 16384);
+        $probeResponse = OfficeResponse::success(OfficeOperation::Read, $makeResult('rt-'.str_repeat('0', 48)));
+        if ($probeResponse->wireBytes() > $maxBytes) {
             throw OfficeException::limitExceeded('Read result exceeds configured byte limit; narrow selector.');
         }
 
-        return OfficeResponse::success(OfficeOperation::Read, $result);
+        $ttlSeconds = $this->intLimit('read_token_ttl_seconds', 900);
+        $readToken = $this->tokens->issue($context, $entry->resourceId, $page, $ttlSeconds);
+
+        $response = OfficeResponse::success(OfficeOperation::Read, $makeResult($readToken));
+        if ($response->wireBytes() > $maxBytes) {
+            throw OfficeException::limitExceeded('Read result exceeds configured byte limit; narrow selector.');
+        }
+
+        return $response;
     }
 
     private function intLimit(string $key, int $default): int

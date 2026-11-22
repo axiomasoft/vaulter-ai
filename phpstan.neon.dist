@@ -32,12 +32,12 @@ parameters:
             method: 'Illuminate\Database\Connection::transaction()'
             message: 'Use VaulterDatabase::transaction() or OfficeDatabase::transaction().'
             allowIn:
-                - packages/core/src/Persistence/OfficeDatabase.php
+                - packages/core/src/Persistence/DefaultTransactionRunner.php
         -
             method: 'Illuminate\Database\ConnectionInterface::transaction()'
             message: 'Use VaulterDatabase::transaction() or OfficeDatabase::transaction().'
             allowIn:
-                - packages/core/src/Persistence/OfficeDatabase.php
+                - packages/core/src/Persistence/DefaultTransactionRunner.php
         -
             method: 'ZipArchive::extractTo()'
             message: 'Inspect a bounded ZIP directory before reading entries.'

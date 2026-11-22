@@ -9,6 +9,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
 use Vaulter\Ai\Core\Contracts\Office;
+use Vaulter\Ai\Core\Data\OfficeResponse;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
 use Vaulter\Ai\Core\Protocol\WireValidator;
@@ -31,7 +32,7 @@ final readonly class OfficeController
 
         if (! $parsed['ok']) {
             if ($parsed['kind'] === 'invalid_request') {
-                return new JsonResponse(['error' => 'invalid_request'], 400);
+                return new JsonResponse(['error' => 'invalid_request'], 400, options: OfficeResponse::WIRE_JSON_OPTIONS);
             }
 
             $response = $this->errorMapper->toResponse(
@@ -40,8 +41,8 @@ final readonly class OfficeController
                 version: 1,
             );
 
-            return new JsonResponse(
-                data: $response->toStdClass(),
+            return JsonResponse::fromJsonString(
+                data: $response->toJson(),
                 status: $this->errorMapper->httpStatus($response),
             );
         }
@@ -56,8 +57,8 @@ final readonly class OfficeController
                 version: 1,
             );
 
-            return new JsonResponse(
-                data: $response->toStdClass(),
+            return JsonResponse::fromJsonString(
+                data: $response->toJson(),
                 status: $this->errorMapper->httpStatus($response),
             );
         }
@@ -65,8 +66,8 @@ final readonly class OfficeController
         $office = $this->container->make(Office::class);
         $response = $office->handle($context, $officeRequest);
 
-        return new JsonResponse(
-            data: $response->toStdClass(),
+        return JsonResponse::fromJsonString(
+            data: $response->toJson(),
             status: $this->errorMapper->httpStatus($response),
         );
     }
