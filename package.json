@@ -1,0 +1,14 @@
+{
+  "name": "vaulter-ai",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Vaulter AI — Office AI SDK, resumable chat and executors.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=26.13.1"
+  },
+  "workspaces": [
+    "packages/vue"
+  ]
+}

@@ -1,0 +1,46 @@
+{
+    "name": "axiomasoft/vaulter-ai-monorepo",
+    "description": "Vaulter AI — Office AI SDK, resumable chat and executors (private monorepo workspace).",
+    "type": "project",
+    "license": "proprietary",
+    "homepage": "https://github.com/axiomasoft/vaulter-ai",
+    "authors": [
+        {
+            "name": "Dmitry Vostrikov",
+            "email": "dv.vostrikov@gmail.com"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/axiomasoft/vaulter-ai/issues",
+        "source": "https://github.com/axiomasoft/vaulter-ai"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "packages/*",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "axiomasoft/vaulter-ai-core": "1.0.x-dev",
+                    "axiomasoft/vaulter-ai-documents": "1.0.x-dev",
+                    "axiomasoft/vaulter-ai-sheets": "1.0.x-dev",
+                    "axiomasoft/vaulter-ai-collaboration": "1.0.x-dev",
+                    "axiomasoft/vaulter-ai-laravel-ai": "1.0.x-dev",
+                    "axiomasoft/vaulter-ai-agentools": "1.0.x-dev"
+                }
+            }
+        }
+    ],
+    "require": {
+        "php": ">=8.4 <8.6"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true
+    },
+    "scripts": {
+        "test": "@php vendor/bin/phpunit -c phpunit.xml.dist",
+        "phpstan": "@php vendor/bin/phpstan analyse -c phpstan.neon.dist --no-progress"
+    }
+}

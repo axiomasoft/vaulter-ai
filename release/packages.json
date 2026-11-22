@@ -1,0 +1,102 @@
+{
+    "schema": "vaulter.release/v2",
+    "php": [
+        {
+            "name": "axiomasoft/vaulter-ai-core",
+            "path": "packages/core",
+            "split": "axiomasoft/vaulter-ai-core",
+            "channel": "private",
+            "release_line": "php-ai-core",
+            "tag_prefix": "ai-core-v",
+            "license": "proprietary",
+            "access": "restricted",
+            "tested_ranges": {
+                "axiomasoft/vaulter-core": "^1.0",
+                "axiomasoft/vaulter-drive": "^1.0",
+                "axiomasoft/vaulter-documents": "^1.0",
+                "axiomasoft/vaulter-media": "^1.0"
+            }
+        },
+        {
+            "name": "axiomasoft/vaulter-ai-documents",
+            "path": "packages/documents",
+            "split": "axiomasoft/vaulter-ai-documents",
+            "channel": "private",
+            "release_line": "php-ai-documents",
+            "tag_prefix": "ai-documents-v",
+            "license": "proprietary",
+            "access": "restricted",
+            "tested_ranges": {
+                "axiomasoft/vaulter-documents": "^1.0"
+            }
+        },
+        {
+            "name": "axiomasoft/vaulter-ai-sheets",
+            "path": "packages/sheets",
+            "split": "axiomasoft/vaulter-ai-sheets",
+            "channel": "private",
+            "release_line": "php-ai-sheets",
+            "tag_prefix": "ai-sheets-v",
+            "license": "proprietary",
+            "access": "restricted",
+            "tested_ranges": {
+                "axiomasoft/vaulter-sheets": "^1.0"
+            }
+        },
+        {
+            "name": "axiomasoft/vaulter-ai-collaboration",
+            "path": "packages/collaboration",
+            "split": "axiomasoft/vaulter-ai-collaboration",
+            "channel": "private",
+            "release_line": "php-ai-collaboration",
+            "tag_prefix": "ai-collaboration-v",
+            "license": "proprietary",
+            "access": "restricted",
+            "tested_ranges": {
+                "axiomasoft/vaulter-collaboration": "^1.0"
+            }
+        },
+        {
+            "name": "axiomasoft/vaulter-ai-laravel-ai",
+            "path": "packages/laravel-ai",
+            "split": "axiomasoft/vaulter-ai-laravel-ai",
+            "channel": "private",
+            "release_line": "php-ai-laravel",
+            "tag_prefix": "ai-laravel-v",
+            "license": "proprietary",
+            "access": "restricted",
+            "tested_ranges": {
+                "axiomasoft/vaulter-core": "^1.0"
+            }
+        },
+        {
+            "name": "axiomasoft/vaulter-ai-agentools",
+            "path": "packages/agentools",
+            "split": "axiomasoft/vaulter-ai-agentools",
+            "channel": "private",
+            "release_line": "php-ai-agentools",
+            "tag_prefix": "ai-agentools-v",
+            "license": "proprietary",
+            "access": "restricted",
+            "tested_ranges": {
+                "axiomasoft/vaulter-core": "^1.0"
+            }
+        }
+    ],
+    "npm": [
+        {
+            "name": "@vaulter/ai-vue",
+            "path": "packages/vue",
+            "api": "1",
+            "channel": "private",
+            "release_line": "npm-ai-vue",
+            "tag_prefix": "@vaulter/ai-vue@",
+            "registry": "https://registry.npmjs.org",
+            "access": "restricted",
+            "tested_ranges": {
+                "@vaulter/vue": "^1.0"
+            }
+        }
+    ],
+    "images": []
+}
