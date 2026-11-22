@@ -9,6 +9,7 @@ use Illuminate\Support\Str;
 use stdClass;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\CommandOwner;
+use Vaulter\Ai\Core\Contracts\TextVerificationEvidence;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandOutcome;
 use Vaulter\Ai\Core\Data\CommandScope;
@@ -32,7 +33,7 @@ use Vaulter\Drive\Operations\DriveContext;
 use Vaulter\Events\EventRecorder;
 use Vaulter\ValueObjects\Events\EventScope;
 
-final readonly class SingleTextOwner implements CommandOwner
+final readonly class SingleTextOwner implements CommandOwner, TextVerificationEvidence
 {
     public const string KEY = 'documents.single_text@1';
 
@@ -160,5 +161,10 @@ final readonly class SingleTextOwner implements CommandOwner
     public function verify(CallContext $context, string $resourceId, string $receiptId, string $mode): stdClass
     {
         return $this->verifier->verify($context, $resourceId, $receiptId, $mode);
+    }
+
+    public function expectedTextChecks(CallContext $context, string $resourceId, string $receiptId, Marker $marker): array
+    {
+        return $this->verifier->expectedTextChecks($context, $resourceId, $receiptId, $marker);
     }
 }

@@ -6,6 +6,7 @@ namespace Vaulter\Ai\Core\Operations;
 
 use stdClass;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
+use Vaulter\Ai\Core\Contracts\TextVerificationEvidence;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandScope;
 use Vaulter\Ai\Core\Data\OfficeRequest;
@@ -57,10 +58,23 @@ final readonly class Verify
             || ! $this->validator->isValidMessage($response->toStdClass())) {
             throw OfficeException::temporarilyUnavailable();
         }
-        $names = is_array($checks) ? array_column($checks, 'name') : [];
-        if ($resource->resourceType === ResourceType::Text && ($result->outcome ?? null) === 'passed'
-            && (! in_array('text_exact', $names, true) || ! in_array('marks', $names, true))) {
-            throw OfficeException::temporarilyUnavailable();
+        if ($resource->resourceType === ResourceType::Text && ($result->outcome ?? null) === 'passed') {
+            if (! $owner instanceof TextVerificationEvidence || ! is_array($checks)) {
+                throw OfficeException::temporarilyUnavailable();
+            }
+            $actuals = array_column($checks, 'actual', 'name');
+            $expected = $owner->expectedTextChecks($context, $resourceId, $receiptId, $receiptMarker);
+            $marks = $actuals['marks'] ?? null;
+            if (($actuals['text_exact'] ?? null) !== $expected['text_exact'] || ! is_array($marks)) {
+                throw OfficeException::temporarilyUnavailable();
+            }
+            $markNames = array_filter($marks, is_string(...));
+            $expectedMarks = $expected['marks'];
+            sort($markNames, SORT_STRING);
+            sort($expectedMarks, SORT_STRING);
+            if (count($markNames) !== count($marks) || $markNames !== $expectedMarks) {
+                throw OfficeException::temporarilyUnavailable();
+            }
         }
 
         return $response;

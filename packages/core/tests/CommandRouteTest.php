@@ -3,13 +3,17 @@
 declare(strict_types=1);
 
 use Vaulter\Ai\Core\Contracts\CommandOwner;
+use Vaulter\Ai\Core\Contracts\TextVerificationEvidence;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandOutcome;
 use Vaulter\Ai\Core\Data\CommandScope;
+use Vaulter\Ai\Core\Data\Marker;
+use Vaulter\Ai\Core\Data\OfficeResponse;
 use Vaulter\Ai\Core\Data\PreparedPlan;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
+use Vaulter\Ai\Core\Protocol\WireValidator;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Documents\Writing\SingleTextOwner;
 use Vaulter\Ai\Tests\Support\OfficeTestCase;
@@ -54,16 +58,18 @@ test('a committed route binds the exact scoped key, proposal, digest and owner',
         ->toBe(ErrorCode::ResourceUnavailable);
 });
 
-test('verify refuses a well-formed answer with a different receipt or an older marker', function (): void {
+test('verify refuses a well-formed answer that disagrees with its committed receipt', function (string $mode, Closure $mutate): void {
     $fixture = new TextCommandFixture($this->app);
     $commit = $fixture->call(OfficeOperation::Commit, $fixture->commitInput($fixture->prepare()));
     $receipt = $commit->result->receipt_id;
     $real = $this->app->make(OfficeRegistry::class)->owner(SingleTextOwner::KEY);
-    $proxy = new class($real) implements CommandOwner
+    $proxy = new class($real, $mutate, $this->app->make(WireValidator::class)) implements CommandOwner, TextVerificationEvidence
     {
-        public bool $foreignReceipt = true;
-
-        public function __construct(private readonly CommandOwner $owner) {}
+        public function __construct(
+            private readonly SingleTextOwner $owner,
+            private readonly Closure $mutate,
+            private readonly WireValidator $validator,
+        ) {}
 
         public function key(): string
         {
@@ -88,18 +94,39 @@ test('verify refuses a well-formed answer with a different receipt or an older m
         public function verify(CallContext $context, string $resourceId, string $receiptId, string $mode): stdClass
         {
             $result = $this->owner->verify($context, $resourceId, $receiptId, $mode);
-            if ($this->foreignReceipt) {
-                $result->receipt_id = 'foreign-receipt';
-            } else {
-                $result->marker->position--;
-            }
+            expect($result->outcome)->toBe('passed');
+            ($this->mutate)($result);
+            expect($this->validator->isValidMessage(OfficeResponse::success(OfficeOperation::Verify, $result)->toStdClass()))->toBeTrue();
 
             return $result;
         }
+
+        public function expectedTextChecks(CallContext $context, string $resourceId, string $receiptId, Marker $marker): array
+        {
+            return $this->owner->expectedTextChecks($context, $resourceId, $receiptId, $marker);
+        }
     };
+    $input = ['receipt_id' => $receipt, 'mode' => $mode];
+    expect($fixture->call(OfficeOperation::Verify, $input)->result->outcome)->toBe('passed');
     $this->freshRegistry()->registerOwner('text.replace_exact@1', 'snapshot', $proxy);
-    $input = ['receipt_id' => $receipt, 'mode' => 'at_commit'];
     expect($fixture->call(OfficeOperation::Verify, $input)->errorCode)->toBe(ErrorCode::TemporarilyUnavailable);
-    $proxy->foreignReceipt = false;
-    expect($fixture->call(OfficeOperation::Verify, $input)->errorCode)->toBe(ErrorCode::TemporarilyUnavailable);
-});
+})->with([
+    'foreign receipt' => ['at_commit', static function (stdClass $result): void {
+        $result->receipt_id = 'foreign-receipt';
+    }],
+    'older marker' => ['at_commit', static function (stdClass $result): void {
+        $result->marker->position--;
+    }],
+    'old fragment at commit' => ['at_commit', static function (stdClass $result): void {
+        $result->checks[0]->actual = '15';
+    }],
+    'invented marks at commit' => ['at_commit', static function (stdClass $result): void {
+        $result->checks[1]->actual = ['link'];
+    }],
+    'old fragment in current state' => ['current', static function (stdClass $result): void {
+        $result->checks[0]->actual = '15';
+    }],
+    'missing marks in current state' => ['current', static function (stdClass $result): void {
+        $result->checks[1]->actual = [];
+    }],
+]);

@@ -32,7 +32,7 @@ final readonly class ResolveProposal
         private Clock $clock,
     ) {}
 
-    /** Returns false if a competing approval or rejection already decided the proposal. */
+    /** Returns false for an already decided proposal. A matching approval retry can republish its ready dispatch. */
     public function resolve(CommandScope $scope, string $proposalId, string $digest, CallContext $approver, bool $approved): bool
     {
         $initiator = $scope->context;
@@ -43,7 +43,8 @@ final readonly class ResolveProposal
 
         return $this->db->transaction(function () use ($scope, $proposalId, $digest, $approver, $approved, $initiator): bool {
             $proposal = $this->proposals->findInTransaction($initiator, $scope->resourceId, $proposalId, lock: true);
-            if ($proposal === null || ! $proposal->hasPayload) {
+            if ($proposal === null || ! $proposal->hasPayload
+                || $this->directory->findAccessible($approver, $scope->resourceId, 'edit') === null) {
                 throw OfficeException::resourceUnavailable();
             }
             $this->commit->authorize($scope, $proposal);
@@ -52,6 +53,13 @@ final readonly class ResolveProposal
                 throw OfficeException::preconditionFailed();
             }
             if ($proposal->decision !== 'pending') {
+                if ($approved && $proposal->decision === 'approved'
+                    && $this->db->query('ai_dispatches')->where('proposal_id', $proposalId)->where('state', 'ready')->exists()
+                    && $this->routes->find($scope)?->proposalId === $proposalId) {
+                    // A previous approval may have committed before its job reached the queue.
+                    $this->publishAfterCommit($initiator->tenantId, $proposalId);
+                }
+
                 return false;
             }
             if (new DateTimeImmutable($plan->expiresAt) <= $this->clock->now()) {
@@ -67,12 +75,17 @@ final readonly class ResolveProposal
                     'proposal_id' => $proposalId,
                     'available_at' => $this->db->utcTimestamp($this->clock->now()),
                 ]);
-                $this->db->afterCommit(function () use ($initiator, $proposalId): void {
-                    $this->bus->dispatch(new DispatchApprovedCommand($initiator->tenantId, $proposalId));
-                });
+                $this->publishAfterCommit($initiator->tenantId, $proposalId);
             }
 
             return true;
         }, $initiator->tenantId);
+    }
+
+    private function publishAfterCommit(string $tenantId, string $proposalId): void
+    {
+        $this->db->afterCommit(function () use ($tenantId, $proposalId): void {
+            $this->bus->dispatch(new DispatchApprovedCommand($tenantId, $proposalId));
+        });
     }
 }

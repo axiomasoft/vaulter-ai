@@ -101,6 +101,19 @@ final readonly class TextVerifier
         ];
     }
 
+    /** @return array{text_exact: string, marks: list<string>} */
+    public function expectedTextChecks(CallContext $context, string $resourceId, string $receiptId, Marker $marker): array
+    {
+        $this->access->resource($context, $resourceId);
+        $evidence = $this->load($context, $resourceId, $receiptId, $marker);
+        $replacement = $evidence['replacement'] ?? null;
+        if (! is_string($replacement) || ! is_array($evidence['marks'] ?? null)) {
+            throw new OfficeException(ErrorCode::EvidenceUnavailable);
+        }
+
+        return ['text_exact' => $replacement, 'marks' => $this->markNames(TextReplacement::nodes($evidence['marks']))];
+    }
+
     /**
      * @param  array<string, mixed>  $block
      * @param  array<string, mixed>  $evidence
@@ -128,11 +141,8 @@ final readonly class TextVerifier
             }
             $marks = $run['marks'];
             $marksPass = $marksPass && $marks !== null && RichTextBlockExtractor::markSignature($marks) === $expected;
-            foreach ($marks ?? [] as $mark) {
-                $name = $mark['type'] ?? null;
-                if (is_string($name) && $name !== '') {
-                    $actualMarks[$name] = $name;
-                }
+            foreach ($this->markNames($marks ?? []) as $name) {
+                $actualMarks[$name] = $name;
             }
         }
 
@@ -144,6 +154,23 @@ final readonly class TextVerifier
             ],
             (object) ['name' => 'marks', 'passed' => $marksPass, 'actual' => array_values($actualMarks)],
         ];
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $marks
+     * @return list<string>
+     */
+    private function markNames(array $marks): array
+    {
+        $names = [];
+        foreach ($marks as $mark) {
+            $name = $mark['type'] ?? null;
+            if (is_string($name) && $name !== '') {
+                $names[$name] = $name;
+            }
+        }
+
+        return array_values($names);
     }
 
     /** @return array<string, mixed> */
