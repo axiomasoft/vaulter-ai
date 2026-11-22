@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\DatabaseTransactionsManager;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Config;
@@ -29,6 +30,38 @@ use Vaulter\Drive\Enums\Access\InheritanceRestriction;
 use Vaulter\Drive\Facades\Vaulter;
 
 uses(OfficeTestCase::class);
+
+test('Office transactions use the write connection when it shares only Vaulter’s connection name', function (): void {
+    Config::set('vaulter.database.connection', 'testing');
+    Config::set('vaulter-ai.database.connection', 'testing::write');
+
+    $officeDb = $this->app->make(OfficeDatabase::class);
+    $officeConnection = $officeDb->connection();
+    $vaulterConnection = $this->app->make(VaulterDatabase::class)->connection();
+    expect($officeConnection)->not->toBe($vaulterConnection)
+        ->and($officeConnection->getName())->toBe($vaulterConnection->getName());
+
+    $officeConnection->setTransactionManager(new DatabaseTransactionsManager);
+    $vaulterConnection->setTransactionManager(new DatabaseTransactionsManager);
+
+    $committed = false;
+    $officeDb->transaction(static function () use ($officeDb, $officeConnection, $vaulterConnection, &$committed): void {
+        expect($officeConnection->transactionLevel())->toBe(1)
+            ->and($vaulterConnection->transactionLevel())->toBe(0);
+
+        if ($officeDb->driver() === 'pgsql') {
+            $tenant = $officeConnection->selectOne("SELECT current_setting('vaulter.tenant_id', true) AS tenant")?->tenant;
+            expect($tenant)->toBe('tenant-write');
+        }
+
+        $officeDb->afterCommit(static function () use (&$committed): void {
+            $committed = true;
+        });
+        expect($committed)->toBeFalse();
+    }, tenantId: 'tenant-write');
+
+    expect($committed)->toBeTrue();
+});
 
 test('search, outline p42/p71, block segments, and ACL isolation behave identically over PHP and HTTP', function (): void {
     Config::set('vaulter-ai-documents.default_tenant_id', '61');

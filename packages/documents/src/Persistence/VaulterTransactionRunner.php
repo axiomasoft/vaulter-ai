@@ -59,9 +59,6 @@ final readonly class VaulterTransactionRunner implements TransactionRunner
 
     private function sharesVaulterConnection(Connection $connection): bool
     {
-        $vaulterConnection = $this->vaulterDb->connection();
-
-        return $connection === $vaulterConnection
-            || $connection->getName() === $vaulterConnection->getName();
+        return $connection === $this->vaulterDb->connection();
     }
 }
