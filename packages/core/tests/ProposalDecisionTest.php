@@ -479,6 +479,67 @@ test('browser disconnect between approval/commit and restart recovers run state,
         ->and($owner->table('v_outbox')->where('type', 'office.text_command_committed')->count())->toBe(1);
 });
 
+test('cross-subject resume requires edit access to every unfinished draft target', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: true);
+    $doc2 = Documents::in($fixture->drive)->create('Second document', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [
+            ['type' => 'paragraph', 'attrs' => ['blockId' => 'p42'], 'content' => [['type' => 'text', 'text' => 'Pay within 15 days.']]],
+        ],
+    ]);
+    $reviewer = TestActor::query()->create(['name' => 'Reviewer', 'email' => 'resume-partial@example.test']);
+    $subject = Subject::ofModel($reviewer);
+    $fixture->drive->access()->grant($fixture->drive->root()->id, new GrantInput($subject, RoleRegistry::READER));
+    $fixture->drive->access()->grant($fixture->node->id, new GrantInput($subject, RoleRegistry::WRITER));
+    $reviewerContext = new CallContext('61', 'default', 'user/'.$reviewer->getKey(), driveId: $fixture->context->driveId, actor: $reviewer);
+    bindWorkspaceActors($this->app, ['reviewer-tok' => $reviewerContext], $fixture->context);
+
+    $draftItems = array_map(static fn (string $resourceId): array => [
+        'resource_id' => $resourceId,
+        'selector' => ['kind' => 'text_block', 'block_id' => 'p42'],
+        'command' => 'text.replace_exact@1',
+        'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+    ], [$fixture->node->id, $doc2->id]);
+    $run = $this->app->make(OfficeWorkspaceService::class)->createDraftRun(
+        $fixture->context, 'draft', 'evt-resume-acl', 'Update both documents', $draftItems, executeImmediately: false,
+    );
+    $endpoint = '/office/runs/'.$run['run_id'].'/resume';
+
+    $this->withToken('reviewer-tok')->postJson($endpoint)
+        ->assertStatus(404)
+        ->assertJsonPath('error.code', 'resource_unavailable');
+
+    $owner = $this->app->make(VaulterDatabase::class)->connection();
+    expect($owner->table('v_ai_text_commands')->count())->toBe(0);
+    $this->withToken('reviewer-tok')->getJson('/office/runs/'.$run['run_id'])
+        ->assertOk()
+        ->assertJsonPath('data.state', 'queued')
+        ->assertJsonCount(0, 'data.steps');
+
+    $fixture->drive->access()->grant($doc2->id, new GrantInput($subject, RoleRegistry::WRITER));
+    $this->withToken('reviewer-tok')->postJson($endpoint)
+        ->assertOk()
+        ->assertJsonPath('data.state', 'completed');
+});
+
+test('cross-subject resume rejects executor runs whose targets are selected during execution', function (): void {
+    $fixture = new TextCommandFixture($this->app);
+    $reviewer = TestActor::query()->create(['name' => 'Reviewer', 'email' => 'resume-executor@example.test']);
+    $fixture->drive->access()->grant($fixture->drive->root()->id, new GrantInput(Subject::ofModel($reviewer), RoleRegistry::WRITER));
+    $reviewerContext = new CallContext('61', 'default', 'user/'.$reviewer->getKey(), driveId: $fixture->context->driveId, actor: $reviewer);
+    bindWorkspaceActors($this->app, ['reviewer-tok' => $reviewerContext], $fixture->context);
+
+    $run = $this->app->make(Runs::class)->createOrFind($fixture->context, 'laravel-ai', 'evt-resume-executor-acl', '1', [
+        'prompt' => 'Inspect the document',
+        'resource_id' => $fixture->node->id,
+    ]);
+    OfficeAgent::fake([])->preventStrayPrompts();
+
+    $this->withToken('reviewer-tok')->postJson('/office/runs/'.$run->runId.'/resume')
+        ->assertStatus(404)
+        ->assertJsonPath('error.code', 'resource_unavailable');
+});
+
 test('multi-resource draft run preserves confirmed doc1, re-reads conflicted doc2, and continues only doc2 after resolution or neighboring edit', function (): void {
     $fixture = new TextCommandFixture($this->app, automatic: true);
     $doc2 = Documents::in($fixture->drive)->create('Приложение 2', 'vaulter/rich-text', [
@@ -491,7 +552,15 @@ test('multi-resource draft run preserves confirmed doc1, re-reads conflicted doc
         ],
     ]);
 
-    bindWorkspaceActors($this->app, ['writer-tok' => $fixture->context], $fixture->context);
+    $reviewer = TestActor::query()->create(['name' => 'Reviewer', 'email' => 'resume-finished@example.test']);
+    $subject = Subject::ofModel($reviewer);
+    $fixture->drive->access()->grant($fixture->drive->root()->id, new GrantInput($subject, RoleRegistry::READER));
+    $fixture->drive->access()->grant($doc2->id, new GrantInput($subject, RoleRegistry::WRITER));
+    $reviewerContext = new CallContext('61', 'default', 'user/'.$reviewer->getKey(), driveId: $fixture->context->driveId, actor: $reviewer);
+    bindWorkspaceActors($this->app, [
+        'writer-tok' => $fixture->context,
+        'reviewer-tok' => $reviewerContext,
+    ], $fixture->context);
     $workspace = $this->app->make(OfficeWorkspaceService::class);
 
     // 1. Draft run expects "15" in both doc1 and doc2 -> doc1 succeeds & verifies; doc2 conflicts with precondition_failed.
@@ -529,8 +598,14 @@ test('multi-resource draft run preserves confirmed doc1, re-reads conflicted doc
         ->and($rereadResume['remaining_steps'][0]['requires_reread'])->toBeTrue()
         ->and(json_encode($rereadResume['remaining_steps'][0]['latest_read'], JSON_THROW_ON_ERROR))->toContain('Penalty 22 percent today.');
 
-    // 3. Resuming with arguments matching the freshly read content finishes ONLY doc2; doc1 write count stays 1!
-    $completed = $this->withToken('writer-tok')->postJson('/office/runs/'.$runId.'/resume', [
+    $this->withToken('reviewer-tok')->postJson('/office/runs/'.$runId.'/resume', [
+        'arguments_by_resource' => [
+            $fixture->node->id => ['block_id' => 'p42', 'expected' => '30', 'replacement' => '45'],
+        ],
+    ])->assertStatus(404)->assertJsonPath('error.code', 'resource_unavailable');
+
+    // The reviewer can finish doc2 without edit access to the already verified doc1.
+    $completed = $this->withToken('reviewer-tok')->postJson('/office/runs/'.$runId.'/resume', [
         'arguments_by_resource' => [
             $doc2->id => ['block_id' => 'p42', 'expected' => '22', 'replacement' => '25'],
         ],

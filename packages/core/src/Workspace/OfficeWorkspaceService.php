@@ -361,27 +361,45 @@ final readonly class OfficeWorkspaceService
             throw OfficeException::resourceUnavailable();
         }
 
+        $draftItems = $this->extractDraftItems($run);
+        $executor = $draftItems === [] && $run->channel !== '' ? $this->registry->executor($run->channel) : null;
+        $pendingCommits = array_filter(
+            $steps,
+            static fn (OfficeRunStep $step): bool => $step->operation === OfficeOperation::Commit
+                && in_array($step->state, ['dispatched', 'waiting'], true),
+        );
+        $draftItemsToContinue = $draftItems;
+
         if ($caller->effectiveSubject !== $run->effectiveSubject) {
-            $canActOnRemaining = false;
-            foreach ($resourceIds as $resId) {
-                if ($this->directory->findAccessible($caller, $resId, 'edit') !== null) {
-                    $canActOnRemaining = true;
-                    break;
+            // Channel executors can select additional resources after they start.
+            if ($executor instanceof ResumableOfficeExecutor) {
+                throw OfficeException::resourceUnavailable();
+            }
+
+            $draftItemsToContinue = $this->unfinishedDraftItems($draftItems, $steps);
+            $overrideResourceIds = array_map(strval(...), array_keys($argumentsByResource));
+            $targetIds = array_merge(array_column($draftItemsToContinue, 'resource_id'), $overrideResourceIds);
+            foreach ($pendingCommits as $step) {
+                if ($step->resourceId === null || $step->resourceId === '') {
+                    throw OfficeException::resourceUnavailable();
+                }
+                $targetIds[] = $step->resourceId;
+            }
+            foreach (array_unique($targetIds) as $resourceId) {
+                if ($this->directory->findAccessible($caller, $resourceId, 'edit') === null) {
+                    throw OfficeException::resourceUnavailable();
                 }
             }
-            if (! $canActOnRemaining) {
-                throw OfficeException::resourceUnavailable();
+
+            if ($draftItemsToContinue === [] && $pendingCommits === []) {
+                return $this->showRun($caller, $runId);
             }
         }
 
-        $draftItems = $this->extractDraftItems($run);
-        if ($draftItems === [] && $run->channel !== '') {
-            $executor = $this->registry->executor($run->channel);
-            if ($executor instanceof ResumableOfficeExecutor) {
-                $executor->executeRun($initiator, $runId);
+        if ($executor instanceof ResumableOfficeExecutor) {
+            $executor->executeRun($initiator, $runId);
 
-                return $this->showRun($caller, $runId);
-            }
+            return $this->showRun($caller, $runId);
         }
 
         $lease = $this->runs->claimLease($initiator, $runId, 90);
@@ -390,18 +408,16 @@ final readonly class OfficeWorkspaceService
         }
 
         try {
-            foreach ($steps as $step) {
-                if ($step->operation === OfficeOperation::Commit && in_array($step->state, ['dispatched', 'waiting'], true)) {
-                    $resumed = $this->commits->resumeStep($initiator, $runId, $step->stepId);
-                    $resumedStep = $resumed['step'];
-                    if ($resumedStep->state === 'finished' && $resumedStep->resourceId !== null && $resumedStep->receiptId !== null) {
-                        $this->ensureAtCommitVerified($initiator, $runId, $resumedStep->resourceId, $resumedStep->receiptId);
-                    }
+            foreach ($pendingCommits as $step) {
+                $resumed = $this->commits->resumeStep($initiator, $runId, $step->stepId);
+                $resumedStep = $resumed['step'];
+                if ($resumedStep->state === 'finished' && $resumedStep->resourceId !== null && $resumedStep->receiptId !== null) {
+                    $this->ensureAtCommitVerified($initiator, $runId, $resumedStep->resourceId, $resumedStep->receiptId);
                 }
             }
 
-            if ($draftItems !== []) {
-                $this->continueDraftItems($initiator, $runId, $draftItems, $argumentsByResource, $rereadOnly);
+            if ($draftItemsToContinue !== []) {
+                $this->continueDraftItems($initiator, $runId, $draftItemsToContinue, $argumentsByResource, $rereadOnly);
             }
 
             $finalSteps = $this->runs->listSteps($initiator, $runId);
@@ -418,6 +434,25 @@ final readonly class OfficeWorkspaceService
 
             throw $failure;
         }
+    }
+
+    /**
+     * @param  list<array{resource_id: string, selector: stdClass, command: string, arguments: stdClass}>  $draftItems
+     * @param  list<OfficeRunStep>  $steps
+     * @return list<array{resource_id: string, selector: stdClass, command: string, arguments: stdClass}>
+     */
+    private function unfinishedDraftItems(array $draftItems, array $steps): array
+    {
+        $unfinished = [];
+        foreach ($draftItems as $item) {
+            $commit = $this->latestStepForResource($steps, $item['resource_id'], OfficeOperation::Commit);
+            if ($commit === null || ! in_array($commit->state, ['finished', 'verified'], true)
+                || ($commit->receiptId !== null && ! $this->hasVerifiedReceipt($steps, $commit->receiptId))) {
+                $unfinished[] = $item;
+            }
+        }
+
+        return $unfinished;
     }
 
     /**
@@ -563,11 +598,8 @@ final readonly class OfficeWorkspaceService
 
     private function ensureAtCommitVerified(CallContext $initiator, string $runId, string $resourceId, string $receiptId): void
     {
-        $steps = $this->runs->listSteps($initiator, $runId);
-        foreach ($steps as $step) {
-            if ($step->operation === OfficeOperation::Verify && $step->receiptId === $receiptId && $step->state === 'verified') {
-                return;
-            }
+        if ($this->hasVerifiedReceipt($this->runs->listSteps($initiator, $runId), $receiptId)) {
+            return;
         }
 
         $startedAt = hrtime(true);
@@ -599,6 +631,18 @@ final readonly class OfficeWorkspaceService
             responseBytes: $response->wireBytes(),
             latencyMs: $this->elapsedMs($startedAt),
         );
+    }
+
+    /** @param list<OfficeRunStep> $steps */
+    private function hasVerifiedReceipt(array $steps, string $receiptId): bool
+    {
+        foreach ($steps as $step) {
+            if ($step->operation === OfficeOperation::Verify && $step->receiptId === $receiptId && $step->state === 'verified') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
