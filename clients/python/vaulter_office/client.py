@@ -121,3 +121,15 @@ class OfficeClient:
 
     def describe(self, resource_id: str, command: str) -> dict[str, Any]:
         return self.call("office.describe", {"resource_id": resource_id, "command": command})
+
+    def resume(self, resource_id: str, command_id: str) -> dict[str, Any]:
+        """Recover a command after the commit response was lost.
+
+        The caller already holds ``command_id``. The first request is always
+        ``office.status``. A hidden resource comes back as the allowed error
+        envelope (HTTP 404), not as a raised transport error.
+        """
+        return self.call(
+            "office.status",
+            {"resource_id": resource_id, "command_id": command_id},
+        )

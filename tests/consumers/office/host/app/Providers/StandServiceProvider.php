@@ -346,6 +346,15 @@ final class StandServiceProvider extends ServiceProvider
                 $proposalId = (string) ($prepareRes['proposal_id'] ?? '');
                 $digest = (string) ($prepareRes['digest'] ?? '');
 
+                // A final channel message prepares one proposal. Human agreement is the
+                // decision handler's job; do not commit, and do not publish a write, until it approves.
+                if (($prepareRes['approval'] ?? null) === 'human' && $proposalId !== '') {
+                    $decision = DB::table('v_ai_proposals')->where('proposal_id', $proposalId)->value('decision');
+                    if ($decision !== 'approved') {
+                        return 'Awaiting the host decision handler before any commit.';
+                    }
+                }
+
                 $commitStep = $runs->findCommitStepByProposal($context, (string) $runCtx->run_id, $proposalId);
                 if ($commitStep === null || $commitStep->state === 'dispatched') {
                     // If kill fault requested before settling owner route, arm one-shot SIGKILL hook and run commit.

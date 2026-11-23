@@ -84,10 +84,44 @@ return new class extends Migration
                 $table->timestamp('created_at')->useCurrent();
             });
         }
+
+        if (! Schema::hasTable('stand_channel_sessions')) {
+            Schema::create('stand_channel_sessions', static function (Blueprint $table): void {
+                $table->string('tenant_id', 64);
+                $table->string('project_scope', 64);
+                $table->string('session_id', 128);
+                $table->string('effective_subject', 191);
+                $table->unsignedBigInteger('user_id')->index();
+                $table->string('drive_id', 64);
+                $table->timestamp('created_at')->useCurrent();
+                $table->primary(['tenant_id', 'project_scope', 'session_id']);
+            });
+        }
+
+        if (! Schema::hasTable('stand_channel_inbox')) {
+            Schema::create('stand_channel_inbox', static function (Blueprint $table): void {
+                $table->string('tenant_id', 64);
+                $table->string('project_scope', 64);
+                $table->string('effective_subject', 191);
+                $table->string('channel', 64);
+                $table->string('session_id', 128);
+                $table->string('event_id', 128);
+                $table->string('phase', 16);
+                $table->string('resource_id', 64);
+                $table->string('run_id', 64)->nullable();
+                $table->timestamp('created_at')->useCurrent();
+                $table->unique(
+                    ['tenant_id', 'project_scope', 'effective_subject', 'channel', 'event_id'],
+                    'stand_channel_inbox_event',
+                );
+            });
+        }
     }
 
     public function down(): void
     {
+        Schema::dropIfExists('stand_channel_inbox');
+        Schema::dropIfExists('stand_channel_sessions');
         Schema::dropIfExists('stand_run_contexts');
         Schema::dropIfExists('stand_tokens');
         Schema::dropIfExists('cache');

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -177,6 +178,115 @@ class OfficeClientWireTest(unittest.TestCase):
             origin_two.server_close()
             t1.join(timeout=2.0)
             t2.join(timeout=2.0)
+
+    def test_resume_calls_status_first_and_returns_hidden_resource_error(self) -> None:
+        _MockOfficeHandler.next_response = (
+            404,
+            {
+                "version": 1,
+                "operation": "office.status",
+                "ok": False,
+                "error": {
+                    "code": "resource_unavailable",
+                    "retryable": False,
+                    "next_action": "stop",
+                },
+            },
+        )
+        client = OfficeClient(
+            endpoint=f"http://127.0.0.1:{self.port}/api/vaulter-ai/v1/operations",
+            credentials_provider=lambda: {"Authorization": "Bearer host-token-123"},
+        )
+
+        resumed = client.resume("hidden-node", "cmd-hidden")
+        self.assertFalse(resumed["ok"])
+        self.assertEqual(resumed["error"]["code"], "resource_unavailable")
+
+        headers, sent = _MockOfficeHandler.captured_requests[-1]
+        self.assertEqual(headers["authorization"], "Bearer host-token-123")
+        self.assertEqual(
+            sent,
+            {
+                "version": 1,
+                "operation": "office.status",
+                "input": {"resource_id": "hidden-node", "command_id": "cmd-hidden"},
+            },
+        )
+        self.assertEqual([body["operation"] for _, body in _MockOfficeHandler.captured_requests], ["office.status"])
+
+    def test_lost_commit_response_resumes_with_the_known_command_id(self) -> None:
+        class _DropCommitHandler(BaseHTTPRequestHandler):
+            seen: list[dict[str, Any]] = []
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                type(self).seen.append(body)
+                if body["operation"] == "office.commit":
+                    self.close_connection = True
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    return
+
+                command_id = body["input"]["command_id"]
+                response = {
+                    "version": 1,
+                    "operation": "office.status",
+                    "ok": True,
+                    "result": {
+                        "command_id": command_id,
+                        "state": "committed",
+                        "receipt_id": "rcpt-kept",
+                    },
+                }
+                encoded = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                return
+
+        _DropCommitHandler.seen = []
+        server = HTTPServer(("127.0.0.1", 0), _DropCommitHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        command_id = "cmd-known-after-loss"
+        try:
+            client = OfficeClient(
+                endpoint=f"http://127.0.0.1:{server.server_port}/api/vaulter-ai/v1/operations",
+                credentials_provider=lambda: {"Authorization": "Bearer host-token-123"},
+                timeout=2.0,
+            )
+            with self.assertRaises(ConnectionError):
+                client.call(
+                    "office.commit",
+                    {
+                        "resource_id": "doc-1",
+                        "proposal_id": "prop-1",
+                        "digest": "abc",
+                        "command_id": command_id,
+                    },
+                )
+
+            resumed = client.resume("doc-1", command_id)
+            self.assertTrue(resumed["ok"])
+            self.assertEqual(resumed["result"]["state"], "committed")
+            self.assertEqual(resumed["result"]["receipt_id"], "rcpt-kept")
+            self.assertEqual(resumed["result"]["command_id"], command_id)
+            self.assertEqual(
+                [body["operation"] for body in _DropCommitHandler.seen],
+                ["office.commit", "office.status"],
+            )
+            self.assertEqual(_DropCommitHandler.seen[1]["input"]["command_id"], command_id)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2.0)
 
 
 if __name__ == "__main__":
