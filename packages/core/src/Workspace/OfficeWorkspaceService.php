@@ -229,7 +229,7 @@ final readonly class OfficeWorkspaceService
         }
 
         $run = $this->runs->findInScope($viewer, $runId);
-        if ($run === null) {
+        if ($run === null || $run->channel === 'chat') {
             throw OfficeException::resourceUnavailable();
         }
 

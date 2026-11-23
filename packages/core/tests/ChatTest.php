@@ -12,6 +12,7 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 use Vaulter\Ai\Core\Actions\ResolveProposal;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
 use Vaulter\Ai\Core\Contracts\LlmPort;
+use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Contracts\RunContextResolver;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandScope;
@@ -26,8 +27,13 @@ use Vaulter\Ai\Core\Persistence\ToolCallLedger;
 use Vaulter\Ai\Core\Workspace\ChatTurn;
 use Vaulter\Ai\Core\Workspace\ChatWorkspace;
 use Vaulter\Ai\Tests\Support\OfficeTestCase;
+use Vaulter\Ai\Tests\Support\TestActor;
 use Vaulter\Ai\Tests\Support\TextCommandFixture;
 use Vaulter\Database\VaulterDatabase;
+use Vaulter\Documents\Facades\Documents;
+use Vaulter\Drive\Access\Roles\RoleRegistry;
+use Vaulter\Drive\Access\ValueObjects\Subject;
+use Vaulter\Drive\Data\Access\GrantInput;
 
 uses(OfficeTestCase::class);
 
@@ -83,6 +89,18 @@ function chatTestDisconnectDatabase(): void
     foreach (array_keys(Config::get('database.connections', [])) as $name) {
         DB::disconnect($name);
     }
+}
+
+function chatTestSecondDocument(TextCommandFixture $fixture): string
+{
+    return Documents::in($fixture->drive)->create('Second document', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [[
+            'type' => 'paragraph',
+            'attrs' => ['blockId' => 'p2'],
+            'content' => [['type' => 'text', 'text' => 'Terms from the second document.']],
+        ]],
+    ])->id;
 }
 
 function chatTestDisconnectAfterFirstFrame(TestResponse $response): string
@@ -194,6 +212,97 @@ test('chat never exposes protected frames on reconnect and keeps the cursor acro
     $other = new CallContext($fixture->context->tenantId, $fixture->context->projectScope, $fixture->context->effectiveSubject.'-other');
     $this->app->instance(CallContextResolver::class, new ChatTestContext($other));
     $this->getJson($path)->assertNotFound();
+});
+
+test('chat passes live and restored tool arguments alongside each read result', function (): void {
+    Bus::fake([ExecuteChatRun::class]);
+    $fixture = new TextCommandFixture($this->app);
+    $context = $fixture->context;
+    $chat = $this->app->make(ChatWorkspace::class);
+    $turn = $this->app->make(ChatTurn::class);
+    $scope = [$fixture->node->id, chatTestSecondDocument($fixture)];
+    $session = $chat->open($context);
+    $runId = $chat->post($context, $session, 'read-both', 'Read both documents', $scope);
+    $inputs = [
+        ['resource_id' => $scope[0], 'selector' => ['kind' => 'text_block', 'block_id' => 'p71']],
+        ['resource_id' => $scope[1], 'selector' => ['kind' => 'text_block', 'block_id' => 'p2']],
+    ];
+    $liveMessages = [];
+    $first = new ScriptedChatLlm(function (array $messages) use ($inputs, &$liveMessages): iterable {
+        $index = count($messages) - 1;
+        if (isset($inputs[$index])) {
+            yield ['type' => 'toolInputComplete', 'tool' => 'office_read', 'input' => json_encode($inputs[$index], JSON_THROW_ON_ERROR)];
+
+            return;
+        }
+
+        // Simulate a provider disconnect after both read results have reached the model.
+        $liveMessages = array_slice($messages, 1);
+    });
+
+    expect($turn->execute($context, $runId, $first))->toBe(5);
+    $this->app->forgetInstance(ChatTurn::class);
+    $resumed = new ScriptedChatLlm(function (array $messages) use ($inputs, $liveMessages): iterable {
+        $restoredMessages = array_slice($messages, 1);
+        expect($restoredMessages)->toHaveCount(2)
+            ->and(array_column($restoredMessages, 'call_id'))->toBe(array_column($liveMessages, 'call_id'))
+            ->and($restoredMessages[0]['call_id'])->not->toBe($restoredMessages[1]['call_id']);
+        foreach (['Human terms.', 'Terms from the second document.'] as $index => $text) {
+            $arguments = json_encode($inputs[$index], JSON_THROW_ON_ERROR);
+            expect(json_encode($liveMessages[$index]['arguments'] ?? null, JSON_THROW_ON_ERROR))->toBe($arguments)
+                ->and(json_encode($restoredMessages[$index]['arguments'] ?? null, JSON_THROW_ON_ERROR))->toBe($arguments)
+                ->and($restoredMessages[$index]['response'])->toBe($liveMessages[$index]['response'])
+                ->and(json_encode($restoredMessages[$index]['response']['result']['data'], JSON_THROW_ON_ERROR))->toContain($text);
+        }
+
+        yield ['type' => 'finish'];
+    });
+
+    expect($this->app->make(ChatTurn::class)->execute($context, $runId, $resumed))->toBeNull()
+        ->and($this->app->make(Runs::class)->find($context, $runId)?->state)->toBe('completed');
+});
+
+test('chat generic run visibility excludes saved reads after revocation and for other subjects', function (): void {
+    Bus::fake([ExecuteChatRun::class]);
+    $fixture = new TextCommandFixture($this->app);
+    $context = $fixture->context;
+    $chat = $this->app->make(ChatWorkspace::class);
+    $directory = $this->app->make(ResourceDirectory::class);
+    $secondId = chatTestSecondDocument($fixture);
+    $session = $chat->open($context);
+    $runId = $chat->post($context, $session, 'read-one', 'Read the first document', [$fixture->node->id, $secondId]);
+    $input = json_encode(['resource_id' => $fixture->node->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p71']], JSON_THROW_ON_ERROR);
+    $llm = new ScriptedChatLlm(function (array $messages) use ($input): iterable {
+        if (count($messages) === 1) {
+            yield ['type' => 'toolInputComplete', 'tool' => 'office_read', 'input' => $input];
+
+            return;
+        }
+
+        expect($messages[1]['response']['ok'])->toBeTrue();
+        yield ['type' => 'finish'];
+    });
+    expect($this->app->make(ChatTurn::class)->execute($context, $runId, $llm))->toBeNull()
+        ->and($chat->events($context, $session, 0))->not->toBeEmpty();
+
+    $fixture->drive->access()->grant($fixture->node->id, new GrantInput(Subject::ofModel($fixture->actor), RoleRegistry::READER));
+    $fixture->revoke();
+    expect($directory->findAccessible($context, $fixture->node->id, 'view'))->not->toBeNull()
+        ->and($directory->findAccessible($context, $secondId, 'view'))->toBeNull()
+        ->and(array_column($chat->events($context, $session, 0), 'type'))->toBe(['hidden', 'hidden']);
+
+    $reader = TestActor::query()->create(['name' => 'Reader', 'email' => 'chat-run-reader@example.test']);
+    $fixture->drive->access()->grant($fixture->node->id, new GrantInput(Subject::ofModel($reader), RoleRegistry::READER));
+    $other = new CallContext($context->tenantId, $context->projectScope, 'user/'.$reader->getKey(), driveId: $context->driveId, actor: $reader);
+    expect($directory->findAccessible($other, $fixture->node->id, 'view'))->not->toBeNull();
+
+    $statuses = [];
+    foreach ([$context, $other] as $viewer) {
+        $this->app->instance(CallContextResolver::class, new ChatTestContext($viewer));
+        $response = $this->withToken('chat-token')->getJson('/office/runs/'.$runId);
+        $statuses[] = [$response->status(), $response->json('error.code')];
+    }
+    expect($statuses)->toBe([[404, 'resource_unavailable'], [404, 'resource_unavailable']]);
 });
 
 test('chat rejects incomplete tool JSON before recording a call or writing to the owner', function (): void {

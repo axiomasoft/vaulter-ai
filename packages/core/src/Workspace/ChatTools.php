@@ -109,7 +109,12 @@ final readonly class ChatTools
         $json = $step->resumeInput['tool_input'] ?? null;
         $request = $this->ledger->parse($step->operation, is_string($json) ? $json : '');
         $this->authorize($context, $request, $scope);
-        $message = ['role' => 'tool', 'name' => $step->operation->toolName(), 'call_id' => $call['id']];
+        $message = [
+            'role' => 'tool',
+            'name' => $step->operation->toolName(),
+            'call_id' => $call['id'],
+            'arguments' => $request->input,
+        ];
         if (! in_array($call['state'], ['requested', 'awaiting_approval', 'dispatched'], true)) {
             return ['state' => $call['state'], 'message' => $message + ['response' => $step->compactResult]];
         }

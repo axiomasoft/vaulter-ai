@@ -10,9 +10,10 @@ use Vaulter\Ai\Core\Data\HostProfile;
 interface LlmPort
 {
     /**
-     * Produce text followed by one complete tool call or finish. The next generation receives
-     * the saved tool result. Adapters resolve connection secrets on the server and assemble
-     * tool argument fragments before completion.
+     * Produce text followed by one complete tool call or finish. Tool messages contain the
+     * tool name, server-issued call_id, validated arguments as a stdClass, and response.
+     * Adapters resolve connection secrets on the server and assemble tool argument fragments
+     * before completion.
      * An adapter may use a server-issued call ID when retransmitting an accepted call.
      *
      * @param  list<array<string,mixed>>  $messages
