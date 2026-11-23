@@ -21,6 +21,7 @@ use Vaulter\Ai\Documents\Persistence\TextCommands;
 use Vaulter\Ai\Documents\Projection\ExtractedTextBlock;
 use Vaulter\Ai\Documents\Projection\RichTextBlockExtractor;
 use Vaulter\Ai\Documents\Projection\TextProjectionReader;
+use Vaulter\Ai\Documents\Writing\LiveTextOwner;
 use Vaulter\Documents\Content\TipTap\TipTapContent;
 use Vaulter\Documents\Data\Snapshots\DocumentSnapshot;
 use Vaulter\Documents\DocumentsManager;
@@ -49,6 +50,7 @@ final readonly class TextReader implements ResourceReader
         private PayloadCipher $cipher,
         private Clock $clock,
         private ConfigRepository $config,
+        private ?LiveTextOwner $live = null,
     ) {}
 
     public function resourceType(): ResourceType
@@ -102,6 +104,20 @@ final readonly class TextReader implements ResourceReader
 
         // Validate document block identity invariants on read (never writing).
         $liveBlocks = $this->extractor->extract($snapshot->content->toArray());
+
+        if ($this->live !== null) {
+            $liveReceipt = $afterReceipt === null ? null : $this->live->receiptMarker($context, $resource, $afterReceipt);
+            if ($liveReceipt !== null && $liveReceipt->generation !== $snapshot->epoch) {
+                throw OfficeException::generationChanged();
+            }
+            $projection = $this->live->projected($context, $resource, $snapshot->epoch, $snapshot->stateVersion);
+            if ($projection !== null && ($afterReceipt === null || $liveReceipt !== null)) {
+                return $this->serveFromLiveSnapshot($context, $snapshot, $liveBlocks, $kind, $selector, $limit, $cursor, $liveReceipt, $projection);
+            }
+            if ($liveReceipt !== null) {
+                throw OfficeException::projectionPending();
+            }
+        }
 
         $scope = $this->scopes->forContext($context, $driveId);
         $documentKey = Identity::key($snapshot->documentId);
@@ -262,8 +278,9 @@ final readonly class TextReader implements ResourceReader
         ?int $limit,
         ?string $cursor,
         ?Marker $requiredMarker,
+        ?Marker $position = null,
     ): ReadPage {
-        $marker = new Marker($snapshot->epoch, $snapshot->stateVersion);
+        $marker = $position ?? new Marker($snapshot->epoch, $snapshot->stateVersion);
         $this->assertMarkerSatisfiesReceipt($requiredMarker, $marker);
         $schemaRevision = (string) $snapshot->schemaVersion;
 

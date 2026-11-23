@@ -20,6 +20,7 @@ use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Documents\Host\TextDocumentAccess;
 use Vaulter\Ai\Documents\Writing\DriveDocumentMutation;
+use Vaulter\Ai\Documents\Writing\LiveTextOwner;
 use Vaulter\Ai\Documents\Writing\TextReplacement;
 use Vaulter\Documents\Content\TipTap\TipTapContent;
 use Vaulter\Documents\Contracts\LockedDocumentMutation;
@@ -90,13 +91,21 @@ final readonly class ReplaceExact implements OfficeCommand
         if ((string) $state->schemaVersion !== $token->schemaRevision) {
             throw OfficeException::schemaChanged();
         }
-        if ($state->pending || $state->position < $token->marker->position) {
+        if ($state->pending) {
             throw OfficeException::projectionPending();
         }
         if ($state->type !== 'vaulter/rich-text' || ! $state->content instanceof TipTapContent) {
             throw OfficeException::unsupportedContent();
         }
         $owner = $this->registry->ownerFor(self::COMMAND, $state->writeMode) ?? throw OfficeException::unsupportedContent();
+        $position = $state->position;
+        if ($owner instanceof LiveTextOwner) {
+            $marker = $owner->projected($context, $resource, $state->generation, $state->position) ?? throw OfficeException::unsupportedContent();
+            $position = $marker->position;
+        }
+        if ($position < $token->marker->position) {
+            throw OfficeException::projectionPending();
+        }
         [, $block] = TextReplacement::find($state->content->toArray(), $blockId);
         $identity = TextReplacement::identity($block);
         if ($identity !== TextReplacement::identity(TextReplacement::node($token->dependencies['formatted_node'] ?? null))) {
