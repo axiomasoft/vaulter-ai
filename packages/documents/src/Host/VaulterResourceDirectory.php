@@ -49,10 +49,6 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
         ?ResourceType $resourceType,
         int $maxCandidates,
     ): array {
-        if ($resourceType !== null && $resourceType !== ResourceType::Text) {
-            return [];
-        }
-
         $actor = $context->actor;
         if (! $actor instanceof Authorizable) {
             return [];
@@ -62,6 +58,7 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
         $found = [];
         $trimmed = trim($query);
         $isPgsql = $this->vaulterDb->driver() === 'pgsql';
+        $searchTextProjection = $resourceType === null || $resourceType === ResourceType::Text;
 
         foreach ($this->candidateDrives($context, $actor) as $drive) {
             $acting = $drive->actingAs($actor);
@@ -81,7 +78,7 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
                 foreach ($page->items as $node) {
                     /** @var NodeSnapshot $node */
                     $entry = $this->toEntry($node);
-                    if ($entry !== null) {
+                    if ($entry !== null && ($resourceType === null || $entry->resourceType === $resourceType)) {
                         $found[$entry->resourceId] = $entry;
                         if (count($found) >= $maxCandidates) {
                             return array_values($found);
@@ -95,11 +92,13 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
             // over authorized visible documents.
             if ($trimmed !== '') {
                 $scope = $this->scopes->forContext($context, $drive->snapshot()->id);
-                $matchingDocIds = $this->projection->searchMatchingDocumentIds(
-                    $scope['tenant_id'],
-                    $scope['project_scope'],
-                    $trimmed,
-                );
+                $matchingDocIds = $searchTextProjection
+                    ? $this->projection->searchMatchingDocumentIds(
+                        $scope['tenant_id'],
+                        $scope['project_scope'],
+                        $trimmed,
+                    )
+                    : [];
 
                 if ($matchingDocIds !== [] || ! $isPgsql) {
                     $docSet = [];
@@ -114,13 +113,15 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
                             continue;
                         }
 
+                        $entry = $this->toEntry($node);
+                        if ($entry === null || ($resourceType !== null && $entry->resourceType !== $resourceType)) {
+                            continue;
+                        }
+
                         if (! $isPgsql && str_contains(mb_strtolower($node->name), $queryLower)) {
-                            $entry = $this->toEntry($node);
-                            if ($entry !== null) {
-                                $found[$entry->resourceId] = $entry;
-                                if (count($found) >= $maxCandidates) {
-                                    return array_values($found);
-                                }
+                            $found[$entry->resourceId] = $entry;
+                            if (count($found) >= $maxCandidates) {
+                                return array_values($found);
                             }
 
                             continue;
@@ -139,12 +140,9 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
                         $docKey = (string) (Identity::key($snapshot->documentId) ?? $snapshot->documentId);
                         if (isset($docSet[$docKey])) {
                             unset($remainingDocs[$docKey]);
-                            $entry = $this->toEntry($node);
-                            if ($entry !== null) {
-                                $found[$entry->resourceId] = $entry;
-                                if (count($found) >= $maxCandidates) {
-                                    return array_values($found);
-                                }
+                            $found[$entry->resourceId] = $entry;
+                            if (count($found) >= $maxCandidates) {
+                                return array_values($found);
                             }
                             if ($isPgsql && $remainingDocs === []) {
                                 break;
@@ -295,9 +293,18 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
             return null;
         }
 
+        $type = match ($node->document->type) {
+            'vaulter/rich-text' => ResourceType::Text,
+            'vaulter/spreadsheet' => ResourceType::Sheet,
+            default => null,
+        };
+        if ($type === null) {
+            return null;
+        }
+
         return new ResourceEntry(
             resourceId: $node->id,
-            resourceType: ResourceType::Text,
+            resourceType: $type,
             title: $node->name,
             writeMode: null,
             schemaRevision: (string) $node->document->schemaVersion,

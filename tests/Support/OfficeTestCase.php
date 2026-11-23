@@ -22,9 +22,11 @@ use Vaulter\Ai\Core\Operations\Verify;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Documents\DocumentsAiServiceProvider;
 use Vaulter\Ai\LaravelAi\LaravelAiServiceProvider;
+use Vaulter\Ai\Sheets\SheetsAiServiceProvider;
 use Vaulter\Documents\VaulterDocumentsServiceProvider;
 use Vaulter\Drive\VaulterDriveServiceProvider;
 use Vaulter\Media\VaulterMediaServiceProvider;
+use Vaulter\Sheets\VaulterSheetsServiceProvider;
 use Vaulter\Testing\Concerns\RefreshesDatabaseForSchemaVariant;
 use Vaulter\Testing\Concerns\UsesSuiteDatabase;
 use Vaulter\Testing\Support\SuiteDatabaseConnection;
@@ -41,7 +43,11 @@ abstract class OfficeTestCase extends OrchestraTestCase
 
     protected bool $bootVaulterDomain = true;
 
+    protected bool $bootVaulterSheets = true;
+
     protected bool $bootDocumentsAi = true;
+
+    protected bool $bootSheetsAi = true;
 
     protected bool $bootLaravelAi = false;
 
@@ -67,12 +73,19 @@ abstract class OfficeTestCase extends OrchestraTestCase
             $providers[] = VaulterDriveServiceProvider::class;
             $providers[] = VaulterMediaServiceProvider::class;
             $providers[] = VaulterDocumentsServiceProvider::class;
+            if ($this->bootVaulterSheets) {
+                $providers[] = VaulterSheetsServiceProvider::class;
+            }
         }
 
         $providers[] = OfficeServiceProvider::class;
 
         if ($this->bootDocumentsAi && $this->bootVaulterDomain) {
             $providers[] = DocumentsAiServiceProvider::class;
+        }
+
+        if ($this->bootSheetsAi && $this->bootVaulterDomain && $this->bootVaulterSheets) {
+            $providers[] = SheetsAiServiceProvider::class;
         }
 
         if ($this->bootLaravelAi) {
@@ -99,6 +112,13 @@ abstract class OfficeTestCase extends OrchestraTestCase
         $app['config']->set('vaulter.ids.strategy', env('VAULTER_TEST_ID_STRATEGY', 'uuid7'));
         $app['config']->set('vaulter.ids.host_keys', env('VAULTER_TEST_HOST_KEYS', 'bigint'));
         $app['config']->set('vaulter-documents.tiptap.block_ids', true);
+
+        if ($this->bootVaulterDomain && $this->bootVaulterSheets) {
+            $sheetsCli = dirname(__DIR__, 3).'/vaulter-sheets/packages/runtime/dist/cli.js';
+            if (is_file($sheetsCli)) {
+                $app['config']->set('vaulter-sheets.runtime_command', ['node', $sheetsCli]);
+            }
+        }
 
         // Bind deterministic FixedClock in the container for expiry / cursor / signature verification.
         $app->instance(Clock::class, $this->fixedClock);

@@ -113,6 +113,15 @@ final readonly class OfficeTool implements Tool
                     'block_id' => $schema->string()->min(1),
                     'expected' => $schema->string()->min(1),
                     'replacement' => $schema->string(),
+                    'sheet_id' => $schema->string()->min(1),
+                    'table_id' => $schema->string()->min(1),
+                    'scope' => $schema->string()->enum(['fixed_members', 'current_rows']),
+                    'destination_column_id' => $schema->string()->min(1),
+                    'expression' => $schema->object([
+                        'op' => $schema->string()->enum(['subtract'])->required(),
+                        'left_column_id' => $schema->string()->min(1)->required(),
+                        'right_column_id' => $schema->string()->min(1)->required(),
+                    ]),
                 ])->description('Command arguments matching office_describe input_schema.')->required(),
             ],
             OfficeOperation::Commit => [

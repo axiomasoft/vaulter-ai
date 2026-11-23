@@ -17,6 +17,12 @@ return [
             'commands' => ['text.replace_exact@1'],
             'approval' => 'human',
         ],
+        'sheets' => [
+            'executor' => 'laravel-ai',
+            'provider_connection' => 'office_model',
+            'commands' => ['sheet.fill_formula@1'],
+            'approval' => 'human',
+        ],
     ],
     'limits' => [
         'search_default_limit' => 5,

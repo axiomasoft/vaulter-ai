@@ -13,6 +13,9 @@
         <testsuite name="documents">
             <directory>packages/documents/tests</directory>
         </testsuite>
+        <testsuite name="sheets">
+            <directory>packages/sheets/tests</directory>
+        </testsuite>
         <testsuite name="laravel-ai">
             <directory>packages/laravel-ai/tests</directory>
         </testsuite>
@@ -31,6 +34,7 @@
         <include>
             <directory>packages/core/src</directory>
             <directory>packages/documents/src</directory>
+            <directory>packages/sheets/src</directory>
             <directory>packages/laravel-ai/src</directory>
             <directory>packages/agentools/src</directory>
         </include>

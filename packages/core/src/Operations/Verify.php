@@ -6,9 +6,11 @@ namespace Vaulter\Ai\Core\Operations;
 
 use stdClass;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
+use Vaulter\Ai\Core\Contracts\SheetVerificationEvidence;
 use Vaulter\Ai\Core\Contracts\TextVerificationEvidence;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandScope;
+use Vaulter\Ai\Core\Data\Marker;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeResponse;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
@@ -73,6 +75,40 @@ final readonly class Verify
             sort($markNames, SORT_STRING);
             sort($expectedMarks, SORT_STRING);
             if (count($markNames) !== count($marks) || $markNames !== $expectedMarks) {
+                throw OfficeException::temporarilyUnavailable();
+            }
+        }
+        if ($resource->resourceType === ResourceType::Sheet && ($result->outcome ?? null) === 'passed') {
+            if (! $owner instanceof SheetVerificationEvidence || ! is_array($checks)) {
+                throw OfficeException::temporarilyUnavailable();
+            }
+            $verifyMarker = new Marker($marker->generation, $marker->position);
+            $actuals = array_column($checks, 'actual', 'name');
+            $expected = $owner->expectedSheetChecks($context, $resourceId, $receiptId, $receiptMarker, $verifyMarker, $mode);
+            $rowIds = $actuals['row_ids'] ?? null;
+            $formulas = $actuals['formulas'] ?? null;
+            $calcValues = $actuals['calculated_values'] ?? null;
+            $calcAt = $actuals['calculated_at'] ?? null;
+            $sum = $actuals['sum'] ?? null;
+            if (! is_array($rowIds) || $rowIds !== $expected['row_ids']
+                || ! is_array($formulas) || $formulas !== $expected['formulas']
+                || ! is_array($calcValues) || count($calcValues) !== count($expected['calculated_values'])
+                || ! $calcAt instanceof stdClass
+                || ($calcAt->generation ?? null) !== $expected['calculated_at']['generation']
+                || ($calcAt->position ?? null) !== $expected['calculated_at']['position']
+                || ($calcAt->generation ?? null) !== $verifyMarker->generation
+                || ($calcAt->position ?? null) !== $verifyMarker->position
+                || (! is_int($sum) && ! is_float($sum))) {
+                throw OfficeException::temporarilyUnavailable();
+            }
+            foreach ($expected['calculated_values'] as $idx => $expectedVal) {
+                $actualVal = $calcValues[$idx] ?? null;
+                if ((! is_int($actualVal) && ! is_float($actualVal)) || ! is_finite((float) $actualVal)
+                    || abs((float) $actualVal - (float) $expectedVal) > 1e-9) {
+                    throw OfficeException::temporarilyUnavailable();
+                }
+            }
+            if (! is_finite((float) $sum) || abs((float) $sum - (float) $expected['sum']) > 1e-9) {
                 throw OfficeException::temporarilyUnavailable();
             }
         }
