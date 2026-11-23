@@ -245,10 +245,7 @@ final readonly class Runs
                 ->first();
 
             if ($existing === null && $executorActionKey !== null && $executorActionKey !== '') {
-                $existing = $this->db->query('ai_run_steps')
-                    ->where('run_id', $runId)
-                    ->where('executor_action_key', $executorActionKey)
-                    ->first();
+                $existing = $this->findStepRowByActionKeyInTransaction($runId, $executorActionKey);
             }
 
             if ($existing !== null) {
@@ -265,7 +262,78 @@ final readonly class Runs
                     throw new OfficeException(ErrorCode::IdempotencyConflict);
                 }
 
+                if ($executorActionKey !== null && $executorActionKey !== '') {
+                    $aliases = $this->extractActionKeys($hydrated);
+                    if (! in_array($executorActionKey, $aliases, true)) {
+                        $other = $this->findStepByActionKeyInTransaction($runId, $executorActionKey);
+                        if ($other !== null && $other->stepId !== $hydrated->stepId) {
+                            throw new OfficeException(ErrorCode::IdempotencyConflict);
+                        }
+
+                        $aliases[] = $executorActionKey;
+                        $resumePayload = $hydrated->resumeInput ?? [
+                            'resource_id' => $resourceId,
+                            'proposal_id' => $proposalId,
+                            'digest' => $digest,
+                            'command_id' => $hydrated->commandId ?? $initialCommandId,
+                            'owner_key' => $ownerKey,
+                        ];
+                        $resumePayload['action_keys'] = $aliases;
+
+                        $aad = $this->stepAad($runId, $hydrated->stepId);
+                        $encResume = $this->cipher->encrypt($resumePayload, $aad);
+                        $updates = [
+                            'key_id' => $encResume['key_id'],
+                            'encrypted_resume_input' => $this->db->binaryLiteral($encResume['ciphertext']),
+                            'updated_at' => $this->db->utcTimestamp($this->clock->now()),
+                        ];
+                        if ($hydrated->executorActionKey === null) {
+                            $updates['executor_action_key'] = $executorActionKey;
+                        }
+                        $rawCompact = QueryRecord::raw($existing, 'encrypted_compact_result');
+                        if ($rawCompact !== null && $hydrated->compactResult !== null) {
+                            $encCompact = $this->cipher->encrypt($hydrated->compactResult, $aad);
+                            $updates['encrypted_compact_result'] = $this->db->binaryLiteral($encCompact['ciphertext']);
+                        }
+
+                        $this->db->query('ai_run_steps')
+                            ->where('run_id', $runId)
+                            ->where('step_id', $hydrated->stepId)
+                            ->update($updates);
+
+                        $reloaded = $this->db->query('ai_run_steps')
+                            ->where('run_id', $runId)
+                            ->where('step_id', $hydrated->stepId)
+                            ->first();
+                        if ($reloaded !== null) {
+                            return $this->hydrateStep($reloaded);
+                        }
+                    }
+                }
+
                 return $hydrated;
+            }
+
+            $commandConflictInRun = $this->db->query('ai_run_steps')
+                ->where('run_id', $runId)
+                ->where('operation', OfficeOperation::Commit->value)
+                ->where('command_id', $initialCommandId)
+                ->where('proposal_id', '!=', $proposalId)
+                ->exists();
+            if ($commandConflictInRun) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
+
+            $routeConflict = $this->db->query('ai_owner_routes')
+                ->where('tenant_id', $context->tenantId)
+                ->where('project_scope', $context->projectScope)
+                ->where('effective_subject', $context->effectiveSubject)
+                ->where('resource_id', $resourceId)
+                ->where('command_id', $initialCommandId)
+                ->where('proposal_id', '!=', $proposalId)
+                ->exists();
+            if ($routeConflict) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
             }
 
             $stepId = $this->nextStepIdInTransaction($runId);
@@ -276,6 +344,7 @@ final readonly class Runs
                 'digest' => $digest,
                 'command_id' => $initialCommandId,
                 'owner_key' => $ownerKey,
+                'action_keys' => $executorActionKey !== null && $executorActionKey !== '' ? [$executorActionKey] : [],
             ];
             $encrypted = $this->cipher->encrypt($resumePayload, $this->stepAad($runId, $stepId));
 
@@ -565,13 +634,61 @@ final readonly class Runs
             if ($this->scopedRunQuery($context)->where('run_id', $runId)->first(['run_id']) === null) {
                 return null;
             }
-            $row = $this->db->query('ai_run_steps')
-                ->where('run_id', $runId)
-                ->where('executor_action_key', $executorActionKey)
-                ->first();
 
-            return $row === null ? null : $this->hydrateStep($row);
+            return $this->findStepByActionKeyInTransaction($runId, $executorActionKey);
         }, $context->tenantId);
+    }
+
+    private function findStepByActionKeyInTransaction(string $runId, string $executorActionKey): ?OfficeRunStep
+    {
+        $row = $this->findStepRowByActionKeyInTransaction($runId, $executorActionKey);
+
+        return $row === null ? null : $this->hydrateStep($row);
+    }
+
+    private function findStepRowByActionKeyInTransaction(string $runId, string $executorActionKey): ?object
+    {
+        $direct = $this->db->query('ai_run_steps')
+            ->where('run_id', $runId)
+            ->where('executor_action_key', $executorActionKey)
+            ->first();
+        if ($direct !== null) {
+            return $direct;
+        }
+
+        $candidates = $this->db->query('ai_run_steps')
+            ->where('run_id', $runId)
+            ->whereNotNull('encrypted_resume_input')
+            ->orderBy('step_id')
+            ->get();
+        foreach ($candidates as $candidate) {
+            $hydrated = $this->hydrateStep($candidate);
+            if (in_array($executorActionKey, $this->extractActionKeys($hydrated), true)) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /** @return list<string> */
+    private function extractActionKeys(OfficeRunStep $step): array
+    {
+        $keys = [];
+        if ($step->executorActionKey !== null && $step->executorActionKey !== '') {
+            $keys[] = $step->executorActionKey;
+        }
+
+        $rawAliases = $step->resumeInput['action_keys'] ?? null;
+        if (is_array($rawAliases)) {
+            foreach ($rawAliases as $alias) {
+                if (is_string($alias) && $alias !== '' && ! in_array($alias, $keys, true)) {
+                    $keys[] = $alias;
+                }
+            }
+        }
+
+        return $keys;
     }
 
     /**

@@ -12,6 +12,7 @@ use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\OfficeExecutor;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
+use Vaulter\Ai\Core\Operations\RunStateReducer;
 use Vaulter\Ai\Core\Persistence\Runs;
 
 /**
@@ -25,6 +26,7 @@ final readonly class AgenToolsOfficeExecutor implements OfficeExecutor
         private OfficeToolPort $port,
         private HostPolicy $policy,
         private Runs $runs,
+        private RunStateReducer $stateReducer,
         private ScenarioRunner $runner = new ScenarioRunner,
     ) {}
 
@@ -96,7 +98,11 @@ final readonly class AgenToolsOfficeExecutor implements OfficeExecutor
             $scopedPort = $this->port->forContext($context, $run->runId);
             $result = $this->runner->run($scenario, $scenarioContext, $scopedPort, runId: $run->runId);
 
-            $nextState = $result->outcome === ScenarioOutcome::Completed ? 'completed' : 'rejected';
+            $steps = $this->runs->listSteps($context, $run->runId);
+            $nextState = $this->stateReducer->reduce(
+                $steps,
+                executionFailed: $result->outcome !== ScenarioOutcome::Completed,
+            );
             $this->runs->finishRun($context, $run->runId, $lease, $nextState);
 
             return $result;

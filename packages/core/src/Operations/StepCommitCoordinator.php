@@ -9,9 +9,11 @@ use stdClass;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Data\CommandScope;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeResponse;
 use Vaulter\Ai\Core\Data\OfficeRunStep;
+use Vaulter\Ai\Core\Data\OwnerRoute;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
@@ -19,6 +21,7 @@ use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\OwnerRoutes;
 use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\Runs;
+use Vaulter\Ai\Core\Protocol\RequestFingerprint;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
 
 /**
@@ -32,6 +35,7 @@ final readonly class StepCommitCoordinator
         private Runs $runs,
         private Proposals $proposals,
         private OwnerRoutes $routes,
+        private Commit $commit,
         private OfficeDatabase $db,
         private WireErrorMapper $errorMapper,
         private Clock $clock,
@@ -42,7 +46,7 @@ final readonly class StepCommitCoordinator
      * On any retry (including a new provider toolCallId), extracts the saved command_id
      * and queries office.status first before considering a commit replay.
      *
-     * @return array{step: OfficeRunStep, response: OfficeResponse}
+     * @return array{step: ?OfficeRunStep, response: OfficeResponse}
      */
     public function executeOrResume(
         CallContext $context,
@@ -61,19 +65,55 @@ final readonly class StepCommitCoordinator
         }
 
         if ($existing !== null) {
+            if ($preferredCommandId !== null && $preferredCommandId !== '' && $existing->commandId !== $preferredCommandId) {
+                return [
+                    'step' => $existing,
+                    'response' => $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::IdempotencyConflict),
+                ];
+            }
+
             return $this->resumeExistingStep($context, $existing, $resourceId, $proposalId, $digest, $startedAt);
         }
 
-        $ownerKey = '';
-        $proposal = $this->proposals->find($context, $resourceId, $proposalId);
-        if ($proposal !== null) {
-            $ownerKey = $proposal->plan->ownerKey;
+        $existingRoute = $this->routes->forProposal($context, $proposalId);
+        if ($existingRoute !== null && $preferredCommandId !== null && $preferredCommandId !== '' && $existingRoute->commandId !== $preferredCommandId) {
+            return [
+                'step' => null,
+                'response' => $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::IdempotencyConflict),
+            ];
         }
 
-        $existingRoute = $this->routes->forProposal($context, $proposalId);
         $initialCommandId = $existingRoute !== null
             ? $existingRoute->commandId
             : ($preferredCommandId !== null && $preferredCommandId !== '' ? $preferredCommandId : 'cmd-'.Str::uuid7());
+
+        if ($existingRoute === null) {
+            $routeByCommand = $this->routes->find(new CommandScope($context, $resourceId, $initialCommandId));
+            if ($routeByCommand !== null && $routeByCommand->proposalId !== $proposalId) {
+                return [
+                    'step' => null,
+                    'response' => $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::IdempotencyConflict),
+                ];
+            }
+        }
+
+        $validationError = $this->validateCommitRequest(
+            context: $context,
+            resourceId: $resourceId,
+            proposalId: $proposalId,
+            digest: $digest,
+            commandId: $initialCommandId,
+            route: $existingRoute,
+        );
+        if ($validationError !== null) {
+            return [
+                'step' => null,
+                'response' => $validationError,
+            ];
+        }
+
+        $proposal = $this->proposals->find($context, $resourceId, $proposalId);
+        $ownerKey = $proposal !== null ? $proposal->plan->ownerKey : '';
 
         try {
             $step = $this->runs->beginCommitStep(
@@ -88,16 +128,7 @@ final readonly class StepCommitCoordinator
             );
         } catch (OfficeException $e) {
             return [
-                'step' => $this->runs->recordStep(
-                    context: $context,
-                    runId: $runId,
-                    operation: OfficeOperation::Commit,
-                    state: 'failed',
-                    resourceId: $resourceId,
-                    proposalId: $proposalId,
-                    commandId: $initialCommandId,
-                    safeError: $e->errorCode->value,
-                ),
+                'step' => null,
                 'response' => $this->errorMapper->toResponse(OfficeOperation::Commit, $e->errorCode),
             ];
         }
@@ -126,6 +157,20 @@ final readonly class StepCommitCoordinator
         if ($existingRoute !== null) {
             if ($existingRoute->resourceId !== $resourceId) {
                 return $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::IdempotencyConflict);
+            }
+            if ($preferredCommandId !== null && $preferredCommandId !== '' && $existingRoute->commandId !== $preferredCommandId) {
+                return $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::IdempotencyConflict);
+            }
+            $validationError = $this->validateCommitRequest(
+                context: $context,
+                resourceId: $resourceId,
+                proposalId: $proposalId,
+                digest: $digest,
+                commandId: $existingRoute->commandId,
+                route: $existingRoute,
+            );
+            if ($validationError !== null) {
+                return $validationError;
             }
 
             $status = $this->office->handle($context, new OfficeRequest(
@@ -232,6 +277,24 @@ final readonly class StepCommitCoordinator
         }
 
         $commandId = $step->commandId ?? throw OfficeException::temporarilyUnavailable();
+        $effectiveDigest = $digest !== '' ? $digest : ($savedDigest ?? '');
+        $route = $this->routes->find(new CommandScope($context, $resourceId, $commandId));
+
+        $validationError = $this->validateCommitRequest(
+            context: $context,
+            resourceId: $resourceId,
+            proposalId: $proposalId,
+            digest: $effectiveDigest,
+            commandId: $commandId,
+            route: $route,
+        );
+        if ($validationError !== null) {
+            return [
+                'step' => $step,
+                'response' => $validationError,
+            ];
+        }
+
         $statusResponse = $this->office->handle($context, new OfficeRequest(
             version: 1,
             operation: OfficeOperation::Status,
@@ -396,6 +459,51 @@ final readonly class StepCommitCoordinator
         );
 
         return ['step' => $updated, 'response' => $commitResponse];
+    }
+
+    private function validateCommitRequest(
+        CallContext $context,
+        string $resourceId,
+        string $proposalId,
+        string $digest,
+        string $commandId,
+        ?OwnerRoute $route,
+    ): ?OfficeResponse {
+        if ($route !== null && ($route->resourceId !== $resourceId || $route->proposalId !== $proposalId)) {
+            return $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::IdempotencyConflict);
+        }
+
+        $proposal = $this->proposals->find($context, $resourceId, $proposalId);
+        if ($proposal === null || ($route === null && ! $proposal->hasPayload)) {
+            return $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::ResourceUnavailable);
+        }
+
+        $scope = new CommandScope($context, $resourceId, $commandId);
+        try {
+            $this->commit->authorize($scope, $proposal);
+        } catch (OfficeException $e) {
+            return $this->errorMapper->toResponse(OfficeOperation::Commit, $e->errorCode);
+        }
+
+        if ($route !== null) {
+            if (! hash_equals($route->fingerprint, RequestFingerprint::of($proposal->plan->command, $proposalId, $digest))) {
+                return $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::IdempotencyConflict);
+            }
+            if ($route->dedupeUntil <= $this->clock->now()) {
+                return $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::IdempotencyWindowExpired);
+            }
+            if ($proposal->decision !== 'approved' || ! hash_equals($proposal->plan->digest, $digest)) {
+                return $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::PreconditionFailed);
+            }
+
+            return null;
+        }
+
+        if (! hash_equals($proposal->plan->digest, $digest)) {
+            return $this->errorMapper->toResponse(OfficeOperation::Commit, ErrorCode::PreconditionFailed);
+        }
+
+        return null;
     }
 
     private function hasActiveDispatchLease(CallContext $context, string $proposalId): bool

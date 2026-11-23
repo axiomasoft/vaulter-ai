@@ -6,17 +6,25 @@ namespace Vaulter\Ai\LaravelAi;
 
 use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
+use Illuminate\Contracts\Container\Container;
+use Illuminate\Contracts\Queue\Factory as QueueFactory;
+use Illuminate\Queue\SyncQueue;
 use Illuminate\Support\Facades\Context;
+use Illuminate\Support\Testing\Fakes\BusFake;
+use stdClass;
 use Throwable;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Contracts\OfficeExecutor;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeRun;
 use Vaulter\Ai\Core\Data\OfficeRunStep;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
+use Vaulter\Ai\Core\Operations\RunStateReducer;
 use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
+use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
 
@@ -33,9 +41,12 @@ final readonly class LaravelOfficeExecutor implements OfficeExecutor
         private HostPolicy $policy,
         private Runs $runs,
         private StepCommitCoordinator $commits,
+        private RunStateReducer $stateReducer,
+        private OfficeDatabase $db,
         private WireErrorMapper $errorMapper,
         private ConfigRepository $config,
         private Dispatcher $bus,
+        private Container $container,
     ) {}
 
     public function key(): string
@@ -60,33 +71,39 @@ final readonly class LaravelOfficeExecutor implements OfficeExecutor
             ? $payload['resource_id']
             : null;
 
-        $run = $this->runs->createOrFind(
-            context: $context,
-            channel: $channel,
-            sourceEventId: $sourceEventId,
-            profileRevision: $profile->revision,
-            inputPayload: [
-                'prompt' => $prompt,
-                'resource_id' => $resourceId,
-                'profile' => $profile->name,
-            ],
-        );
+        $this->db->transaction(function () use (
+            $context,
+            $channel,
+            $sourceEventId,
+            $profile,
+            $prompt,
+            $resourceId,
+        ): void {
+            $run = $this->runs->createOrFind(
+                context: $context,
+                channel: $channel,
+                sourceEventId: $sourceEventId,
+                profileRevision: $profile->revision,
+                inputPayload: [
+                    'prompt' => $prompt,
+                    'resource_id' => $resourceId,
+                    'profile' => $profile->name,
+                ],
+            );
 
-        if (in_array($run->state, ['completed', 'rejected'], true)) {
-            return;
-        }
+            if (in_array($run->state, ['completed', 'rejected'], true)) {
+                return;
+            }
 
-        Context::add('vaulter.ai.tenant_id', $context->tenantId);
-        Context::add('vaulter.ai.project_scope', $context->projectScope);
-        Context::add('vaulter.ai.run_id', $run->runId);
+            $job = $this->buildJob($context->tenantId, $run->runId);
 
-        $job = new ExecuteOfficeRun($context->tenantId, $run->runId);
-        $job->queue = $this->queueName();
-        $job->timeout = $this->workerTimeout();
-        $job->tries = $this->tries();
-        $job->backoff = $this->backoff();
-
-        $this->bus->dispatch($job);
+            $this->db->afterCommit(function () use ($context, $run, $job): void {
+                Context::add('vaulter.ai.tenant_id', $context->tenantId);
+                Context::add('vaulter.ai.project_scope', $context->projectScope);
+                Context::add('vaulter.ai.run_id', $run->runId);
+                $this->dispatcher()->dispatch($job);
+            });
+        }, $context->tenantId);
     }
 
     /**
@@ -155,10 +172,35 @@ final readonly class LaravelOfficeExecutor implements OfficeExecutor
             Context::add('vaulter.ai.project_scope', $context->projectScope);
             Context::add('vaulter.ai.run_id', $runId);
             $run = $this->runs->find($context, $runId) ?? throw OfficeException::resourceUnavailable();
+
+            // Reconcile any previously recorded commit steps BEFORE invoking the model
+            // so a crash recovery never re-prompts the model to plan another mutation.
             $priorSteps = $this->runs->listSteps($context, $runId);
+            $hadCommitStep = false;
+            foreach ($priorSteps as $step) {
+                if ($step->operation === OfficeOperation::Commit) {
+                    $hadCommitStep = true;
+                    if (in_array($step->state, ['dispatched', 'waiting'], true)) {
+                        $this->commits->resumeStep($context, $runId, $step->stepId);
+                    }
+                }
+            }
+
+            if ($hadCommitStep) {
+                $stepsAfterReconcile = $this->runs->listSteps($context, $runId);
+                $reconciledState = $this->stateReducer->reduce($stepsAfterReconcile);
+                if ($reconciledState === 'completed') {
+                    $this->verifyUnverifiedCommittedSteps($context, $runId, $stepsAfterReconcile);
+                    $stepsAfterReconcile = $this->runs->listSteps($context, $runId);
+                    $reconciledState = $this->stateReducer->reduce($stepsAfterReconcile);
+                }
+                $this->runs->finishRun($context, $runId, $lease, $reconciledState);
+
+                return $this->runs->find($context, $runId) ?? $run;
+            }
+
             $prompt = is_string($run->input['prompt'] ?? null) ? $run->input['prompt'] : '';
             $agent = $this->buildAgent($context, $runId, priorSteps: $priorSteps);
-
             $agent->prompt($prompt);
 
             $steps = $this->runs->listSteps($context, $runId);
@@ -169,7 +211,7 @@ final readonly class LaravelOfficeExecutor implements OfficeExecutor
             }
 
             $steps = $this->runs->listSteps($context, $runId);
-            $nextState = $this->resolveRunState($steps);
+            $nextState = $this->stateReducer->reduce($steps);
             $this->runs->finishRun($context, $runId, $lease, $nextState);
 
             return $this->runs->find($context, $runId) ?? $run;
@@ -189,42 +231,141 @@ final readonly class LaravelOfficeExecutor implements OfficeExecutor
     }
 
     /**
-     * @param  list<OfficeRunStep>  $steps
-     * @return 'queued'|'running'|'awaiting_approval'|'partially_applied'|'completed'|'rejected'|'reconcile'
+     * Recompute and persist the parent run's state from current steps when no active lease holds it.
      */
-    private function resolveRunState(array $steps): string
+    public function reconcileRunState(CallContext $context, string $runId): ?OfficeRun
     {
-        $hasCommit = false;
-        $hasWaitingApproval = false;
-        $hasCommitFailed = false;
-        $hasFinishedOrVerified = false;
+        $lease = $this->runs->claimLease($context, $runId, $this->workerTimeout());
+        if ($lease === null) {
+            return $this->runs->find($context, $runId);
+        }
 
-        foreach ($steps as $step) {
-            if ($step->operation === OfficeOperation::Commit) {
-                $hasCommit = true;
-                if ($step->state === 'waiting') {
-                    if ($step->safeError === 'approval_required') {
-                        $hasWaitingApproval = true;
-                    }
-                } elseif ($step->state === 'failed') {
-                    $hasCommitFailed = true;
-                } elseif ($step->state === 'finished' || $step->state === 'verified') {
-                    $hasFinishedOrVerified = true;
-                }
+        try {
+            $steps = $this->runs->listSteps($context, $runId);
+            $nextState = $this->stateReducer->reduce($steps);
+            $this->runs->finishRun($context, $runId, $lease, $nextState);
+
+            return $this->runs->find($context, $runId);
+        } catch (Throwable $failure) {
+            $this->runs->releaseLease($context, $runId, $lease, 'reconcile');
+
+            throw $failure;
+        }
+    }
+
+    public function firstRecoverableWaitingStepId(CallContext $context, string $runId): ?int
+    {
+        foreach ($this->runs->listSteps($context, $runId) as $step) {
+            if ($step->operation === OfficeOperation::Commit
+                && $step->state === 'waiting'
+                && $step->safeError !== 'approval_required') {
+                return $step->stepId;
             }
         }
 
-        if ($hasWaitingApproval) {
-            return 'awaiting_approval';
-        }
-        if ($hasCommitFailed && ! $hasFinishedOrVerified) {
-            return 'rejected';
-        }
-        if ($hasCommit && ! $hasFinishedOrVerified) {
-            return 'reconcile';
+        return null;
+    }
+
+    public function scheduleStepResume(CallContext $context, string $runId, int $stepId, int $delaySeconds = 5): void
+    {
+        if (! $this->canEnqueueAsync()) {
+            return;
         }
 
-        return 'completed';
+        $job = $this->buildJob($context->tenantId, $runId, $stepId, $delaySeconds);
+        Context::add('vaulter.ai.tenant_id', $context->tenantId);
+        Context::add('vaulter.ai.project_scope', $context->projectScope);
+        Context::add('vaulter.ai.run_id', $runId);
+        $this->dispatcher()->dispatch($job);
+    }
+
+    /**
+     * @param  list<OfficeRunStep>  $steps
+     */
+    private function verifyUnverifiedCommittedSteps(CallContext $context, string $runId, array $steps): void
+    {
+        /** @var array<string, true> $verifiedReceipts */
+        $verifiedReceipts = [];
+        foreach ($steps as $step) {
+            if ($step->operation === OfficeOperation::Verify && $step->state === 'verified' && $step->receiptId !== null) {
+                $verifiedReceipts[$step->receiptId] = true;
+            }
+        }
+
+        foreach ($steps as $step) {
+            if ($step->operation !== OfficeOperation::Commit
+                || ! in_array($step->state, ['finished', 'verified'], true)
+                || $step->resourceId === null
+                || $step->receiptId === null
+                || isset($verifiedReceipts[$step->receiptId])) {
+                continue;
+            }
+
+            $startedAt = hrtime(true);
+            $response = $this->office->handle($context, new OfficeRequest(
+                version: 1,
+                operation: OfficeOperation::Verify,
+                input: (object) [
+                    'resource_id' => $step->resourceId,
+                    'receipt_id' => $step->receiptId,
+                    'mode' => 'at_commit',
+                ],
+            ));
+
+            $passed = $response->ok
+                && $response->result instanceof stdClass
+                && ($response->result->outcome ?? null) === 'passed';
+
+            $this->runs->recordStep(
+                context: $context,
+                runId: $runId,
+                operation: OfficeOperation::Verify,
+                state: $passed ? 'verified' : 'failed',
+                resourceId: $step->resourceId,
+                receiptId: $step->receiptId,
+                compactResult: $response->toArray(),
+                safeError: $passed ? null : ($response->errorCode !== null ? $response->errorCode->value : 'verification_failed'),
+                responseBytes: $response->wireBytes(),
+                latencyMs: max(0, (int) ((hrtime(true) - $startedAt) / 1_000_000)),
+            );
+            $verifiedReceipts[$step->receiptId] = true;
+        }
+    }
+
+    private function canEnqueueAsync(): bool
+    {
+        if ($this->dispatcher() instanceof BusFake) {
+            return true;
+        }
+
+        if (! $this->container->bound(QueueFactory::class)) {
+            return false;
+        }
+
+        $queues = $this->container->make(QueueFactory::class);
+
+        return ! ($queues->connection() instanceof SyncQueue);
+    }
+
+    private function dispatcher(): Dispatcher
+    {
+        return $this->container->bound(Dispatcher::class)
+            ? $this->container->make(Dispatcher::class)
+            : $this->bus;
+    }
+
+    private function buildJob(string $tenantId, string $runId, ?int $resumeStepId = null, ?int $delaySeconds = null): ExecuteOfficeRun
+    {
+        $job = new ExecuteOfficeRun($tenantId, $runId, $resumeStepId);
+        $job->queue = $this->queueName();
+        $job->timeout = $this->workerTimeout();
+        $job->tries = $this->tries();
+        $job->backoff = $this->backoff();
+        if ($delaySeconds !== null && $delaySeconds > 0) {
+            $job->delay = $delaySeconds;
+        }
+
+        return $job;
     }
 
     private function queueName(): string

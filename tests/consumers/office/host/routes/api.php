@@ -185,6 +185,9 @@ Route::get('/_fixture/runs/{runId}', static function (Request $request, string $
     $commitReceipt = null;
     $commitCommandId = null;
     $commitCount = 0;
+    $verifyState = null;
+    $verifyReceiptId = null;
+    $verifyOutcome = null;
     $resourceId = DB::table('stand_run_contexts')->where('run_id', $runId)->value('resource_id');
     foreach ($steps as $s) {
         if ($resourceId === null && $s->resource_id !== null) {
@@ -194,6 +197,11 @@ Route::get('/_fixture/runs/{runId}', static function (Request $request, string $
             $commitCount++;
             $commitCommandId = $s->command_id;
             $commitReceipt = $s->receipt_id;
+        }
+        if ($s->operation === OfficeOperation::Verify->value) {
+            $verifyState = $s->state;
+            $verifyReceiptId = $s->receipt_id;
+            $verifyOutcome = $s->state === 'verified' ? 'passed' : 'failed';
         }
     }
 
@@ -211,6 +219,9 @@ Route::get('/_fixture/runs/{runId}', static function (Request $request, string $
         'commit_step_count' => $commitCount,
         'command_id' => $commitCommandId,
         'receipt_id' => $commitReceipt,
+        'verify_state' => $verifyState,
+        'verify_receipt_id' => $verifyReceiptId,
+        'verify_outcome' => $verifyOutcome,
         'text_command_count' => $commandsQuery->count(),
         'outbox_commit_count' => $outboxQuery->count(),
     ]);

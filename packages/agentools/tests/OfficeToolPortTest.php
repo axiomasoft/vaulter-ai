@@ -14,8 +14,11 @@ use Illuminate\Support\Facades\Config;
 use Vaulter\Ai\AgenTools\AgenToolsOfficeExecutor;
 use Vaulter\Ai\AgenTools\OfficeToolDescriptorRegistry;
 use Vaulter\Ai\AgenTools\OfficeToolPort;
+use Vaulter\Ai\Core\Actions\ResolveProposal;
+use Vaulter\Ai\Core\Contracts\ApprovedCommandContextResolver;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Data\CommandScope;
 use Vaulter\Ai\Core\Data\HostProfile;
 use Vaulter\Ai\Core\Data\ResourceEntry;
 use Vaulter\Ai\Core\Enums\ApprovalMode;
@@ -23,8 +26,12 @@ use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Tests\Support\AgenToolsTestCase;
+use Vaulter\Ai\Tests\Support\TestActor;
 use Vaulter\Ai\Tests\Support\TextCommandFixture;
 use Vaulter\Database\VaulterDatabase;
+use Vaulter\Drive\Access\Roles\RoleRegistry;
+use Vaulter\Drive\Access\ValueObjects\Subject;
+use Vaulter\Drive\Data\Access\GrantInput;
 
 uses(AgenToolsTestCase::class);
 
@@ -194,4 +201,133 @@ test('ScenarioRunner drives OfficeToolPort through read->prepare->commit->verify
         ->and($owner->table('v_outbox')->where('type', 'office.text_command_committed')->count())->toBe(1)
         ->and($runs->listSteps($fixture->context, $run->runId))->toHaveCount(6)
         ->and($runs->findCommitStepByProposal($fixture->context, $run->runId, (string) $result->stepResults['prepare']['proposal_id'])?->operation)->toBe(OfficeOperation::Commit);
+});
+
+test('AgenToolsOfficeExecutor preserves awaiting_approval and resumes the same run through verify after approval (F6)', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: false);
+    Config::set('vaulter-ai.profiles.documents', [
+        'executor' => 'agentools',
+        'provider_connection' => null,
+        'commands' => ['text.replace_exact@1'],
+        'approval' => 'human',
+        'revision' => 'rev-at-human-1',
+    ]);
+
+    $approverActor = TestActor::query()->create(['name' => 'Scenario Approver', 'email' => 'sc-approver@example.test']);
+    $fixture->drive->access()->grant($fixture->drive->root()->id, new GrantInput(Subject::ofModel($approverActor), RoleRegistry::WRITER));
+    $approverContext = new CallContext(
+        $fixture->context->tenantId,
+        $fixture->context->projectScope,
+        'user/'.$approverActor->getKey(),
+        profile: $fixture->context->profile,
+        policyRevision: $fixture->context->policyRevision,
+        driveId: $fixture->context->driveId,
+        actor: $approverActor,
+    );
+
+    $this->app->instance(ApprovedCommandContextResolver::class, new class($fixture->context) implements ApprovedCommandContextResolver
+    {
+        public function __construct(private readonly CallContext $initiator) {}
+
+        public function resolve(string $tenantId, string $proposalId): ?CallContext
+        {
+            return $this->initiator->tenantId === $tenantId ? $this->initiator : null;
+        }
+    });
+
+    $scenario = [
+        'spec_rev' => '2026-09',
+        'scenario_id' => 'office-human-approval-resume',
+        'steps' => [
+            [
+                'id' => 'read_block',
+                'tool' => 'office_read',
+                'input_map' => [
+                    'resource_id' => '$ctx.resource_id',
+                    'selector' => ['kind' => 'text_block', 'block_id' => 'p42'],
+                ],
+            ],
+            [
+                'id' => 'prepare',
+                'tool' => 'office_prepare',
+                'input_map' => [
+                    'resource_id' => '$ctx.resource_id',
+                    'command' => '"text.replace_exact@1"',
+                    'read_token' => '$steps.read_block.read_token',
+                    'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+                ],
+            ],
+            [
+                'id' => 'commit',
+                'tool' => 'office_commit',
+                'input_map' => [
+                    'resource_id' => '$ctx.resource_id',
+                    'proposal_id' => '$steps.prepare.proposal_id',
+                    'digest' => '$steps.prepare.digest',
+                ],
+            ],
+            [
+                'id' => 'verify',
+                'tool' => 'office_verify',
+                'input_map' => [
+                    'resource_id' => '$ctx.resource_id',
+                    'receipt_id' => '$steps.commit.receipt_id',
+                    'mode' => '"at_commit"',
+                ],
+            ],
+        ],
+    ];
+
+    /** @var AgenToolsOfficeExecutor $executor */
+    $executor = $this->app->make(AgenToolsOfficeExecutor::class);
+    /** @var Runs $runs */
+    $runs = $this->app->make(Runs::class);
+    $sourceEventId = 'evt-human-scenario-1';
+
+    $first = $executor->runScenario($fixture->context, 'agentools', $sourceEventId, $scenario, [
+        'resource_id' => $fixture->node->id,
+    ]);
+    $pausedRun = $runs->createOrFind($fixture->context, 'agentools', $sourceEventId, 'rev-at-human-1', []);
+    expect($first->outcome)->toBe(ScenarioOutcome::Failed)
+        ->and($pausedRun->state)->toBe('awaiting_approval');
+
+    $stepsBefore = $runs->listSteps($fixture->context, $pausedRun->runId);
+    $prepareStep = null;
+    $commitStep = null;
+    foreach ($stepsBefore as $s) {
+        if ($s->operation === OfficeOperation::Prepare) {
+            $prepareStep = $s;
+        }
+        if ($s->operation === OfficeOperation::Commit) {
+            $commitStep = $s;
+        }
+    }
+    expect($prepareStep)->not->toBeNull()
+        ->and($commitStep)->not->toBeNull()
+        ->and($commitStep?->state)->toBe('waiting')
+        ->and($commitStep?->safeError)->toBe('approval_required');
+
+    $proposalId = (string) ($prepareStep?->proposalId ?? '');
+    $digest = (string) ($prepareStep?->compactResult['result']['digest'] ?? '');
+    $commandId = (string) ($commitStep?->commandId ?? '');
+
+    /** @var ResolveProposal $resolver */
+    $resolver = $this->app->make(ResolveProposal::class);
+    expect($resolver->resolve(new CommandScope($fixture->context, $fixture->node->id, $commandId), $proposalId, $digest, $approverContext, true))->toBeTrue();
+
+    // Retry the exact same source event -> resumes the awaiting_approval run and reaches verify.
+    $resumed = $executor->runScenario($fixture->context, 'agentools', $sourceEventId, $scenario, [
+        'resource_id' => $fixture->node->id,
+    ]);
+    $completedRun = $runs->find($fixture->context, $pausedRun->runId);
+
+    expect($resumed->outcome)->toBe(ScenarioOutcome::Completed)
+        ->and($resumed->stepResults['commit']['state'] ?? null)->toBe('committed')
+        ->and($resumed->stepResults['verify']['outcome'] ?? null)->toBe('passed')
+        ->and($completedRun?->state)->toBe('completed');
+
+    $owner = $this->app->make(VaulterDatabase::class)->connection();
+    expect($owner->table('v_ai_text_commands')->count())->toBe(1)
+        ->and($owner->table('v_outbox')->where('type', 'office.text_command_committed')->count())->toBe(1)
+        ->and($runs->listSteps($fixture->context, $pausedRun->runId))->toHaveCount(4);
 });

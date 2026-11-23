@@ -244,8 +244,13 @@ final readonly class OfficeTool implements Tool
         if (! $response->ok) {
             $state = 'failed';
             $safeError = $response->errorCode?->value;
-        } elseif ($this->operation === OfficeOperation::Verify && ($response->result->outcome ?? null) === 'passed') {
-            $state = 'verified';
+        } elseif ($this->operation === OfficeOperation::Verify) {
+            if (($response->result->outcome ?? null) === 'passed') {
+                $state = 'verified';
+            } else {
+                $state = 'failed';
+                $safeError = 'verification_failed';
+            }
         }
 
         $this->runs->recordStep(

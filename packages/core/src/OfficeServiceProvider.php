@@ -18,6 +18,7 @@ use Vaulter\Ai\Core\Http\NullCallContextResolver;
 use Vaulter\Ai\Core\Operations\Describe;
 use Vaulter\Ai\Core\Operations\DispatchOfficeOperation;
 use Vaulter\Ai\Core\Operations\Read;
+use Vaulter\Ai\Core\Operations\RunStateReducer;
 use Vaulter\Ai\Core\Operations\Search;
 use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
 use Vaulter\Ai\Core\Persistence\ConfigHostPolicy;
@@ -76,6 +77,7 @@ final class OfficeServiceProvider extends ServiceProvider
         $this->app->singleton(Read::class);
         $this->app->singleton(Describe::class);
         $this->app->singleton(Office::class, DispatchOfficeOperation::class);
+        $this->app->singleton(RunStateReducer::class);
         $this->app->singleton(StepCommitCoordinator::class);
     }
 

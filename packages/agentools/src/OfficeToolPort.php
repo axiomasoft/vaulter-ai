@@ -12,6 +12,7 @@ use JsonException;
 use stdClass;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\Office;
+use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeResponse;
@@ -19,6 +20,7 @@ use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
+use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
 
@@ -34,6 +36,8 @@ final readonly class OfficeToolPort implements ToolPort
         private OfficeToolDescriptorRegistry $descriptors,
         private ActionKeyMap $actionKeyMap,
         private Runs $runs,
+        private Proposals $proposals,
+        private ResourceDirectory $directory,
         private StepCommitCoordinator $commits,
         private WireErrorMapper $errorMapper,
         private ?CallContext $context = null,
@@ -48,6 +52,8 @@ final readonly class OfficeToolPort implements ToolPort
             descriptors: $this->descriptors->forContext($context),
             actionKeyMap: $this->actionKeyMap,
             runs: $this->runs,
+            proposals: $this->proposals,
+            directory: $this->directory,
             commits: $this->commits,
             errorMapper: $this->errorMapper,
             context: $context,
@@ -122,11 +128,77 @@ final readonly class OfficeToolPort implements ToolPort
             return $this->handleCommit($arguments, $idempotencyKey);
         }
 
+        if ($operation === OfficeOperation::Prepare && $this->runId !== null) {
+            $replayed = $this->replayPreparedStepIfPresent($arguments, $idempotencyKey);
+            if ($replayed !== null) {
+                return $replayed;
+            }
+        }
+
         $input = $this->toStdClass($arguments);
         $response = $this->office->handle($this->context, new OfficeRequest(1, $operation, $input));
         $this->recordStep($operation, $arguments, $response, $idempotencyKey, $startedAt);
 
         return $this->toToolResult($response);
+    }
+
+    /**
+     * Replay a previously persisted successful office.prepare step within the same run/action key
+     * (e.g. when resuming a ScenarioRunner run after human approval) after verifying live ACL & arguments.
+     *
+     * @param  array<string, mixed>  $arguments
+     */
+    private function replayPreparedStepIfPresent(array $arguments, string $idempotencyKey): ?ToolExecutionResult
+    {
+        if ($this->context === null || $this->runId === null) {
+            return null;
+        }
+
+        $existing = $this->runs->findStepByActionKey($this->context, $this->runId, $idempotencyKey);
+        if ($existing === null) {
+            return null;
+        }
+        if ($existing->operation !== OfficeOperation::Prepare) {
+            return $this->toToolResult($this->errorMapper->toResponse(OfficeOperation::Prepare, ErrorCode::IdempotencyConflict));
+        }
+        if ($existing->state !== 'finished' || $existing->compactResult === null || ($existing->compactResult['ok'] ?? false) !== true) {
+            return null;
+        }
+
+        $resourceId = $arguments['resource_id'] ?? null;
+        $command = $arguments['command'] ?? null;
+        $cmdArgs = $arguments['arguments'] ?? null;
+        if (! is_string($resourceId) || $resourceId === '' || ! is_string($command) || $command === '') {
+            return null;
+        }
+
+        $savedResourceId = $existing->resumeInput['resource_id'] ?? $existing->resourceId;
+        $savedCommand = $existing->resumeInput['command'] ?? null;
+        $savedArgs = $existing->resumeInput['arguments'] ?? null;
+        if (
+            ($savedResourceId !== null && $savedResourceId !== $resourceId)
+            || ($savedCommand !== null && $savedCommand !== $command)
+            || (is_array($savedArgs) && $savedArgs !== $cmdArgs)
+        ) {
+            return $this->toToolResult($this->errorMapper->toResponse(OfficeOperation::Prepare, ErrorCode::IdempotencyConflict));
+        }
+
+        $entry = $this->directory->findAccessible($this->context, $resourceId, 'edit');
+        if ($entry === null || ! $this->policy->allowsCommand($this->context, $entry, $command)) {
+            return $this->toToolResult($this->errorMapper->toResponse(OfficeOperation::Prepare, ErrorCode::ResourceUnavailable));
+        }
+
+        $rawResult = $existing->compactResult['result'] ?? null;
+        if (! is_array($rawResult)) {
+            return null;
+        }
+        $proposalId = $rawResult['proposal_id'] ?? null;
+        if (! is_string($proposalId) || $this->proposals->find($this->context, $resourceId, $proposalId) === null) {
+            return $this->toToolResult($this->errorMapper->toResponse(OfficeOperation::Prepare, ErrorCode::ResourceUnavailable));
+        }
+
+        /** @var array<string, mixed> $rawResult */
+        return ToolExecutionResult::success($rawResult);
     }
 
     /**
@@ -240,9 +312,22 @@ final readonly class OfficeToolPort implements ToolPort
         if (! $response->ok) {
             $state = 'failed';
             $safeError = $response->errorCode?->value;
-        } elseif ($operation === OfficeOperation::Verify && ($response->result->outcome ?? null) === 'passed') {
-            $state = 'verified';
+        } elseif ($operation === OfficeOperation::Verify) {
+            if (($response->result->outcome ?? null) === 'passed') {
+                $state = 'verified';
+            } else {
+                $state = 'failed';
+                $safeError = 'verification_failed';
+            }
         }
+
+        $resumeInput = $operation === OfficeOperation::Prepare
+            ? [
+                'resource_id' => $resourceId,
+                'command' => is_string($arguments['command'] ?? null) ? $arguments['command'] : null,
+                'arguments' => is_array($arguments['arguments'] ?? null) ? $arguments['arguments'] : [],
+            ]
+            : null;
 
         $this->runs->recordStep(
             context: $this->context,
@@ -254,6 +339,7 @@ final readonly class OfficeToolPort implements ToolPort
             commandId: $commandId,
             receiptId: $receiptId,
             executorActionKey: $idempotencyKey,
+            resumeInput: $resumeInput,
             compactResult: $response->toArray(),
             safeError: $safeError,
             responseBytes: $response->wireBytes(),

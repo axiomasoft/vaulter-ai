@@ -215,3 +215,213 @@ test('ConfirmedWrite fails cleanly when initiator edit permission is revoked bef
     $owner = $this->app->make(VaulterDatabase::class)->connection();
     expect($owner->table('v_ai_text_commands')->count())->toBe(0);
 });
+
+test('ConfirmedWrite blocks command_id reuse across proposals, reader downgrade replay, wrong-digest lock-in, and replan key reuse (F1, F4, F5)', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: true);
+    Config::set('vaulter-ai.profiles.documents', [
+        'executor' => 'agentools',
+        'provider_connection' => null,
+        'commands' => ['text.replace_exact@1'],
+        'approval' => 'automatic',
+        'revision' => 'rev-auto-f145',
+    ]);
+
+    /** @var Runs $runs */
+    $runs = $this->app->make(Runs::class);
+    /** @var OfficeToolPort $basePort */
+    $basePort = $this->app->make(OfficeToolPort::class);
+
+    $run = $runs->createOrFind($fixture->context, 'agentools', 'evt-f1-f4-f5', 'rev-auto-f145', ['prompt' => 'f1 f4 f5']);
+    $port = $basePort->forContext($fixture->context, $run->runId);
+
+    $read = $port->call('office_read', [
+        'resource_id' => $fixture->node->id,
+        'selector' => ['kind' => 'text_block', 'block_id' => 'p42'],
+    ], 'k-read-1');
+    expect($read->isError())->toBeFalse();
+
+    $propA = $port->call('office_prepare', [
+        'resource_id' => $fixture->node->id,
+        'command' => 'text.replace_exact@1',
+        'read_token' => (string) $read->value['read_token'],
+        'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+    ], 'k-prep-a');
+    expect($propA->isError())->toBeFalse();
+    $proposalA = (string) $propA->value['proposal_id'];
+    $digestA = (string) $propA->value['digest'];
+
+    // F4: First commit attempt with wrong digest must fail WITHOUT making a binding durable.
+    $wrongFirst = $port->call('office_commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $proposalA,
+        'digest' => str_repeat('0', 64),
+    ], 'k-commit-a-1');
+    expect($wrongFirst->isError())->toBeTrue()
+        ->and($wrongFirst->error?->code)->toBe('vaulter.precondition.precondition_failed');
+
+    // Retrying same proposal with its real digest and command_id succeeds cleanly.
+    $commitA = $port->call('office_commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $proposalA,
+        'digest' => $digestA,
+        'command_id' => 'cmd-prop-a',
+    ], 'k-commit-a-1');
+    expect($commitA->isError())->toBeFalse()
+        ->and($commitA->value['command_id'])->toBe('cmd-prop-a')
+        ->and($commitA->value['state'])->toBe('committed');
+    $receiptA = (string) $commitA->value['receipt_id'];
+
+    // F5: Replay proposal A with replan key k2 succeeds, AND k2 stays bound so proposal B cannot reuse k2.
+    $replayA = $port->call('office_commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $proposalA,
+        'digest' => $digestA,
+    ], 'k-commit-a-replan-2');
+    expect($replayA->isError())->toBeFalse()
+        ->and($replayA->value['receipt_id'])->toBe($receiptA);
+
+    $read2 = $port->call('office_read', [
+        'resource_id' => $fixture->node->id,
+        'selector' => ['kind' => 'text_block', 'block_id' => 'p42'],
+    ], 'k-read-2');
+    $propB = $port->call('office_prepare', [
+        'resource_id' => $fixture->node->id,
+        'command' => 'text.replace_exact@1',
+        'read_token' => (string) $read2->value['read_token'],
+        'arguments' => ['block_id' => 'p42', 'expected' => '30', 'replacement' => '45'],
+    ], 'k-prep-b');
+    expect($propB->isError())->toBeFalse();
+    $proposalB = (string) $propB->value['proposal_id'];
+    $digestB = (string) $propB->value['digest'];
+
+    // F5: Reusing accepted replan alias k-commit-a-replan-2 for proposal B must conflict.
+    $reuseAlias = $port->call('office_commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $proposalB,
+        'digest' => $digestB,
+    ], 'k-commit-a-replan-2');
+    expect($reuseAlias->isError())->toBeTrue()
+        ->and($reuseAlias->error?->code)->toBe('vaulter.conflict.idempotency_conflict');
+
+    // F1 (part 1): Submitting proposal B with proposal A's command_id must conflict and never return A's receipt.
+    $reuseCmd = $port->call('office_commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $proposalB,
+        'digest' => $digestB,
+        'command_id' => 'cmd-prop-a',
+    ], 'k-commit-b-fresh');
+    expect($reuseCmd->isError())->toBeTrue()
+        ->and($reuseCmd->error?->code)->toBe('vaulter.conflict.idempotency_conflict');
+
+    $owner = $this->app->make(VaulterDatabase::class)->connection();
+    expect($owner->table('v_ai_text_commands')->count())->toBe(1);
+
+    // F1 (part 2): Downgrade original writer to Reader (retains View, loses Edit) -> commit replay must fail closed.
+    $fixture->revoke();
+    $fixture->drive->access()->grant($fixture->drive->root()->id, new GrantInput(Subject::ofModel($fixture->actor), RoleRegistry::READER));
+
+    $downgradedReplay = $port->call('office_commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $proposalA,
+        'digest' => $digestA,
+    ], 'k-commit-a-1');
+    expect($downgradedReplay->isError())->toBeTrue()
+        ->and($downgradedReplay->error?->code)->toBe('vaulter.not_found.resource_unavailable');
+
+    // Direct office_status still works for the reader who initiated the command, while standalone commit replay fails closed.
+    $statusStillWorks = $port->call('office_status', [
+        'resource_id' => $fixture->node->id,
+        'command_id' => 'cmd-prop-a',
+    ], 'k-status-reader');
+    expect($statusStillWorks->isError())->toBeFalse()
+        ->and($statusStillWorks->value['receipt_id'])->toBe($receiptA);
+
+    $standaloneDowngraded = $basePort->forContext($fixture->context)->call('office_commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $proposalA,
+        'digest' => $digestA,
+    ], 'k-commit-standalone-downgraded');
+    expect($standaloneDowngraded->isError())->toBeTrue()
+        ->and($standaloneDowngraded->error?->code)->toBe('vaulter.not_found.resource_unavailable');
+});
+
+test('ConfirmedWrite allows valid human approval after an earlier wrong-digest commit attempt (F4)', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: false);
+    Config::set('vaulter-ai.profiles.documents', [
+        'executor' => 'agentools',
+        'provider_connection' => null,
+        'commands' => ['text.replace_exact@1'],
+        'approval' => 'human',
+        'revision' => 'rev-human-f4',
+    ]);
+
+    $approverActor = TestActor::query()->create(['name' => 'Reviewer F4', 'email' => 'revf4@example.test']);
+    $fixture->drive->access()->grant($fixture->drive->root()->id, new GrantInput(Subject::ofModel($approverActor), RoleRegistry::WRITER));
+    $approverContext = new CallContext(
+        $fixture->context->tenantId,
+        $fixture->context->projectScope,
+        'user/'.$approverActor->getKey(),
+        profile: $fixture->context->profile,
+        policyRevision: $fixture->context->policyRevision,
+        driveId: $fixture->context->driveId,
+        actor: $approverActor,
+    );
+
+    $this->app->instance(ApprovedCommandContextResolver::class, new class($fixture->context) implements ApprovedCommandContextResolver
+    {
+        public function __construct(private readonly CallContext $initiator) {}
+
+        public function resolve(string $tenantId, string $proposalId): ?CallContext
+        {
+            return $this->initiator->tenantId === $tenantId ? $this->initiator : null;
+        }
+    });
+
+    /** @var Runs $runs */
+    $runs = $this->app->make(Runs::class);
+    /** @var ActionKeyMap $actionKeyMap */
+    $actionKeyMap = $this->app->make(ActionKeyMap::class);
+    /** @var OfficeToolPort $basePort */
+    $basePort = $this->app->make(OfficeToolPort::class);
+
+    $run = $runs->createOrFind($fixture->context, 'agentools', 'evt-human-f4', 'rev-human-f4', ['prompt' => 'edit']);
+    $port = $basePort->forContext($fixture->context, $run->runId);
+
+    $read = $port->call('office_read', ['resource_id' => $fixture->node->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p42']], 'k-r');
+    $prep = $port->call('office_prepare', [
+        'resource_id' => $fixture->node->id,
+        'command' => 'text.replace_exact@1',
+        'read_token' => (string) $read->value['read_token'],
+        'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+    ], 'k-p');
+    $proposalId = (string) $prep->value['proposal_id'];
+    $digest = (string) $prep->value['digest'];
+
+    $badCommit = $port->call('office_commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $proposalId,
+        'digest' => str_repeat('a', 64),
+    ], 'k-c');
+    expect($badCommit->isError())->toBeTrue()
+        ->and($badCommit->error?->code)->toBe('vaulter.precondition.precondition_failed');
+
+    $decision = $actionKeyMap->bindConfirmedApproval(
+        initiator: $fixture->context,
+        runId: $run->runId,
+        actionKey: 'k-c',
+        resourceId: $fixture->node->id,
+        proposalId: $proposalId,
+        digest: $digest,
+        approver: $approverContext,
+        approved: true,
+    );
+    expect($decision['decided'])->toBeTrue();
+
+    $goodCommit = $port->call('office_commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $proposalId,
+        'digest' => $digest,
+    ], 'k-c');
+    expect($goodCommit->isError())->toBeFalse()
+        ->and($goodCommit->value['state'])->toBe('committed');
+});

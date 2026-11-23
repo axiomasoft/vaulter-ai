@@ -36,7 +36,15 @@ require_run_dir() {
 compose_for_run() {
     local run_dir="$1"
     shift
-    docker compose --project-directory "$STAND_DIR" -f "$COMPOSE_FILE" --env-file "$run_dir/.env" "$@"
+    local project_name image_postgres
+    project_name="$(grep -E '^COMPOSE_PROJECT_NAME=' "$run_dir/.env" | head -n1 | cut -d= -f2-)"
+    image_postgres="$(grep -E '^IMAGE_POSTGRES=' "$run_dir/.env" | head -n1 | cut -d= -f2-)"
+    [[ -n "$project_name" && "$project_name" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "Invalid or missing COMPOSE_PROJECT_NAME in $run_dir/.env"
+    [[ -n "$image_postgres" && "$image_postgres" =~ ^[A-Za-z0-9./:@_-]+$ ]] || die "Invalid or missing IMAGE_POSTGRES in $run_dir/.env"
+    env -u COMPOSE_PROJECT_NAME -u IMAGE_POSTGRES \
+        COMPOSE_PROJECT_NAME="$project_name" \
+        IMAGE_POSTGRES="$image_postgres" \
+        docker compose --project-name "$project_name" --project-directory "$STAND_DIR" -f "$COMPOSE_FILE" --env-file "$run_dir/.env" "$@"
 }
 
 cmd_prepare() {
@@ -225,7 +233,27 @@ py_dst = run_dir / 'python'
 shutil.copytree(repo_root / 'clients' / 'python', py_dst / 'clients' / 'python', dirs_exist_ok=True, symlinks=False)
 shutil.copy2(stand_dir / 'tests' / 'remote_client.py', py_dst / 'tests' / 'remote_client.py')
 
-images_map = {item['service']: item['reference'] for item in image_items if 'service' in item and 'reference' in item}
+images_map: dict[str, str] = {}
+for item in image_items:
+    if not isinstance(item, dict):
+        raise SystemExit(f'Malformed image artifact entry: {item}')
+    service = item.get('service', '')
+    reference = item.get('reference', '')
+    if not isinstance(service, str) or not service or not isinstance(reference, str) or not reference:
+        raise SystemExit(f'Malformed image artifact entry: {item}')
+    if re.fullmatch(r'[A-Za-z0-9./:@_-]+', reference) is None:
+        raise SystemExit(f'Unsafe image reference for {service}: {reference}')
+    if service in images_map:
+        raise SystemExit(f'Duplicate image service entry: {service}')
+    images_map[service] = reference
+
+pg_image = images_map.get('postgres')
+if pg_image is None:
+    if 'postgres' in profile.get('images', []):
+        raise SystemExit('Missing required postgres image reference in artifacts.json')
+    pg_image = 'postgres:18.7'
+images_map['postgres'] = pg_image
+
 build_manifest = {
     'schema_version': 1,
     'run_id': run_dir.name,
@@ -241,7 +269,9 @@ build_manifest = {
 (run_dir / 'build.json').write_text(json.dumps(build_manifest, indent=2) + '\n', encoding='utf-8')
 PY
 
-    local pg_image='postgres:18.7'
+    local pg_image
+    pg_image="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["images"]["postgres"])' "$run_dir/build.json")"
+    [[ -n "$pg_image" && "$pg_image" =~ ^[A-Za-z0-9./:@_-]+$ ]] || die "Invalid resolved postgres image reference [$pg_image]"
     cat > "$run_dir/.env" <<ENV
 STAND_DIR=$STAND_DIR
 FIXTURE_HOST_DIR=$run_dir/host
@@ -399,6 +429,8 @@ assert data['commit_step_count'] == 1, f'Expected single commit step: {data}'
 assert data['text_command_count'] == 1, f'Expected single domain write: {data}'
 assert data['outbox_commit_count'] == 1, f'Expected single outbox event: {data}'
 assert data['receipt_id'], f'Missing receipt_id: {data}'
+assert data.get('verify_outcome') == 'passed', f'Expected verify_outcome=passed: {data}'
+assert data.get('verify_receipt_id') == data['receipt_id'], f'Verify receipt mismatch: {data}'
 PY
 
     log "Running isolated python-client remote HTTP test..."

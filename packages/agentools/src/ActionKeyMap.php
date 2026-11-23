@@ -11,9 +11,11 @@ use Vaulter\Ai\Core\Data\CommandScope;
 use Vaulter\Ai\Core\Data\OfficeRunStep;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
+use Vaulter\Ai\Core\Operations\Commit;
 use Vaulter\Ai\Core\Persistence\OwnerRoutes;
 use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\Runs;
+use Vaulter\Ai\Core\Protocol\RequestFingerprint;
 
 /**
  * Persistently maps an AgenTools action/idempotency key and proposal_id to a single Office command_id
@@ -26,6 +28,7 @@ final readonly class ActionKeyMap
         private Proposals $proposals,
         private OwnerRoutes $routes,
         private ResolveProposal $resolver,
+        private Commit $commit,
     ) {}
 
     /**
@@ -44,13 +47,41 @@ final readonly class ActionKeyMap
             throw OfficeException::invalidInput('AgenTools action idempotency key must not be empty.');
         }
 
+        $proposal = $this->proposals->find($context, $resourceId, $proposalId);
+        $existingRoute = $this->routes->forProposal($context, $proposalId);
+        if ($proposal === null || ($existingRoute === null && ! $proposal->hasPayload)) {
+            throw OfficeException::resourceUnavailable();
+        }
+
         $byProposal = $this->runs->findCommitStepByProposal($context, $runId, $proposalId);
         if ($byProposal !== null) {
-            if ($byProposal->executorActionKey !== null && $byProposal->executorActionKey !== $actionKey) {
-                $other = $this->runs->findStepByActionKey($context, $runId, $actionKey);
-                if ($other !== null && $other->stepId !== $byProposal->stepId) {
-                    throw new OfficeException(ErrorCode::IdempotencyConflict);
-                }
+            if ($byProposal->resourceId !== $resourceId) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
+            if ($preferredCommandId !== null && $preferredCommandId !== '' && $byProposal->commandId !== $preferredCommandId) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
+            $savedDigest = is_string($byProposal->resumeInput['digest'] ?? null)
+                ? $byProposal->resumeInput['digest']
+                : null;
+            if ($savedDigest !== null && ! hash_equals($savedDigest, $digest)) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
+
+            $other = $this->runs->findStepByActionKey($context, $runId, $actionKey);
+            if ($other !== null && $other->stepId !== $byProposal->stepId) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
+
+            $authCommandId = $byProposal->commandId ?? 'cmd-'.Str::uuid7();
+            $this->commit->authorize(new CommandScope($context, $resourceId, $authCommandId), $proposal);
+            if ($existingRoute !== null
+                && ($existingRoute->resourceId !== $resourceId
+                    || ! hash_equals($existingRoute->fingerprint, RequestFingerprint::of($proposal->plan->command, $proposalId, $digest)))) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
+            if (! hash_equals($proposal->plan->digest, $digest)) {
+                throw OfficeException::preconditionFailed();
             }
 
             return $this->runs->beginCommitStep(
@@ -59,8 +90,9 @@ final readonly class ActionKeyMap
                 resourceId: $resourceId,
                 proposalId: $proposalId,
                 digest: $digest,
-                initialCommandId: $byProposal->commandId ?? 'cmd-'.Str::uuid7(),
-                executorActionKey: $byProposal->executorActionKey ?? $actionKey,
+                initialCommandId: $authCommandId,
+                ownerKey: $proposal->plan->ownerKey,
+                executorActionKey: $actionKey,
             );
         }
 
@@ -69,16 +101,33 @@ final readonly class ActionKeyMap
             throw new OfficeException(ErrorCode::IdempotencyConflict);
         }
 
-        $ownerKey = '';
-        $proposal = $this->proposals->find($context, $resourceId, $proposalId);
-        if ($proposal !== null) {
-            $ownerKey = $proposal->plan->ownerKey;
+        if ($existingRoute !== null) {
+            if ($existingRoute->resourceId !== $resourceId) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
+            if ($preferredCommandId !== null && $preferredCommandId !== '' && $existingRoute->commandId !== $preferredCommandId) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
+            if (! hash_equals($existingRoute->fingerprint, RequestFingerprint::of($proposal->plan->command, $proposalId, $digest))) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
         }
 
-        $existingRoute = $this->routes->forProposal($context, $proposalId);
         $commandId = $existingRoute !== null
             ? $existingRoute->commandId
             : ($preferredCommandId !== null && $preferredCommandId !== '' ? $preferredCommandId : $this->deterministicCommandId($actionKey));
+
+        if ($existingRoute === null) {
+            $routeByCmd = $this->routes->find(new CommandScope($context, $resourceId, $commandId));
+            if ($routeByCmd !== null && $routeByCmd->proposalId !== $proposalId) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
+        }
+
+        $this->commit->authorize(new CommandScope($context, $resourceId, $commandId), $proposal);
+        if (! hash_equals($proposal->plan->digest, $digest)) {
+            throw OfficeException::preconditionFailed();
+        }
 
         return $this->runs->beginCommitStep(
             context: $context,
@@ -87,7 +136,7 @@ final readonly class ActionKeyMap
             proposalId: $proposalId,
             digest: $digest,
             initialCommandId: $commandId,
-            ownerKey: $ownerKey,
+            ownerKey: $proposal->plan->ownerKey,
             executorActionKey: $actionKey,
         );
     }

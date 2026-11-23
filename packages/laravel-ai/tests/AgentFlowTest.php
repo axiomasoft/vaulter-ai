@@ -5,12 +5,17 @@ declare(strict_types=1);
 use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
 use Laravel\Ai\Responses\Data\ToolCall;
+use Symfony\Component\Process\Process;
 use Vaulter\Ai\Core\Contracts\RunContextResolver;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Data\CommandScope;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
+use Vaulter\Ai\Core\Persistence\OwnerRoutes;
+use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\LaravelAi\ExecuteOfficeRun;
 use Vaulter\Ai\LaravelAi\LaravelOfficeExecutor;
@@ -108,8 +113,22 @@ test('deterministic OfficeAgent completes full search->read->describe->prepare->
 
     $run = $runs->createOrFind($fixture->context, 'laravel-ai', $sourceEventId, 'rev-1', ['prompt' => '']);
     $steps = $runs->listSteps($fixture->context, $run->runId);
+    $commitStep = null;
+    $verifyStep = null;
+    foreach ($steps as $s) {
+        if ($s->operation === OfficeOperation::Commit) {
+            $commitStep = $s;
+        }
+        if ($s->operation === OfficeOperation::Verify) {
+            $verifyStep = $s;
+        }
+    }
     expect($run->state)->toBe('completed')
-        ->and($steps)->toHaveCount(7);
+        ->and($steps)->toHaveCount(7)
+        ->and($verifyStep)->not->toBeNull()
+        ->and($verifyStep?->state)->toBe('verified')
+        ->and($verifyStep?->receiptId)->toBe($commitStep?->receiptId)
+        ->and($verifyStep?->compactResult['result']['outcome'] ?? null)->toBe('passed');
 
     $owner = $this->app->make(VaulterDatabase::class)->connection();
     expect($owner->table('v_ai_text_commands')->count())->toBe(1)
@@ -338,4 +357,338 @@ test('resumeStep recovers both pre-route crash (operation_unknown -> replay same
     $again = $coordinator->resumeStep($fixture->context, $run->runId, $step->stepId);
     expect($again['step']->receiptId)->toBe($resumed?->receiptId)
         ->and($owner->table('v_ai_text_commands')->count())->toBe(1);
+});
+
+test('worker SIGKILL reconciles saved commit BEFORE prompting so a fresh read+prepare fake cannot double-commit (F2)', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: true);
+    configureDeterministicLaravelAi($this->app, $fixture);
+
+    $executor = $this->app->make(LaravelOfficeExecutor::class);
+    $runs = $this->app->make(Runs::class);
+    $db = $this->app->make(OfficeDatabase::class);
+    $owner = $this->app->make(VaulterDatabase::class)->connection();
+
+    $run = $runs->createOrFind(
+        context: $fixture->context,
+        channel: 'laravel-ai',
+        sourceEventId: 'evt-sigkill-f2-fresh-prompt',
+        profileRevision: 'rev-1',
+        inputPayload: ['prompt' => 'Increase payment days in 4.2 by 1 step (15 -> 30).', 'resource_id' => $fixture->node->id],
+    );
+
+    $crashed = false;
+    $turn1 = 0;
+    OfficeAgent::fake(function () use (&$turn1, &$crashed, $fixture, $runs, $run): mixed {
+        if ($crashed) {
+            throw new RuntimeException('simulated crash right after owner commit');
+        }
+        $steps = $runs->listSteps($fixture->context, $run->runId);
+        $latestOf = static function (OfficeOperation $op) use ($steps): ?array {
+            $match = null;
+            foreach ($steps as $step) {
+                if ($step->operation === $op) {
+                    $match = $step->compactResult;
+                }
+            }
+
+            return $match;
+        };
+
+        return match ($turn1++) {
+            0 => new ToolCall('w1-read', 'office_read', ['resource_id' => $fixture->node->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p42']]),
+            1 => new ToolCall('w1-prep', 'office_prepare', [
+                'resource_id' => $fixture->node->id,
+                'command' => 'text.replace_exact@1',
+                'read_token' => (string) ($latestOf(OfficeOperation::Read)['result']['read_token'] ?? ''),
+                'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+            ]),
+            2 => new ToolCall('w1-commit', 'office_commit', [
+                'resource_id' => $fixture->node->id,
+                'proposal_id' => (string) ($latestOf(OfficeOperation::Prepare)['result']['proposal_id'] ?? ''),
+                'digest' => (string) ($latestOf(OfficeOperation::Prepare)['result']['digest'] ?? ''),
+            ]),
+            default => throw new RuntimeException('unexpected turn'),
+        };
+    })->preventStrayPrompts();
+
+    $routesTable = $db->table('ai_owner_routes');
+    $armed = true;
+    $db->connection()->beforeExecuting(static function (string $sql) use ($routesTable, &$armed, &$crashed): void {
+        if ($armed && str_starts_with($sql, 'update "'.$routesTable.'" set "receipt_id"')) {
+            $armed = false;
+            $crashed = true;
+            throw new RuntimeException('simulated crash right after owner commit');
+        }
+    });
+
+    $job = new ExecuteOfficeRun($fixture->context->tenantId, $run->runId);
+    expect(fn () => $job->handle($executor, $this->app->make(RunContextResolver::class)))
+        ->toThrow(RuntimeException::class, 'simulated crash right after owner commit');
+
+    $originalReceiptId = (string) $owner->table('v_ai_text_commands')->value('receipt_id');
+
+    // Phase 2: Second fake model invocation starts from scratch with a fresh read + prepare (attempting 30 -> 45).
+    // Pre-prompt reconciliation must settle the saved commit and verify without letting the model plan a second mutation.
+    $turn2 = 0;
+    OfficeAgent::fake(function () use (&$turn2, $fixture, $runs, $run): mixed {
+        $steps = $runs->listSteps($fixture->context, $run->runId);
+        $latestOf = static function (OfficeOperation $op) use ($steps): ?array {
+            $match = null;
+            foreach ($steps as $step) {
+                if ($step->operation === $op) {
+                    $match = $step->compactResult;
+                }
+            }
+
+            return $match;
+        };
+
+        return match ($turn2++) {
+            0 => new ToolCall('w2-read', 'office_read', ['resource_id' => $fixture->node->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p42']]),
+            1 => new ToolCall('w2-prep', 'office_prepare', [
+                'resource_id' => $fixture->node->id,
+                'command' => 'text.replace_exact@1',
+                'read_token' => (string) ($latestOf(OfficeOperation::Read)['result']['read_token'] ?? ''),
+                'arguments' => ['block_id' => 'p42', 'expected' => '30', 'replacement' => '45'],
+            ]),
+            2 => new ToolCall('w2-commit', 'office_commit', [
+                'resource_id' => $fixture->node->id,
+                'proposal_id' => (string) ($latestOf(OfficeOperation::Prepare)['result']['proposal_id'] ?? ''),
+                'digest' => (string) ($latestOf(OfficeOperation::Prepare)['result']['digest'] ?? ''),
+            ]),
+            default => 'Done',
+        };
+    })->preventStrayPrompts();
+
+    $retryJob = new ExecuteOfficeRun($fixture->context->tenantId, $run->runId);
+    $retryJob->handle($executor, $this->app->make(RunContextResolver::class));
+
+    $finalRun = $runs->find($fixture->context, $run->runId);
+    $finalSteps = $runs->listSteps($fixture->context, $run->runId);
+    $verifySteps = array_values(array_filter(
+        $finalSteps,
+        static fn ($s): bool => $s->operation === OfficeOperation::Verify,
+    ));
+
+    expect($finalRun?->state)->toBe('completed')
+        ->and($owner->table('v_ai_text_commands')->count())->toBe(1)
+        ->and($fixture->snapshot()->stateVersion)->toBe(2)
+        ->and($verifySteps)->toHaveCount(1)
+        ->and($verifySteps[0]->state)->toBe('verified')
+        ->and($verifySteps[0]->receiptId)->toBe($originalReceiptId);
+});
+
+test('explicit resumeStep job keeps recovery scheduled under active dispatch lease and settles parent run when owner commits (F3)', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: true);
+    configureDeterministicLaravelAi($this->app, $fixture);
+
+    $executor = $this->app->make(LaravelOfficeExecutor::class);
+    $runs = $this->app->make(Runs::class);
+    $routes = $this->app->make(OwnerRoutes::class);
+    $proposals = $this->app->make(Proposals::class);
+    $db = $this->app->make(OfficeDatabase::class);
+    $owner = $this->app->make(VaulterDatabase::class)->connection();
+
+    $prep = $fixture->prepare('15', '30', 'p42');
+    $run = $runs->createOrFind($fixture->context, 'laravel-ai', 'evt-f3-active-lease', 'rev-1', ['prompt' => 'edit']);
+    $step = $runs->beginCommitStep(
+        context: $fixture->context,
+        runId: $run->runId,
+        resourceId: $fixture->node->id,
+        proposalId: $prep->proposal_id,
+        digest: $prep->digest,
+        initialCommandId: 'cmd-f3-lease-1',
+        ownerKey: 'documents.single_text@1',
+    );
+
+    $stored = $proposals->find($fixture->context, $fixture->node->id, $prep->proposal_id);
+    expect($stored)->not->toBeNull();
+    $scope = new CommandScope($fixture->context, $fixture->node->id, 'cmd-f3-lease-1');
+    $routes->bind($scope, $stored->plan);
+
+    // Insert an active dispatch lease on v_ai_dispatches (simulating DispatchApprovedCommand running on another worker).
+    $now = $this->fixedClock->now();
+    $db->transaction(function () use ($db, $prep, $now): void {
+        $db->query('ai_dispatches')->insert([
+            'event_id' => $db->newUuid(),
+            'proposal_id' => $prep->proposal_id,
+            'state' => 'leased',
+            'attempts' => 1,
+            'available_at' => $db->utcTimestamp($now),
+            'lease_token' => $db->newUuid(),
+            'lease_until' => $db->utcTimestamp($now->modify('+60 seconds')),
+        ]);
+    }, $fixture->context->tenantId);
+
+    Queue::fake();
+
+    // Attempt 1: active dispatch lease -> step moves to waiting, parent run stays in reconcile, follow-up job scheduled!
+    $resumeJob1 = new ExecuteOfficeRun($fixture->context->tenantId, $run->runId, $step->stepId);
+    $resumeJob1->handle($executor, $this->app->make(RunContextResolver::class));
+
+    $afterFirst = $runs->findStep($fixture->context, $run->runId, $step->stepId);
+    $runAfterFirst = $runs->find($fixture->context, $run->runId);
+    expect($afterFirst?->state)->toBe('waiting')
+        ->and($runAfterFirst?->state)->toBe('reconcile')
+        ->and($owner->table('v_ai_text_commands')->count())->toBe(0);
+
+    Queue::assertPushed(ExecuteOfficeRun::class, static function (ExecuteOfficeRun $queued) use ($run, $step): bool {
+        return $queued->runId === $run->runId && $queued->resumeStepId === $step->stepId && $queued->delay === 5;
+    });
+
+    // Simulate the owner command settling after the first status check.
+    $commitOutcome = $fixture->call(OfficeOperation::Commit, [
+        'proposal_id' => $prep->proposal_id,
+        'digest' => $prep->digest,
+        'command_id' => 'cmd-f3-lease-1',
+    ]);
+    expect($commitOutcome->ok)->toBeTrue();
+    $receiptId = (string) $commitOutcome->result->receipt_id;
+
+    // Attempt 2 (scheduled follow-up): settles step to finished, verifies, and advances parent run to completed.
+    $resumeJob2 = new ExecuteOfficeRun($fixture->context->tenantId, $run->runId, $step->stepId);
+    $resumeJob2->handle($executor, $this->app->make(RunContextResolver::class));
+
+    $finalStep = $runs->findStep($fixture->context, $run->runId, $step->stepId);
+    $finalRun = $runs->find($fixture->context, $run->runId);
+    expect($finalStep?->state)->toBe('finished')
+        ->and($finalStep?->receiptId)->toBe($receiptId)
+        ->and($finalRun?->state)->toBe('completed')
+        ->and($owner->table('v_ai_text_commands')->count())->toBe(1);
+});
+
+test('LaravelOfficeExecutor dispatch does not publish jobs when an outer host transaction rolls back (F7)', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: true);
+    configureDeterministicLaravelAi($this->app, $fixture);
+
+    $executor = $this->app->make(LaravelOfficeExecutor::class);
+    $vaulterDb = $this->app->make(VaulterDatabase::class);
+    Queue::fake();
+
+    try {
+        $vaulterDb->transaction(function () use ($executor, $fixture): void {
+            $executor->dispatch($fixture->context, [
+                'channel' => 'laravel-ai',
+                'source_event_id' => 'evt-f7-rollback',
+                'prompt' => 'Change 15 to 30.',
+                'resource_id' => $fixture->node->id,
+            ]);
+            throw new RuntimeException('host aborted outer transaction');
+        });
+    } catch (RuntimeException $e) {
+        expect($e->getMessage())->toBe('host aborted outer transaction');
+    }
+
+    Queue::assertNothingPushed();
+
+    $vaulterDb->transaction(function () use ($executor, $fixture): void {
+        $executor->dispatch($fixture->context, [
+            'channel' => 'laravel-ai',
+            'source_event_id' => 'evt-f7-commit',
+            'prompt' => 'Change 15 to 30.',
+            'resource_id' => $fixture->node->id,
+        ]);
+    });
+
+    Queue::assertPushed(ExecuteOfficeRun::class, 1);
+});
+
+test('failed current-state verification preserves verification failure in the run state instead of marking completed (F8)', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: true);
+    configureDeterministicLaravelAi($this->app, $fixture);
+
+    $executor = $this->app->make(LaravelOfficeExecutor::class);
+    $runs = $this->app->make(Runs::class);
+    $sourceEventId = 'evt-f8-failed-verify';
+
+    $turn = 0;
+    OfficeAgent::fake(function () use (&$turn, $fixture, $runs, $sourceEventId): mixed {
+        $run = $runs->createOrFind($fixture->context, 'laravel-ai', $sourceEventId, 'rev-1', ['prompt' => 'edit']);
+        $steps = $runs->listSteps($fixture->context, $run->runId);
+        $latestOf = static function (OfficeOperation $op) use ($steps): ?array {
+            $match = null;
+            foreach ($steps as $step) {
+                if ($step->operation === $op) {
+                    $match = $step->compactResult;
+                }
+            }
+
+            return $match;
+        };
+
+        $stepIndex = $turn++;
+        if ($stepIndex === 3) {
+            // Simulate a concurrent edit right after commit and before verify(current).
+            $fixture->edit('p42', static fn (): array => [
+                ['type' => 'text', 'text' => '😀 Pay within '],
+                ['type' => 'text', 'text' => '45', 'marks' => [['type' => 'bold']]],
+                ['type' => 'text', 'text' => ' working days.'],
+            ]);
+        }
+
+        return match ($stepIndex) {
+            0 => new ToolCall('f8-read', 'office_read', ['resource_id' => $fixture->node->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p42']]),
+            1 => new ToolCall('f8-prep', 'office_prepare', [
+                'resource_id' => $fixture->node->id,
+                'command' => 'text.replace_exact@1',
+                'read_token' => (string) ($latestOf(OfficeOperation::Read)['result']['read_token'] ?? ''),
+                'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+            ]),
+            2 => new ToolCall('f8-commit', 'office_commit', [
+                'resource_id' => $fixture->node->id,
+                'proposal_id' => (string) ($latestOf(OfficeOperation::Prepare)['result']['proposal_id'] ?? ''),
+                'digest' => (string) ($latestOf(OfficeOperation::Prepare)['result']['digest'] ?? ''),
+            ]),
+            3 => new ToolCall('f8-verify-current', 'office_verify', [
+                'resource_id' => $fixture->node->id,
+                'receipt_id' => (string) ($latestOf(OfficeOperation::Commit)['result']['receipt_id'] ?? ''),
+                'mode' => 'current',
+            ]),
+            default => 'Verification reported subsequent edit.',
+        };
+    })->preventStrayPrompts();
+
+    $executor->dispatch($fixture->context, [
+        'channel' => 'laravel-ai',
+        'source_event_id' => $sourceEventId,
+        'prompt' => 'Change payment days in 4.2 from 15 to 30.',
+        'resource_id' => $fixture->node->id,
+    ]);
+
+    $run = $runs->createOrFind($fixture->context, 'laravel-ai', $sourceEventId, 'rev-1', ['prompt' => '']);
+    $steps = $runs->listSteps($fixture->context, $run->runId);
+    $verifySteps = array_values(array_filter(
+        $steps,
+        static fn ($s): bool => $s->operation === OfficeOperation::Verify,
+    ));
+
+    expect($run->state)->toBe('partially_applied')
+        ->and($verifySteps)->toHaveCount(1)
+        ->and($verifySteps[0]->state)->toBe('failed')
+        ->and($verifySteps[0]->safeError)->toBe('verification_failed')
+        ->and($verifySteps[0]->compactResult['result']['outcome'] ?? null)->toBe('failed');
+});
+
+test('live-smoke runner skips cleanly without opt-in and fails when --require-key is passed without credentials (F11)', function (): void {
+    $script = dirname(__DIR__).'/bin/live-smoke.php';
+
+    $skipProc = new Process(['php', $script], dirname(__DIR__, 3), [
+        'VAULTER_AI_LIVE_TEST' => '',
+        'OPENAI_API_KEY' => '',
+    ]);
+    $skipProc->run();
+    expect($skipProc->getExitCode())->toBe(0);
+    $skipJson = json_decode(trim($skipProc->getOutput()), true, 512, JSON_THROW_ON_ERROR);
+    expect($skipJson['configured'])->toBeFalse()
+        ->and($skipJson['status'])->toBe('skipped');
+
+    $reqProc = new Process(['php', $script, '--require-key'], dirname(__DIR__, 3), [
+        'VAULTER_AI_LIVE_TEST' => '',
+        'OPENAI_API_KEY' => '',
+    ]);
+    $reqProc->run();
+    expect($reqProc->getExitCode())->toBe(1);
+    $reqJson = json_decode(trim($reqProc->getOutput()), true, 512, JSON_THROW_ON_ERROR);
+    expect($reqJson['configured'])->toBeFalse()
+        ->and($reqJson['status'])->toBe('error');
 });
