@@ -200,66 +200,8 @@ final readonly class SheetReader implements ResourceReader
 
         $workbook = $catalog['workbook'] ?? null;
         $table = $this->findTable($workbook, $sheetId, $tableId);
+        [$columnMap, $orderedBindings] = $this->resolveTableSlice($table, $columns, $requestedRowIds);
 
-        $columnMap = WorkbookSnapshot::columnMap($table);
-        foreach ($columns as $colId) {
-            if (! isset($columnMap[$colId])) {
-                throw OfficeException::resourceUnavailable();
-            }
-        }
-
-        $orderedBindings = WorkbookSnapshot::orderedRowBindings($table);
-        $rowLookup = WorkbookSnapshot::rowMap($table);
-
-        if ($requestedRowIds !== null) {
-            foreach ($requestedRowIds as $rowId) {
-                if (! isset($rowLookup[$rowId])) {
-                    throw OfficeException::resourceUnavailable();
-                }
-            }
-            $requestedSet = array_flip($requestedRowIds);
-            $orderedBindings = array_values(array_filter(
-                $orderedBindings,
-                static fn (stdClass $b): bool => is_string($b->row_id ?? null) && isset($requestedSet[$b->row_id]),
-            ));
-        }
-
-        $readResult = WorkbookProblemMapper::call(static fn (): array => $workbooks->readTable($resource->resourceId, $tableId));
-        $marker = WorkbookProblemMapper::marker($readResult['marker'] ?? null);
-        $this->assertMarkerSatisfiesReceipt($requiredMarker, $marker);
-
-        if ($marker->generation !== $catalogMarker->generation) {
-            throw OfficeException::generationChanged();
-        }
-        if ($marker->position !== $catalogMarker->position) {
-            // Re-resolve table bindings from readTable result so row membership/coordinates match the read marker atomically.
-            $liveTable = $readResult['table'] ?? null;
-            if (! $liveTable instanceof stdClass || ($liveTable->sheet_id ?? null) !== $sheetId) {
-                throw OfficeException::resourceUnavailable();
-            }
-            $columnMap = WorkbookSnapshot::columnMap($liveTable);
-            foreach ($columns as $colId) {
-                if (! isset($columnMap[$colId])) {
-                    throw OfficeException::resourceUnavailable();
-                }
-            }
-            $orderedBindings = WorkbookSnapshot::orderedRowBindings($liveTable);
-            $rowLookup = WorkbookSnapshot::rowMap($liveTable);
-            if ($requestedRowIds !== null) {
-                foreach ($requestedRowIds as $rowId) {
-                    if (! isset($rowLookup[$rowId])) {
-                        throw OfficeException::resourceUnavailable();
-                    }
-                }
-                $requestedSet = array_flip($requestedRowIds);
-                $orderedBindings = array_values(array_filter(
-                    $orderedBindings,
-                    static fn (stdClass $b): bool => is_string($b->row_id ?? null) && isset($requestedSet[$b->row_id]),
-                ));
-            }
-        }
-
-        $cellGrid = WorkbookSnapshot::indexCellGrid($readResult['ranges'] ?? null);
         $scopeHash = hash('sha256', json_encode([
             'sheet_id' => $sheetId,
             'table_id' => $tableId,
@@ -268,11 +210,51 @@ final readonly class SheetReader implements ResourceReader
         ], JSON_THROW_ON_ERROR));
 
         $offset = $cursor !== null
-            ? $this->decodeCursor($context, $resource->resourceId, $marker, $scopeHash, $cursor, count($orderedBindings))
+            ? $this->decodeCursor($context, $resource->resourceId, $catalogMarker, $scopeHash, $cursor, count($orderedBindings))
             : 0;
 
         $effectiveLimit = $limit ?? $this->defaultRowLimit();
         $slicedBindings = array_slice($orderedBindings, $offset, $effectiveLimit);
+        $sliceRowIds = $this->extractRowIds($slicedBindings);
+
+        $readResult = WorkbookProblemMapper::call(
+            static fn (): array => $workbooks->readTable($resource->resourceId, $tableId, $columns, $sliceRowIds),
+        );
+        $marker = WorkbookProblemMapper::marker($readResult['marker'] ?? null);
+        $this->assertMarkerSatisfiesReceipt($requiredMarker, $marker);
+
+        if ($marker->generation !== $catalogMarker->generation) {
+            throw OfficeException::generationChanged();
+        }
+        if ($marker->position !== $catalogMarker->position) {
+            if ($cursor !== null) {
+                throw OfficeException::cursorExpired();
+            }
+            // Re-resolve table bindings from readTable result so row membership/coordinates match the read marker atomically.
+            $liveTable = $readResult['table'] ?? null;
+            if (! $liveTable instanceof stdClass || ($liveTable->sheet_id ?? null) !== $sheetId) {
+                throw OfficeException::resourceUnavailable();
+            }
+            [$columnMap, $orderedBindings] = $this->resolveTableSlice($liveTable, $columns, $requestedRowIds);
+            $slicedBindings = array_slice($orderedBindings, $offset, $effectiveLimit);
+            $newSliceRowIds = $this->extractRowIds($slicedBindings);
+            if ($newSliceRowIds !== $sliceRowIds) {
+                $readResult = WorkbookProblemMapper::call(
+                    static fn (): array => $workbooks->readTable($resource->resourceId, $tableId, $columns, $newSliceRowIds),
+                );
+                $reMarker = WorkbookProblemMapper::marker($readResult['marker'] ?? null);
+                $this->assertMarkerSatisfiesReceipt($requiredMarker, $reMarker);
+                if ($reMarker->generation !== $marker->generation) {
+                    throw OfficeException::generationChanged();
+                }
+                if ($reMarker->position !== $marker->position) {
+                    throw OfficeException::temporarilyUnavailable('Workbook changed concurrently during table read.');
+                }
+                $marker = $reMarker;
+            }
+        }
+
+        $cellGrid = WorkbookSnapshot::indexCellGrid($readResult['ranges'] ?? null);
         $nextOffset = $offset + count($slicedBindings);
         $hasMore = $nextOffset < count($orderedBindings);
         $nextCursor = $hasMore
@@ -371,21 +353,57 @@ final readonly class SheetReader implements ResourceReader
         }
     }
 
-    private function findTable(mixed $workbook, string $sheetId, string $tableId): stdClass
+    /**
+     * @param  list<string>  $columns
+     * @param  list<string>|null  $requestedRowIds
+     * @return array{0: array<string, int>, 1: list<stdClass>}
+     */
+    private function resolveTableSlice(stdClass $table, array $columns, ?array $requestedRowIds): array
     {
-        if (! $workbook instanceof stdClass || ! is_array($workbook->tables ?? null)) {
-            throw OfficeException::resourceUnavailable();
-        }
-
-        foreach ($workbook->tables as $candidate) {
-            if ($candidate instanceof stdClass
-                && ($candidate->table_id ?? null) === $tableId
-                && ($candidate->sheet_id ?? null) === $sheetId) {
-                return $candidate;
+        $columnMap = WorkbookSnapshot::columnMap($table);
+        foreach ($columns as $colId) {
+            if (! isset($columnMap[$colId])) {
+                throw OfficeException::resourceUnavailable();
             }
         }
 
-        throw OfficeException::resourceUnavailable();
+        $orderedBindings = WorkbookSnapshot::orderedRowBindings($table);
+        if ($requestedRowIds !== null) {
+            $rowLookup = WorkbookSnapshot::rowMap($table);
+            foreach ($requestedRowIds as $rowId) {
+                if (! isset($rowLookup[$rowId])) {
+                    throw OfficeException::resourceUnavailable();
+                }
+            }
+            $requestedSet = array_flip($requestedRowIds);
+            $orderedBindings = array_values(array_filter(
+                $orderedBindings,
+                static fn (stdClass $b): bool => is_string($b->row_id ?? null) && isset($requestedSet[$b->row_id]),
+            ));
+        }
+
+        return [$columnMap, $orderedBindings];
+    }
+
+    /**
+     * @param  list<stdClass>  $bindings
+     * @return list<string>
+     */
+    private function extractRowIds(array $bindings): array
+    {
+        $ids = [];
+        foreach ($bindings as $binding) {
+            if (is_string($binding->row_id ?? null) && $binding->row_id !== '') {
+                $ids[] = $binding->row_id;
+            }
+        }
+
+        return $ids;
+    }
+
+    private function findTable(mixed $workbook, string $sheetId, string $tableId): stdClass
+    {
+        return WorkbookSnapshot::findTable($workbook, $sheetId, $tableId) ?? throw OfficeException::resourceUnavailable();
     }
 
     private function defaultRowLimit(): int

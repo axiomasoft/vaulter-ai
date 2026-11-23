@@ -74,7 +74,6 @@ final readonly class SheetCommandOwner implements CommandOwner, SheetVerificatio
 
         $workbooks = $this->access->workbooks($scope->context, $resource);
         $ownerCommandId = self::ownerCommandIdFor($scope->commandId);
-        $wbCommand = $this->buildWorkbookCommand($ownerCommandId, $plan, $conditions);
 
         $alreadyRecorded = $this->findRecordedOutcome($scope->resourceId, $workbooks, $ownerCommandId);
         if ($alreadyRecorded === null) {
@@ -84,17 +83,25 @@ final readonly class SheetCommandOwner implements CommandOwner, SheetVerificatio
             if (($conditions['schema'] ?? null) !== (int) $resource->schemaRevision) {
                 return new CommandOutcome($scope->commandId, 'rejected', reason: ErrorCode::SchemaChanged);
             }
+        }
 
-            $precheckFailure = $this->verifyInputPreconditionsBeforeCommit($scope, $plan, $conditions, $workbooks);
-            if ($precheckFailure !== null) {
-                return new CommandOutcome($scope->commandId, 'rejected', reason: $precheckFailure);
+        $wbCommand = $this->buildWorkbookCommand($ownerCommandId, $plan, $conditions);
+
+        if ($alreadyRecorded === null || ($alreadyRecorded['state'] ?? null) === 'running') {
+            $catalog = WorkbookProblemMapper::call(static fn (): array => $workbooks->catalog($scope->resourceId));
+            $liveMarker = WorkbookProblemMapper::marker($catalog['marker'] ?? null);
+            if ($liveMarker->generation === $plan->base->generation && $liveMarker->position < $plan->base->position) {
+                throw new OfficeException(ErrorCode::CalculationPending);
             }
         }
 
         try {
             $outcome = $workbooks->commit($scope->resourceId, $wbCommand);
         } catch (WorkbookProblem $problem) {
-            if ($problem->status >= 500 || $problem->problem === 'calculation_pending') {
+            if ($problem->problem === 'calculation_pending') {
+                throw WorkbookProblemMapper::toOfficeException($problem);
+            }
+            if ($problem->status >= 500) {
                 throw OfficeException::temporarilyUnavailable($problem->problem);
             }
 
@@ -250,6 +257,22 @@ final readonly class SheetCommandOwner implements CommandOwner, SheetVerificatio
             array_values($rawExpected),
         );
 
+        $rawInputs = $conditions['expected_inputs'] ?? null;
+        if (! is_array($rawInputs)) {
+            throw OfficeException::preconditionFailed('Malformed sealed input preconditions.');
+        }
+        $expectedInputs = [];
+        foreach ($rowIds as $rowId) {
+            $rowInputs = $rawInputs[$rowId] ?? null;
+            if (! is_array($rowInputs)) {
+                throw OfficeException::preconditionFailed('Malformed sealed input preconditions.');
+            }
+            $expectedInputs[] = (object) [
+                'left' => $this->buildOperandExpectation($rowInputs['left'] ?? null),
+                'right' => $this->buildOperandExpectation($rowInputs['right'] ?? null),
+            ];
+        }
+
         try {
             return new WorkbookCommand(
                 id: $ownerCommandId,
@@ -270,12 +293,31 @@ final readonly class SheetCommandOwner implements CommandOwner, SheetVerificatio
                             'right_column_id' => $rightColId,
                         ],
                         'expected_destination' => $expectedDest,
+                        'expected_inputs' => $expectedInputs,
                     ],
                 ],
             );
         } catch (WorkbookProblem $problem) {
             throw WorkbookProblemMapper::toOfficeException($problem, 'precondition_failed');
         }
+    }
+
+    private function buildOperandExpectation(mixed $side): stdClass
+    {
+        if (! is_array($side)) {
+            throw OfficeException::preconditionFailed('Malformed sealed operand expectation.');
+        }
+        $num = WorkbookProblemMapper::normalizeNumericValue($side['number'] ?? null);
+        $formula = $side['formula'] ?? null;
+        if ($num === null || ($formula !== null && (! is_string($formula) || ! str_starts_with($formula, '=')))) {
+            throw OfficeException::preconditionFailed('Malformed sealed operand expectation.');
+        }
+        $content = $formula !== null ? (object) ['formula' => $formula] : (object) ['number' => $num];
+
+        return (object) [
+            'content' => $content,
+            'value' => $num,
+        ];
     }
 
     /** @return array<mixed>|null */
@@ -289,100 +331,6 @@ final readonly class SheetCommandOwner implements CommandOwner, SheetVerificatio
             }
             throw WorkbookProblemMapper::toOfficeException($problem);
         }
-    }
-
-    /**
-     * Check source generation, table membership, and sealed input values prior to calling WorkbookOperations::commit.
-     * Lets current_rows scope changes flow directly to WorkbookOperations::commit so v_sheets_commands records scope_changed durably.
-     *
-     * @param  array<string, mixed>  $conditions
-     */
-    private function verifyInputPreconditionsBeforeCommit(
-        CommandScope $scope,
-        PreparedPlan $plan,
-        array $conditions,
-        DriveWorkbookOperations $workbooks,
-    ): ?ErrorCode {
-        $sheetId = $this->requireConditionString($conditions, 'sheet_id');
-        $tableId = $this->requireConditionString($conditions, 'table_id');
-        $modeScope = $this->requireConditionString($conditions, 'scope');
-        $leftColId = $this->requireConditionString($conditions, 'left_column_id');
-        $rightColId = $this->requireConditionString($conditions, 'right_column_id');
-        $rowIds = $this->requireConditionStringList($conditions, 'row_ids');
-        $expectedInputs = is_array($conditions['expected_inputs'] ?? null) ? $conditions['expected_inputs'] : [];
-
-        $read = WorkbookProblemMapper::call(
-            static fn (): array => $workbooks->readTable($scope->resourceId, $tableId),
-            unknownTargetCode: 'precondition_failed',
-        );
-        $catalog = WorkbookProblemMapper::call(static fn (): array => $workbooks->catalog($scope->resourceId));
-
-        $marker = WorkbookProblemMapper::marker($read['marker'] ?? null);
-        if ($marker->generation !== $plan->base->generation) {
-            // Delegate to WorkbookOperations::commit() so it records the durable generation_changed rejection.
-            return null;
-        }
-        if ($marker->position < $plan->base->position) {
-            throw new OfficeException(ErrorCode::CalculationPending);
-        }
-
-        $table = $read['table'] ?? null;
-        if (! $table instanceof stdClass || ($table->sheet_id ?? null) !== $sheetId) {
-            return ErrorCode::PreconditionFailed;
-        }
-
-        if ($modeScope === 'current_rows') {
-            $actualRowIds = WorkbookSnapshot::orderedRowIds($table);
-            if ($actualRowIds !== $rowIds) {
-                // Delegate to WorkbookOperations::commit() so it records the durable scope_changed rejection.
-                return null;
-            }
-        }
-
-        $colMap = WorkbookSnapshot::columnMap($table);
-        $rowMap = WorkbookSnapshot::rowMap($table);
-        if (! isset($colMap[$leftColId], $colMap[$rightColId])) {
-            return ErrorCode::PreconditionFailed;
-        }
-        $leftCol = $colMap[$leftColId];
-        $rightCol = $colMap[$rightColId];
-
-        $cellGrid = WorkbookSnapshot::indexCellGrid($read['ranges'] ?? null);
-        $workbook = $catalog['workbook'] ?? null;
-        $cellData = WorkbookSnapshot::sheetCellData($workbook, $sheetId);
-
-        foreach ($rowIds as $rowId) {
-            if (! isset($rowMap[$rowId])) {
-                return ErrorCode::PreconditionFailed;
-            }
-            $rowNum = $rowMap[$rowId];
-            $sealed = $expectedInputs[$rowId] ?? null;
-            if (! is_array($sealed)) {
-                continue;
-            }
-
-            foreach ([['left', $leftCol], ['right', $rightCol]] as [$side, $colNum]) {
-                $sealedSide = $sealed[$side] ?? null;
-                if (! is_array($sealedSide)) {
-                    return ErrorCode::PreconditionFailed;
-                }
-                $cell = $cellGrid[$rowNum][$colNum] ?? null;
-                $actualVal = $cell !== null ? ($cell->value ?? null) : null;
-                $actualNum = WorkbookProblemMapper::normalizeNumericValue($actualVal);
-                $rawCell = WorkbookSnapshot::rawCell($cellData, $rowNum, $colNum);
-                $actualFormula = $rawCell !== null && is_string($rawCell->f ?? null) ? $rawCell->f : null;
-
-                $expectedNum = $sealedSide['number'] ?? null;
-                $expectedFormula = $sealedSide['formula'] ?? null;
-                if ($actualNum === null || (! is_int($expectedNum) && ! is_float($expectedNum))
-                    || abs((float) $actualNum - (float) $expectedNum) > 1e-9
-                    || $actualFormula !== $expectedFormula) {
-                    return ErrorCode::PreconditionFailed;
-                }
-            }
-        }
-
-        return null;
     }
 
     /** @param array<mixed> $outcome */
@@ -661,18 +609,31 @@ final readonly class SheetCommandOwner implements CommandOwner, SheetVerificatio
     {
         $receiptMarker = $evidence['receipt_marker'];
         $targetRowIds = $evidence['row_ids'];
+        $leftColId = $evidence['left_col_id'];
+        $rightColId = $evidence['right_col_id'];
+        $destColId = $evidence['dest_col_id'];
+        $neededCols = [$leftColId, $rightColId, $destColId];
+
+        $catalog = WorkbookProblemMapper::call(static fn (): array => $workbooks->catalog($resourceId));
+        $catalogMarker = WorkbookProblemMapper::marker($catalog['marker'] ?? null);
+        $this->assertCurrentMarkerNotBehind($catalogMarker, $receiptMarker);
+
+        $catalogTable = WorkbookSnapshot::findTable($catalog['workbook'] ?? null, $evidence['sheet_id'], $evidence['table_id']);
+        if ($catalogTable === null) {
+            throw OfficeException::temporarilyUnavailable('Committed table missing in current workbook.');
+        }
+
+        $catColMap = WorkbookSnapshot::columnMap($catalogTable);
+        $catRowMap = WorkbookSnapshot::rowMap($catalogTable);
+        $sliceCols = array_values(array_filter($neededCols, static fn (string $c): bool => isset($catColMap[$c])));
+        $sliceRows = array_values(array_filter($targetRowIds, static fn (string $r): bool => isset($catRowMap[$r])));
 
         $live = WorkbookProblemMapper::call(
-            static fn (): array => $workbooks->readTable($resourceId, $evidence['table_id']),
+            static fn (): array => $workbooks->readTable($resourceId, $evidence['table_id'], $sliceCols, $sliceRows),
             unknownTargetCode: 'precondition_failed',
         );
         $currentMarker = WorkbookProblemMapper::marker($live['marker'] ?? null);
-        if ($currentMarker->generation > $receiptMarker->generation) {
-            throw OfficeException::generationChanged('Workbook restored to a newer generation after receipt.');
-        }
-        if ($currentMarker->generation < $receiptMarker->generation || $currentMarker->position < $receiptMarker->position) {
-            throw OfficeException::temporarilyUnavailable('Workbook state lags behind committed receipt.');
-        }
+        $this->assertCurrentMarkerNotBehind($currentMarker, $receiptMarker);
 
         $table = $live['table'] ?? null;
         if (! $table instanceof stdClass || ($table->sheet_id ?? null) !== $evidence['sheet_id']) {
@@ -681,9 +642,25 @@ final readonly class SheetCommandOwner implements CommandOwner, SheetVerificatio
 
         $colMap = WorkbookSnapshot::columnMap($table);
         $rowMap = WorkbookSnapshot::rowMap($table);
-        $leftColId = $evidence['left_col_id'];
-        $rightColId = $evidence['right_col_id'];
-        $destColId = $evidence['dest_col_id'];
+        if ($currentMarker->position !== $catalogMarker->position) {
+            $liveCols = array_values(array_filter($neededCols, static fn (string $c): bool => isset($colMap[$c])));
+            $liveRows = array_values(array_filter($targetRowIds, static fn (string $r): bool => isset($rowMap[$r])));
+            if ($liveCols !== $sliceCols || $liveRows !== $sliceRows) {
+                $live = WorkbookProblemMapper::call(
+                    static fn (): array => $workbooks->readTable($resourceId, $evidence['table_id'], $liveCols, $liveRows),
+                    unknownTargetCode: 'precondition_failed',
+                );
+                $reMarker = WorkbookProblemMapper::marker($live['marker'] ?? null);
+                $this->assertCurrentMarkerNotBehind($reMarker, $receiptMarker);
+                $currentMarker = $reMarker;
+                $table = $live['table'] ?? null;
+                if (! $table instanceof stdClass || ($table->sheet_id ?? null) !== $evidence['sheet_id']) {
+                    throw OfficeException::temporarilyUnavailable('Committed table missing in current workbook.');
+                }
+                $colMap = WorkbookSnapshot::columnMap($table);
+                $rowMap = WorkbookSnapshot::rowMap($table);
+            }
+        }
 
         $columnsExist = isset($colMap[$leftColId], $colMap[$rightColId], $colMap[$destColId]);
         $cellGrid = WorkbookSnapshot::indexCellGrid($live['ranges'] ?? null);
@@ -852,5 +829,15 @@ final readonly class SheetCommandOwner implements CommandOwner, SheetVerificatio
         }
 
         return $list;
+    }
+
+    private function assertCurrentMarkerNotBehind(Marker $current, Marker $receipt): void
+    {
+        if ($current->generation > $receipt->generation) {
+            throw OfficeException::generationChanged('Workbook restored to a newer generation after receipt.');
+        }
+        if ($current->generation < $receipt->generation || $current->position < $receipt->position) {
+            throw new OfficeException(ErrorCode::CalculationPending, 'Workbook state lags behind committed receipt.');
+        }
     }
 }

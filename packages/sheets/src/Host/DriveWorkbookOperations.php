@@ -25,10 +25,14 @@ final readonly class DriveWorkbookOperations implements DriveExtension
         return $this->workbooks->catalog($this->context, $node);
     }
 
-    /** @return array<mixed> */
-    public function readTable(string $node, string $table): array
+    /**
+     * @param  list<string>|null  $columns
+     * @param  list<string>|null  $rowIds
+     * @return array<mixed>
+     */
+    public function readTable(string $node, string $table, ?array $columns = null, ?array $rowIds = null): array
     {
-        return $this->workbooks->readTable($this->context, $node, $table);
+        return $this->workbooks->readTable($this->context, $node, $table, $columns, $rowIds);
     }
 
     /** @return array<mixed> */

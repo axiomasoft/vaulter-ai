@@ -12,6 +12,23 @@ use stdClass;
  */
 final class WorkbookSnapshot
 {
+    public static function findTable(mixed $workbook, string $sheetId, string $tableId): ?stdClass
+    {
+        if (! $workbook instanceof stdClass || ! is_array($workbook->tables ?? null)) {
+            return null;
+        }
+
+        foreach ($workbook->tables as $candidate) {
+            if ($candidate instanceof stdClass
+                && ($candidate->table_id ?? null) === $tableId
+                && ($candidate->sheet_id ?? null) === $sheetId) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
     public static function sheetObject(mixed $workbook, string $sheetId): ?stdClass
     {
         if (! $workbook instanceof stdClass) {

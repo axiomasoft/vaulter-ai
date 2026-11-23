@@ -14,6 +14,7 @@ use Vaulter\Ai\Core\Data\Marker;
 use Vaulter\Ai\Core\Data\OfficeResponse;
 use Vaulter\Ai\Core\Data\PreparedPlan;
 use Vaulter\Ai\Core\Enums\ErrorCode;
+use Vaulter\Ai\Core\Enums\NextAction;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Protocol\WireValidator;
@@ -24,7 +25,11 @@ use Vaulter\Ai\Sheets\Tests\Support\SheetCommandFixture;
 use Vaulter\Ai\Sheets\Writing\SheetCommandOwner;
 use Vaulter\Ai\Tests\Support\LaravelAiTestCase;
 use Vaulter\Documents\Facades\Documents;
+use Vaulter\Drive\Operations\DriveContext;
+use Vaulter\Sheets\Contracts\WorkbookOperations;
 use Vaulter\Sheets\Contracts\WorkbookRuntime;
+use Vaulter\Sheets\Data\WorkbookCommand;
+use Vaulter\Sheets\Data\WorkbookMarker;
 use Vaulter\Sheets\Data\WorkbookProblem;
 use Vaulter\Sheets\Runtime\NodeWorkbookRuntime;
 
@@ -329,8 +334,9 @@ test('corrupted cache 999 is recalculated on read/verify and literal constant re
         ->and($cacheChecks['sum']->passed)->toBeFalse();
 });
 
-test('runtime calculation timeout returns temporarily_unavailable on commit without mutating workbook and recovers on retry', function (): void {
+test('runtime calculation timeout returns calculation_pending on commit without mutating workbook, recovers on retry, and rejects if inputs changed before retry', function (): void {
     $fixture = new SheetCommandFixture($this->app, automatic: true);
+    $fixture->authorizeHttp();
     $r = $fixture->call(OfficeOperation::Read, [
         'selector' => (object) [
             'kind' => 'sheet_table',
@@ -377,9 +383,25 @@ test('runtime calculation timeout returns temporarily_unavailable on commit with
         'digest' => $p->digest,
     ]);
     expect($failed->ok)->toBeFalse()
-        ->and($failed->errorCode)->toBe(ErrorCode::TemporarilyUnavailable)
+        ->and($failed->errorCode)->toBe(ErrorCode::CalculationPending)
+        ->and($failed->nextAction)->toBe(NextAction::RetryRead)
         ->and($fixture->snapshot()->stateVersion)->toBe($beforeVersion)
         ->and($fixture->call(OfficeOperation::Status, ['command_id' => 'cmd-timeout-1'])->result->state)->toBe('running');
+
+    $httpTimeout = $this->postJson('/api/vaulter-ai/v1/operations', [
+        'version' => 1,
+        'operation' => 'office.commit',
+        'input' => [
+            'resource_id' => $fixture->node->id,
+            'command_id' => 'cmd-timeout-1',
+            'proposal_id' => $p->proposal_id,
+            'digest' => $p->digest,
+        ],
+    ], ['Authorization' => 'Bearer scenario-test-token']);
+    $httpTimeout->assertStatus(409)
+        ->assertJsonPath('error.code', 'calculation_pending')
+        ->assertJsonPath('error.retryable', true)
+        ->assertJsonPath('error.next_action', 'retry_read');
 
     $faulty->timeout = false;
     $recovered = $fixture->call(OfficeOperation::Commit, [
@@ -390,6 +412,201 @@ test('runtime calculation timeout returns temporarily_unavailable on commit with
     expect($recovered->ok)->toBeTrue()
         ->and($recovered->result->state)->toBe('committed')
         ->and($fixture->snapshot()->stateVersion)->toBe($beforeVersion + 1);
+
+    // If C2 changes from 120 to 130 after a calculation_pending timeout, retrying the same command_id must reject with precondition_failed and leave D2 unchanged.
+    $fixture2 = new SheetCommandFixture($this->app, automatic: true);
+    $r2 = $fixture2->call(OfficeOperation::Read, [
+        'selector' => (object) [
+            'kind' => 'sheet_table',
+            'sheet_id' => 'expenses',
+            'table_id' => 'costs',
+            'columns' => ['plan', 'actual'],
+            'row_ids' => ['r-telecom', 'r-travel'],
+        ],
+    ]);
+    $p2 = $fixture2->call(OfficeOperation::Prepare, [
+        'command' => 'sheet.fill_formula@1',
+        'read_token' => $r2->result->read_token,
+        'arguments' => (object) [
+            'sheet_id' => 'expenses',
+            'table_id' => 'costs',
+            'scope' => 'fixed_members',
+            'destination_column_id' => 'delta',
+            'expression' => (object) ['op' => 'subtract', 'left_column_id' => 'actual', 'right_column_id' => 'plan'],
+        ],
+    ])->result;
+
+    $faulty2 = new class($realRuntime) implements WorkbookRuntime
+    {
+        public bool $timeout = true;
+
+        public function __construct(private readonly NodeWorkbookRuntime $inner) {}
+
+        public function exchange(stdClass $request): stdClass
+        {
+            if ($this->timeout && ($request->operation ?? null) === 'apply') {
+                throw new WorkbookProblem('calculation_pending', 503);
+            }
+
+            return $this->inner->exchange($request);
+        }
+    };
+    $this->app->instance(WorkbookRuntime::class, $faulty2);
+
+    $timedOut2 = $fixture2->call(OfficeOperation::Commit, [
+        'command_id' => 'cmd-timeout-changed-input',
+        'proposal_id' => $p2->proposal_id,
+        'digest' => $p2->digest,
+    ]);
+    expect($timedOut2->ok)->toBeFalse()->and($timedOut2->errorCode)->toBe(ErrorCode::CalculationPending);
+
+    $this->app->instance(WorkbookRuntime::class, $realRuntime);
+    $fixture2->humanSetNumber('expenses', 2, 3, (object) ['number' => 120], 130);
+
+    $retriedAfterEdit = $fixture2->call(OfficeOperation::Commit, [
+        'command_id' => 'cmd-timeout-changed-input',
+        'proposal_id' => $p2->proposal_id,
+        'digest' => $p2->digest,
+    ]);
+    expect($retriedAfterEdit->ok)->toBeFalse()
+        ->and($retriedAfterEdit->errorCode)->toBe(ErrorCode::PreconditionFailed)
+        ->and($fixture2->call(OfficeOperation::Status, ['command_id' => 'cmd-timeout-changed-input'])->result->state)->toBe('rejected');
+
+    $cells2 = [];
+    foreach ($fixture2->readTableCells('costs') as $range) {
+        foreach ($range->cells as $c) {
+            $cells2[$c->a1] = $c;
+        }
+    }
+    expect($cells2['D2']->value)->toBeNull()
+        ->and($cells2['D2']->formula)->toBeNull();
+});
+
+test('two-row fill passes verify(at_commit) when first target already contains matching formula and verify(current) returns calculation_pending when state lags behind receipt', function (): void {
+    $fixture = new SheetCommandFixture(
+        $this->app,
+        automatic: true,
+        initialDeltaOverrides: [
+            'r-telecom' => ['formula' => '=C2-B2', 'number' => 20],
+        ],
+    );
+
+    $read = $fixture->call(OfficeOperation::Read, [
+        'selector' => (object) [
+            'kind' => 'sheet_table',
+            'sheet_id' => 'expenses',
+            'table_id' => 'costs',
+            'columns' => ['plan', 'actual'],
+            'row_ids' => ['r-telecom', 'r-travel'],
+        ],
+    ]);
+    $prop = $fixture->call(OfficeOperation::Prepare, [
+        'command' => 'sheet.fill_formula@1',
+        'read_token' => $read->result->read_token,
+        'arguments' => (object) [
+            'sheet_id' => 'expenses',
+            'table_id' => 'costs',
+            'scope' => 'fixed_members',
+            'destination_column_id' => 'delta',
+            'expression' => (object) ['op' => 'subtract', 'left_column_id' => 'actual', 'right_column_id' => 'plan'],
+        ],
+    ])->result;
+
+    $commit = $fixture->call(OfficeOperation::Commit, [
+        'command_id' => 'cmd-preseeded-d2',
+        'proposal_id' => $prop->proposal_id,
+        'digest' => $prop->digest,
+    ]);
+    expect($commit->ok)->toBeTrue();
+    $receipt = $commit->result->receipt_id;
+
+    $atCommit = $fixture->call(OfficeOperation::Verify, ['receipt_id' => $receipt, 'mode' => 'at_commit']);
+    expect($atCommit->ok)->toBeTrue()
+        ->and($atCommit->result->outcome)->toBe('passed');
+    $checks = array_column($atCommit->result->checks, null, 'name');
+    expect($checks['row_ids']->actual)->toBe(['r-telecom', 'r-travel'])
+        ->and($checks['formulas']->actual)->toBe(['=C2-B2', '=C3-B3'])
+        ->and($checks['calculated_values']->actual)->toBe([20, -20])
+        ->and($checks['sum']->actual)->toBe(0);
+
+    // Full no-op fill where both targets already match also passes verify(at_commit).
+    $readAllMatch = $fixture->call(OfficeOperation::Read, [
+        'selector' => (object) [
+            'kind' => 'sheet_table',
+            'sheet_id' => 'expenses',
+            'table_id' => 'costs',
+            'columns' => ['plan', 'actual'],
+            'row_ids' => ['r-telecom', 'r-travel'],
+        ],
+    ]);
+    $propAllMatch = $fixture->call(OfficeOperation::Prepare, [
+        'command' => 'sheet.fill_formula@1',
+        'read_token' => $readAllMatch->result->read_token,
+        'arguments' => (object) [
+            'sheet_id' => 'expenses',
+            'table_id' => 'costs',
+            'scope' => 'fixed_members',
+            'destination_column_id' => 'delta',
+            'expression' => (object) ['op' => 'subtract', 'left_column_id' => 'actual', 'right_column_id' => 'plan'],
+        ],
+    ])->result;
+    $commitAllMatch = $fixture->call(OfficeOperation::Commit, [
+        'command_id' => 'cmd-all-matched-noop',
+        'proposal_id' => $propAllMatch->proposal_id,
+        'digest' => $propAllMatch->digest,
+    ]);
+    expect($commitAllMatch->ok)->toBeTrue();
+    expect($fixture->call(OfficeOperation::Verify, ['receipt_id' => $commitAllMatch->result->receipt_id, 'mode' => 'at_commit'])->result->outcome)
+        ->toBe('passed');
+
+    // When catalog/read marker lags behind committed receipt marker, verify(current) returns calculation_pending.
+    $realOps = $this->app->make(WorkbookOperations::class);
+    $this->app->instance(WorkbookOperations::class, new class($realOps) implements WorkbookOperations
+    {
+        public function __construct(private readonly WorkbookOperations $inner) {}
+
+        public function catalog(DriveContext $context, string $node): array
+        {
+            $res = $this->inner->catalog($context, $node);
+            $res['marker'] = new WorkbookMarker(
+                $res['marker']->generation,
+                max(0, $res['marker']->position - 1),
+                $res['marker']->sha256,
+            );
+
+            return $res;
+        }
+
+        public function readTable(DriveContext $context, string $node, string $table, ?array $columns = null, ?array $rowIds = null): array
+        {
+            return $this->inner->readTable($context, $node, $table, $columns, $rowIds);
+        }
+
+        public function prepareFormula(DriveContext $context, string $node, string $table, string $destination, string $left, string $right, string $scope): array
+        {
+            return $this->inner->prepareFormula($context, $node, $table, $destination, $left, $right, $scope);
+        }
+
+        public function commit(DriveContext $context, string $node, WorkbookCommand $command): array
+        {
+            return $this->inner->commit($context, $node, $command);
+        }
+
+        public function status(DriveContext $context, string $node, string $command): array
+        {
+            return $this->inner->status($context, $node, $command);
+        }
+
+        public function verify(DriveContext $context, string $node, string $command): array
+        {
+            return $this->inner->verify($context, $node, $command);
+        }
+    });
+
+    $laggingVerify = $fixture->call(OfficeOperation::Verify, ['receipt_id' => $receipt, 'mode' => 'current']);
+    expect($laggingVerify->ok)->toBeFalse()
+        ->and($laggingVerify->errorCode)->toBe(ErrorCode::CalculationPending)
+        ->and($laggingVerify->nextAction)->toBe(NextAction::RetryRead);
 });
 
 test('non-numeric operand cell returns unsupported_content during prepare', function (): void {

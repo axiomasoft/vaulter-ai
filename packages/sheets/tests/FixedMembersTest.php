@@ -288,6 +288,28 @@ test('missing row_id, foreign row, partial page, unsupported expression, deleted
     ]);
     expect($rejectedInputChange->ok)->toBeFalse()->and($rejectedInputChange->errorCode)->toBe(ErrorCode::PreconditionFailed);
 
+    // Durable rejection: status reports rejected(precondition_failed), and restoring C2 + retrying the same command_id stays rejected without writing D2.
+    $statusAfterInputRejection = $fixture->call(OfficeOperation::Status, ['command_id' => 'cmd-changed-input']);
+    expect($statusAfterInputRejection->ok)->toBeTrue()
+        ->and($statusAfterInputRejection->result->state)->toBe('rejected')
+        ->and($statusAfterInputRejection->result->reason)->toBe('precondition_failed');
+
+    $fixture->humanSetNumber('expenses', 2, 3, (object) ['number' => 150], 120);
+    $replayedAfterRestore = $fixture->call(OfficeOperation::Commit, [
+        'command_id' => 'cmd-changed-input',
+        'proposal_id' => $proposalInputChange->proposal_id,
+        'digest' => $proposalInputChange->digest,
+    ]);
+    expect($replayedAfterRestore->ok)->toBeFalse()->and($replayedAfterRestore->errorCode)->toBe(ErrorCode::PreconditionFailed);
+    $cellsAfterRestore = [];
+    foreach ($fixture->readTableCells('costs') as $r) {
+        foreach ($r->cells as $c) {
+            $cellsAfterRestore[$c->a1] = $c;
+        }
+    }
+    expect($cellsAfterRestore['D2']->value)->toBeNull()
+        ->and($cellsAfterRestore['D2']->formula)->toBeNull();
+
     // 4b. Changed destination cell (D2 = null -> 55) between prepare and commit rejects with precondition_failed, keeping 55 and D5=77.
     $destFixture = new SheetCommandFixture($this->app, automatic: true);
     $destRead = $destFixture->call(OfficeOperation::Read, [
@@ -490,3 +512,100 @@ test('committed spreadsheet workbook reopens cold in headless Chromium with Vaul
         @rmdir($tmp);
     }
 });
+
+test('22x3 workbook slices requested rows and columns with limit=1 over PHP and HTTP without limit_exceeded', function (string $transport): void {
+    $rows = [];
+    for ($i = 1; $i <= 22; $i++) {
+        $rows[] = [
+            'row_id' => 'r-row-'.$i,
+            'plan' => 100 + $i,
+            'actual' => 120 + ($i * 2),
+            'delta' => null,
+        ];
+    }
+    $fixture = new SheetCommandFixture($this->app, automatic: true, seed: [
+        'sheet_id' => 'expenses',
+        'table_id' => 'costs',
+        'first_data_row' => 2,
+        'rows' => $rows,
+    ]);
+    $fixture->authorizeHttp();
+
+    $call = function (string $operation, array $input) use ($transport, $fixture): array {
+        if ($transport === 'php') {
+            return $this->app->make(Office::class)->handle($fixture->context, new OfficeRequest(
+                1,
+                OfficeOperation::from($operation),
+                json_decode(json_encode(['resource_id' => $fixture->node->id] + $input, JSON_THROW_ON_ERROR), false, 512, JSON_THROW_ON_ERROR),
+            ))->toArray();
+        }
+
+        return $this->postJson('/api/vaulter-ai/v1/operations', [
+            'version' => 1,
+            'operation' => $operation,
+            'input' => ['resource_id' => $fixture->node->id] + $input,
+        ], ['Authorization' => 'Bearer scenario-test-token'])->assertOk()->json();
+    };
+
+    $slicedRead = $call('office.read', [
+        'selector' => [
+            'kind' => 'sheet_table',
+            'sheet_id' => 'expenses',
+            'table_id' => 'costs',
+            'columns' => ['plan', 'actual'],
+            'row_ids' => ['r-row-15'],
+        ],
+        'limit' => 1,
+    ]);
+    expect($slicedRead['ok'])->toBeTrue()
+        ->and($slicedRead['result']['truncated'])->toBeFalse()
+        ->and($slicedRead['result']['next_cursor'])->toBeNull()
+        ->and($slicedRead['result']['data']['rows'])->toHaveCount(1)
+        ->and($slicedRead['result']['data']['rows'][0]['row_id'])->toBe('r-row-15')
+        ->and($slicedRead['result']['data']['rows'][0]['values'])->toBe(['plan' => 115, 'actual' => 150]);
+
+    // Unfiltered paginated read with limit=1 on 22x3 also slices before calling readTable.
+    $page1 = $call('office.read', [
+        'selector' => [
+            'kind' => 'sheet_table',
+            'sheet_id' => 'expenses',
+            'table_id' => 'costs',
+            'columns' => ['plan', 'actual', 'delta'],
+        ],
+        'limit' => 1,
+    ]);
+    expect($page1['ok'])->toBeTrue()
+        ->and($page1['result']['truncated'])->toBeTrue()
+        ->and($page1['result']['data']['rows'])->toHaveCount(1)
+        ->and($page1['result']['data']['rows'][0]['row_id'])->toBe('r-row-1');
+
+    // Prepare, commit, and verify(current) on the 1-row slice also succeed on the 22x3 workbook.
+    $prepare = $call('office.prepare', [
+        'command' => 'sheet.fill_formula@1',
+        'read_token' => $slicedRead['result']['read_token'],
+        'arguments' => [
+            'sheet_id' => 'expenses',
+            'table_id' => 'costs',
+            'scope' => 'fixed_members',
+            'destination_column_id' => 'delta',
+            'expression' => ['op' => 'subtract', 'left_column_id' => 'actual', 'right_column_id' => 'plan'],
+        ],
+    ]);
+    expect($prepare['ok'])->toBeTrue();
+
+    $commit = $call('office.commit', [
+        'command_id' => 'cmd-22x3-'.$transport,
+        'proposal_id' => $prepare['result']['proposal_id'],
+        'digest' => $prepare['result']['digest'],
+    ]);
+    expect($commit['ok'])->toBeTrue();
+
+    $verifyCurrent = $call('office.verify', [
+        'receipt_id' => $commit['result']['receipt_id'],
+        'mode' => 'current',
+    ]);
+    expect($verifyCurrent['ok'])->toBeTrue()
+        ->and($verifyCurrent['result']['outcome'])->toBe('passed')
+        ->and($verifyCurrent['result']['checks'][1]['actual'])->toBe(['=C16-B16'])
+        ->and($verifyCurrent['result']['checks'][2]['actual'])->toBe([35]);
+})->with(['php', 'http']);

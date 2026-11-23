@@ -149,7 +149,7 @@ final readonly class FillFormula implements OfficeCommand
             unknownTargetCode: 'precondition_failed',
         );
         $readResult = WorkbookProblemMapper::call(
-            static fn (): array => $workbooks->readTable($resource->resourceId, $tableId),
+            static fn (): array => $workbooks->readTable($resource->resourceId, $tableId, [$leftColId, $rightColId], $targetRowIds),
             unknownTargetCode: 'precondition_failed',
         );
 
