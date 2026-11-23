@@ -17,6 +17,8 @@ use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Contracts\RunContextResolver;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandScope;
+use Vaulter\Ai\Core\Enums\ErrorCode;
+use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\Runs;
@@ -75,9 +77,13 @@ test('AgenToolsLlmPort drives full streaming ChatTurn without laravel/ai and mas
         }
     });
 
-    $this->app->instance(AgenToolsSdkLlmPort::class, new class($fixture, $runs) implements AgenToolsSdkLlmPort
+    $this->app->instance(AgenToolsSdkLlmPort::class, new class($fixture, $runs, $secretKey) implements AgenToolsSdkLlmPort
     {
-        public function __construct(private readonly TextCommandFixture $fixture, private readonly Runs $runs) {}
+        public function __construct(
+            private readonly TextCommandFixture $fixture,
+            private readonly Runs $runs,
+            private readonly string $secret,
+        ) {}
 
         public function respond(array $input): array
         {
@@ -125,7 +131,7 @@ test('AgenToolsLlmPort drives full streaming ChatTurn without laravel/ai and mas
                 ];
             }
 
-            return ['deltas' => ['Готово: ', 'квитанция проверена.']];
+            return ['deltas' => ['Готово: '.substr($this->secret, 0, 12), substr($this->secret, 12).' квитанция проверена.']];
         }
     });
 
@@ -149,9 +155,14 @@ test('AgenToolsLlmPort drives full streaming ChatTurn without laravel/ai and mas
     );
 
     $events = $chat->events($fixture->context, $sessionId, 0);
+    $deltas = array_filter($events, static fn (array $e): bool => $e['type'] === 'assistant.delta');
+    $transcript = $chat->show($fixture->context, $sessionId);
+    $assistant = array_values(array_filter($transcript['messages'], static fn (array $m): bool => ($m['role'] ?? null) === 'assistant'));
     expect($runs->find($fixture->context, $runId)?->state)->toBe('completed')
         ->and(array_column($events, 'type'))->toContain('approval.required', 'tool.committed', 'tool.verified', 'assistant.delta', 'run.finished')
         ->and(json_encode($events, JSON_THROW_ON_ERROR))->not->toContain($secretKey)
+        ->and(implode('', array_column(array_column($deltas, 'data'), 'text')))->toBe('Готово: [REDACTED] квитанция проверена.')
+        ->and(array_column($assistant, 'content'))->toBe(['Готово: [REDACTED] квитанция проверена.'])
         ->and($this->app->make(VaulterDatabase::class)->connection()->table('v_ai_text_commands')->count())->toBe(1);
 });
 
@@ -202,4 +213,49 @@ test('AgenToolsLlmPort streams Responses SSE HTTP fallback with retry and hides 
         ->and($readerRegistry->descriptor('office_describe'))->toBeNull()
         ->and($readerRegistry->descriptor('office_prepare'))->toBeNull()
         ->and($readerRegistry->descriptor('office_commit'))->toBeNull();
+});
+
+test('AgenTools requires a terminal HTTP response and rejects tools after the adapter budget is spent', function (): void {
+    $fixture = new TextCommandFixture($this->app);
+    Config::set('vaulter-ai.secret_store.connections.office_model', [
+        'driver' => 'openai', 'key' => 'sk-test-stream', 'base_url' => 'https://llm.local.test/v1',
+    ]);
+    Config::set('vaulter-ai-agentools.chat.max_tool_calls', 1);
+    Http::fake(['https://llm.local.test/v1/responses' => Http::sequence()
+        ->push("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+        ->push("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc-2\",\"name\":\"office_read\"}}\n\n".
+            "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc-2\",\"arguments\":\"{}\"}\n\n")]);
+
+    $port = $this->app->make(LlmPort::class);
+    $profile = $this->app->make(HostPolicy::class)->profile($fixture->context);
+    $tools = $this->app->make(ChatTools::class)->catalog($fixture->context, [$fixture->node->id]);
+    $cancelled = static fn (): bool => false;
+    $stream = $port->stream([['role' => 'user', 'content' => 'Hello']], $tools, $profile, $cancelled);
+    $stream->rewind();
+    expect($stream->current())->toBe(['type' => 'textDelta', 'text' => 'partial']);
+    try {
+        $stream->next();
+        $this->fail('Expected premature EOF to interrupt the stream.');
+    } catch (OfficeException $e) {
+        expect($e->errorCode)->toBe(ErrorCode::TemporarilyUnavailable);
+    }
+
+    $history = [['role' => 'tool', 'name' => 'office_read', 'call_id' => 'c-1']];
+    $assertBudget = function () use ($port, $history, $tools, $profile, $cancelled): void {
+        try {
+            iterator_to_array($port->stream($history, $tools, $profile, $cancelled));
+            $this->fail('Expected limit_exceeded before yielding a new tool.');
+        } catch (OfficeException $e) {
+            expect($e->errorCode)->toBe(ErrorCode::LimitExceeded);
+        }
+    };
+    $assertBudget();
+    $this->app->instance(AgenToolsSdkLlmPort::class, new class implements AgenToolsSdkLlmPort
+    {
+        public function respond(array $input): array
+        {
+            return ['tool_call' => ['tool' => 'office_read', 'input' => []]];
+        }
+    });
+    $assertBudget();
 });

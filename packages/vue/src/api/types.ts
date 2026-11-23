@@ -245,6 +245,8 @@ export interface VisibleChatToolCall {
   command_id: string | null
   receipt_id: string | null
   hidden?: false
+  receipt_verified?: boolean
+  receipt_verification_failed?: boolean
 }
 
 export interface HiddenChatToolCall {
@@ -271,6 +273,14 @@ export interface HiddenChatMessage {
 
 export type ChatMessage = VisibleChatMessage | HiddenChatMessage
 
+export interface ChatSnapshotFragment {
+  run_id: string | null
+  seqs: number[]
+  text: string
+  interrupted: boolean
+  hidden: boolean
+}
+
 export interface ChatSessionDetails {
   session_id: string
   state: string
@@ -280,6 +290,7 @@ export interface ChatSessionDetails {
   runs: ChatRunSummary[]
   tool_calls: ChatToolCallSummary[]
   messages: ChatMessage[]
+  live_fragments?: ChatSnapshotFragment[]
 }
 
 export interface CreateChatSessionInput {

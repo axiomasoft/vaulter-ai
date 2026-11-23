@@ -7,6 +7,9 @@ namespace Vaulter\Ai\Core\Workspace;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Data\OfficeRun;
+use Vaulter\Ai\Core\Data\OfficeRunStep;
+use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
@@ -195,37 +198,45 @@ final readonly class ChannelChatBridge
         array $scope,
         ?string $content = null,
         ?array $selection = null,
-        int $retentionSeconds = 86400,
     ): string {
-        $chatSessionId = $this->resolveOrOpenExternalSession($context, $channel, $externalSessionId, $retentionSeconds);
+        $run = $this->runs?->find($context, $runId) ?? throw OfficeException::resourceUnavailable();
+        if ($run->channel !== $channel || ($run->input['session_id'] ?? null) !== $externalSessionId) {
+            throw new OfficeException(ErrorCode::IdempotencyConflict);
+        }
         $resourceSummary = $scope[0] ?? 'resource';
         $prompt = $content !== null && trim($content) !== ''
             ? $content
             : "Process {$channel} channel event {$eventId} on {$resourceSummary}.";
 
-        $this->chat->linkExternalRunMessage(
-            context: $context,
-            sessionId: $chatSessionId,
-            messageId: $eventId,
-            runId: $runId,
-            content: $prompt,
-            scope: $scope,
-            selection: $selection,
-        );
+        $chatSessionId = $this->db->transaction(function () use ($context, $channel, $externalSessionId, $eventId, $runId, $prompt, $scope, $selection): string {
+            $chatSessionId = $this->resolveChatSessionId($context, $channel, $externalSessionId)
+                ?? throw OfficeException::resourceUnavailable();
+            $this->chat->linkExternalRunMessage($context, $chatSessionId, $eventId, $runId, $prompt, $scope, $selection);
 
-        $now = $this->db->utcTimestamp($this->db->clockNow($this->clock));
-        $this->db->query('ai_channel_sessions')
-            ->where([
-                'tenant_id' => $context->tenantId,
-                'project_scope' => $context->projectScope,
-                'channel' => $channel,
-                'external_session_id' => $externalSessionId,
-            ])
-            ->update(['updated_at' => $now]);
+            $now = $this->db->utcTimestamp($this->db->clockNow($this->clock));
+            $this->db->query('ai_channel_sessions')
+                ->where([
+                    'tenant_id' => $context->tenantId,
+                    'project_scope' => $context->projectScope,
+                    'channel' => $channel,
+                    'external_session_id' => $externalSessionId,
+                ])
+                ->update(['updated_at' => $now]);
+
+            return $chatSessionId;
+        }, $context->tenantId);
 
         $this->syncExternalRunEvents($context, $chatSessionId, $runId, $scope);
 
         return $chatSessionId;
+    }
+
+    public function syncLinkedRunEvents(CallContext $context, string $runId): void
+    {
+        $binding = $this->chat->sessionBindingForRun($context, $runId);
+        if ($binding !== null) {
+            $this->syncExternalRunEvents($context, $binding['session_id'], $runId, $binding['scope']);
+        }
     }
 
     /**
@@ -237,11 +248,28 @@ final readonly class ChannelChatBridge
             return;
         }
         $run = $this->runs->find($context, $runId);
-        if ($run === null) {
+        $resourceId = $run?->input['resource_id'] ?? null;
+        if ($run === null || ! is_string($resourceId) || $scope !== [$resourceId]
+            || ($run->input['chat_session_id'] ?? null) !== $chatSessionId) {
             return;
         }
 
-        $steps = $this->runs->listSteps($context, $runId);
+        try {
+            $this->mirrorSteps($context, $chatSessionId, $run, $scope, $this->runs->listSteps($context, $runId));
+        } catch (OfficeException $e) {
+            if ($e->errorCode !== ErrorCode::CursorExpired) {
+                throw $e;
+            }
+        }
+    }
+
+    /**
+     * @param  list<string>  $scope
+     * @param  list<OfficeRunStep>  $steps
+     */
+    private function mirrorSteps(CallContext $context, string $chatSessionId, OfficeRun $run, array $scope, array $steps): void
+    {
+        $runId = $run->runId;
         $hasCommitStep = false;
         foreach ($steps as $step) {
             if ($step->operation === OfficeOperation::Commit) {
@@ -251,10 +279,13 @@ final readonly class ChannelChatBridge
 
         foreach ($steps as $step) {
             $callId = 'ext-step-'.$runId.'-'.$step->stepId;
+            $stepScope = $step->resourceId === null
+                ? $scope
+                : array_values(array_unique([...$scope, $step->resourceId]));
             $this->chat->appendOnceForRun($context, $chatSessionId, $runId, 'tool.requested', [
                 'call_id' => $callId,
                 'tool' => $step->operation->toolName(),
-            ], $scope);
+            ], $stepScope);
 
             if ($step->operation === OfficeOperation::Prepare && $step->proposalId !== null) {
                 $compactResult = is_array($step->compactResult['result'] ?? null) ? $step->compactResult['result'] : [];
@@ -264,7 +295,7 @@ final readonly class ChannelChatBridge
                         'call_id' => $callId,
                         'proposal_id' => $step->proposalId,
                         'status' => 403,
-                    ], $scope);
+                    ], $stepScope);
                 }
 
                 if (! $hasCommitStep) {
@@ -275,7 +306,7 @@ final readonly class ChannelChatBridge
                             'proposal_id' => $step->proposalId,
                             'command_id' => $route->commandId,
                             'receipt_id' => $route->receiptId,
-                        ], $scope);
+                        ], $stepScope);
                     } else {
                         $targetResource = $step->resourceId ?? ($scope[0] ?? '');
                         $proposal = $targetResource !== '' ? $this->proposals?->find($context, $targetResource, $step->proposalId) : null;
@@ -283,7 +314,7 @@ final readonly class ChannelChatBridge
                             $this->chat->appendOnceForRun($context, $chatSessionId, $runId, 'run.finished', [
                                 'state' => 'rejected',
                                 'error' => 'proposal_rejected',
-                            ], $scope);
+                            ], $stepScope);
                         }
                     }
                 }
@@ -295,12 +326,12 @@ final readonly class ChannelChatBridge
                     'proposal_id' => $step->proposalId,
                     'command_id' => $step->commandId,
                     'receipt_id' => $step->receiptId,
-                ], $scope);
+                ], $stepScope);
             } elseif ($step->operation === OfficeOperation::Commit && $step->state === 'failed' && $step->safeError === 'proposal_rejected') {
                 $this->chat->appendOnceForRun($context, $chatSessionId, $runId, 'run.finished', [
                     'state' => 'rejected',
                     'error' => 'proposal_rejected',
-                ], $scope);
+                ], $stepScope);
             }
 
             if ($step->operation === OfficeOperation::Verify && $step->receiptId !== null) {
@@ -312,7 +343,7 @@ final readonly class ChannelChatBridge
                     'command_id' => $step->commandId,
                     'receipt_id' => $step->receiptId,
                     'verification' => ['ok' => $outcome === 'passed', 'result' => ['outcome' => $outcome]],
-                ], $scope);
+                ], $stepScope);
             }
         }
 

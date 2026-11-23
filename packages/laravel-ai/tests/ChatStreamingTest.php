@@ -2,10 +2,12 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Laravel\Ai\Responses\Data\ToolCall;
 use Vaulter\Ai\Core\Actions\ResolveProposal;
 use Vaulter\Ai\Core\Contracts\ApprovedCommandContextResolver;
@@ -20,6 +22,7 @@ use Vaulter\Ai\Core\Jobs\ExecuteChatRun;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\Runs;
+use Vaulter\Ai\Core\Persistence\ToolCallLedger;
 use Vaulter\Ai\Core\Workspace\ChatTools;
 use Vaulter\Ai\Core\Workspace\ChatWorkspace;
 use Vaulter\Ai\LaravelAi\LaravelAiLlmPort;
@@ -75,7 +78,7 @@ test('LaravelAiLlmPort streams deltas and tools cleanly through ChatTurn with se
         }
     });
 
-    OfficeAgent::fake(static function () use ($fixture, $runs): mixed {
+    OfficeAgent::fake(static function () use ($fixture, $runs, $secretKey): mixed {
         $runId = (string) Context::get('vaulter.ai.run_id');
         $steps = $runs->listSteps($fixture->context, $runId);
         $ops = array_map(static fn ($s): string => $s->operation->value, $steps);
@@ -104,11 +107,19 @@ test('LaravelAiLlmPort streams deltas and tools cleanly through ChatTurn with se
             ]);
         }
 
-        return 'Изменение сохранено и проверено.';
+        return "Изменение сохранено и проверено. {$secretKey}";
     })->preventStrayPrompts();
 
     $sessionId = $chat->open($fixture->context);
-    $runId = $chat->post(
+    $failureInjected = false;
+    DB::listen(static function (QueryExecuted $query) use (&$failureInjected): void {
+        if (! $failureInjected && str_contains($query->sql, 'insert into "v_ai_chat_events"')
+            && in_array('approval.required', $query->bindings, true)) {
+            $failureInjected = true;
+            throw new RuntimeException('Worker stopped during Prepare settlement.');
+        }
+    });
+    $post = fn (): string => $chat->post(
         $fixture->context,
         $sessionId,
         'lai-msg-1',
@@ -116,6 +127,12 @@ test('LaravelAiLlmPort streams deltas and tools cleanly through ChatTurn with se
         [$fixture->node->id],
         ['kind' => 'text_block', 'resource_id' => $fixture->node->id, 'block_id' => 'p42'],
     );
+    expect($post)->toThrow(RuntimeException::class, 'Worker stopped during Prepare settlement.');
+    expect($failureInjected)->toBeTrue()
+        ->and($db->query('ai_proposals')->count())->toBe(0);
+    $this->fixedClock->advanceSeconds(ToolCallLedger::LEASE_SECONDS + 1);
+    $runId = $post();
+    expect($db->query('ai_proposals')->count())->toBe(1);
 
     // Waiting for human approval after office_prepare + office_commit (blocked by approval_required).
     $run = $runs->find($fixture->context, $runId);
@@ -195,5 +212,45 @@ test('LaravelAiLlmPort enforces output limit, retries transient failure before f
     } catch (OfficeException $e) {
         expect($e->errorCode)->toBe(ErrorCode::TemporarilyUnavailable)
             ->and($e->getMessage())->not->toContain($secretKey);
+    }
+});
+
+test('LaravelAi rejects a new tool at the budget boundary and leaves premature HTTP EOF unfinished', function (): void {
+    $fixture = new TextCommandFixture($this->app);
+    Config::set('vaulter-ai.secret_store.connections.office_model', [
+        'driver' => 'openai', 'key' => 'sk-test-stream', 'model' => 'gpt-4o-mini',
+    ]);
+    Config::set('vaulter-ai-laravel-ai.chat.max_tool_calls', 1);
+    $port = $this->app->make(LlmPort::class);
+    $profile = $this->app->make(HostPolicy::class)->profile($fixture->context);
+    $tools = $this->app->make(ChatTools::class)->catalog($fixture->context, [$fixture->node->id]);
+
+    Http::preventStrayRequests();
+    Http::fake(['https://api.openai.com/v1/responses' => Http::response(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        200,
+        ['Content-Type' => 'text/event-stream'],
+    )]);
+    $stream = $port->stream([['role' => 'user', 'content' => 'Hello']], $tools, $profile, static fn (): bool => false);
+    $stream->rewind();
+    expect($stream->current())->toBe(['type' => 'textDelta', 'text' => 'partial']);
+    try {
+        $stream->next();
+        $this->fail('Expected premature EOF to interrupt the stream.');
+    } catch (OfficeException $e) {
+        expect($e->errorCode)->toBe(ErrorCode::TemporarilyUnavailable);
+    }
+
+    OfficeAgent::fake([new ToolCall('c-2', 'office_read', ['resource_id' => $fixture->node->id])]);
+    try {
+        iterator_to_array($port->stream(
+            [['role' => 'user', 'content' => 'Hello'], ['role' => 'tool', 'name' => 'office_read', 'call_id' => 'c-1']],
+            $tools,
+            $profile,
+            static fn (): bool => false,
+        ));
+        $this->fail('Expected limit_exceeded before yielding a new tool.');
+    } catch (OfficeException $e) {
+        expect($e->errorCode)->toBe(ErrorCode::LimitExceeded);
     }
 });

@@ -115,6 +115,13 @@ final readonly class ChatTurn
         array $messages, array $scope, array $calls,
     ): ?int {
         $text = '';
+        $outputBytes = 0;
+        $profile = $this->policy->profile($context);
+        $connection = $profile->providerConnection ?? 'office_model';
+        $key = $this->secretStore?->status($connection)['configured'] === true
+            ? $this->secretStore->resolve($connection)->apiKey()
+            : '';
+        $redactor = new AssistantTextRedactor($key);
         $deliveries = 0;
         $maxToolCalls = $this->limitInt('vaulter-ai.chat.max_tool_calls', self::MAX_TOOL_CALLS, 1, self::MAX_TOOL_CALLS);
         $maxOutputBytes = $this->limitInt('vaulter-ai.chat.max_output_bytes', self::MAX_OUTPUT_BYTES, 1024, self::MAX_OUTPUT_BYTES);
@@ -122,22 +129,37 @@ final readonly class ChatTurn
         $cancelled = static fn (): bool => hrtime(true) >= $deadline;
         while (! $cancelled()) {
             $this->chat->turnInput($context, $session, $runId);
-            $stream = $llm->stream($messages, $this->tools->catalog($context, $scope), $this->policy->profile($context), $cancelled);
+            $stream = $llm->stream($messages, $this->tools->catalog($context, $scope), $profile, $cancelled);
             foreach ($stream as $event) {
                 if ($cancelled()) {
                     throw OfficeException::temporarilyUnavailable();
                 }
                 if ($event['type'] === 'finish') {
+                    $tail = $redactor->finish();
+                    if ($tail !== '') {
+                        if (strlen($text) + strlen($tail) > $maxOutputBytes) {
+                            throw new OfficeException(ErrorCode::LimitExceeded);
+                        }
+                        $this->delta($context, $session, $runId, $lease, 'assistant.delta', ['text' => $tail], $scope);
+                        $text .= $tail;
+                    }
                     $this->finish($context, $session, $runId, $lease, $text, $scope);
 
                     return null;
                 }
                 if ($event['type'] === 'textDelta') {
-                    $text .= $event['text'];
-                    if (strlen($text) > $maxOutputBytes || ! mb_check_encoding($event['text'], 'UTF-8')) {
+                    $outputBytes += strlen($event['text']);
+                    if ($outputBytes > $maxOutputBytes || ! mb_check_encoding($event['text'], 'UTF-8')) {
                         throw new OfficeException(ErrorCode::LimitExceeded);
                     }
-                    $this->delta($context, $session, $runId, $lease, 'assistant.delta', ['text' => $event['text']], $scope);
+                    $safe = $redactor->push($event['text']);
+                    if ($safe !== '') {
+                        if (strlen($text) + strlen($safe) > $maxOutputBytes) {
+                            throw new OfficeException(ErrorCode::LimitExceeded);
+                        }
+                        $text .= $safe;
+                        $this->delta($context, $session, $runId, $lease, 'assistant.delta', ['text' => $safe], $scope);
+                    }
 
                     continue;
                 }

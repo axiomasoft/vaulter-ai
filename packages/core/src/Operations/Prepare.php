@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\Ai\Core\Operations;
 
+use Closure;
 use stdClass;
 use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
@@ -31,6 +32,17 @@ final readonly class Prepare
     ) {}
 
     public function handle(CallContext $context, OfficeRequest $request): OfficeResponse
+    {
+        return ($this->stage($context, $request))();
+    }
+
+    /**
+     * Build the plan outside the persistence transaction so the caller can store it
+     * atomically with its own result after the owner has finished inspecting the resource.
+     *
+     * @return Closure(): OfficeResponse
+     */
+    public function stage(CallContext $context, OfficeRequest $request): Closure
     {
         $input = $request->input;
         $name = $input->command ?? null;
@@ -74,8 +86,12 @@ final readonly class Prepare
             $draft->proposalId, $draft->command, $draft->resourceId, $draft->base, $draft->approval,
             $draft->summary, $draft->targets, $draft->expiresAt, $result->digest, $draft->ownerKey, $draft->preconditions,
         );
-        $this->proposals->store($context, $token, $plan, $this->policy->profile($context)->revision);
+        $revision = $this->policy->profile($context)->revision;
 
-        return OfficeResponse::success(OfficeOperation::Prepare, $result);
+        return function () use ($context, $token, $plan, $revision, $result): OfficeResponse {
+            $this->proposals->store($context, $token, $plan, $revision);
+
+            return OfficeResponse::success(OfficeOperation::Prepare, $result);
+        };
     }
 }

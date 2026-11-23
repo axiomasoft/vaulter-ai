@@ -17,12 +17,14 @@ use Vaulter\Ai\Core\Data\ResourceEntry;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
+use Vaulter\Ai\Core\Operations\Prepare;
 use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\OwnerRoutes;
 use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Persistence\ToolCallLedger;
+use Vaulter\Ai\Core\Protocol\WireErrorMapper;
 use Vaulter\Ai\Core\Protocol\WireValidator;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 
@@ -41,6 +43,8 @@ final readonly class ChatTools
         private Proposals $proposals,
         private OwnerRoutes $routes,
         private StepCommitCoordinator $commits,
+        private Prepare $prepare,
+        private WireErrorMapper $errors,
         private ?CommandWriteCapability $writeCapability = null,
     ) {}
 
@@ -141,9 +145,23 @@ final readonly class ChatTools
             return ['state' => 'dispatched', 'message' => $message];
         }
         if ($step->operation !== OfficeOperation::Commit) {
-            // Prepare/Describe inspect Vaulter atomic document state, which requires running outside any Vaulter transaction.
-            $response = $this->office->handle($context, $request);
-            $this->db->transaction(function () use ($context, $sessionId, $runId, $runLease, $call, $scope, $step, $lease, $response): void {
+            // Owner reads must run outside our transaction. Settle Prepare's write with the ledger.
+            $storePrepared = null;
+            try {
+                if ($step->operation === OfficeOperation::Prepare) {
+                    $storePrepared = $this->prepare->stage($context, $request);
+                    $response = null;
+                } else {
+                    $response = $this->office->handle($context, $request);
+                }
+            } catch (OfficeException $e) {
+                $response = $this->errors->toResponse($step->operation, $e->errorCode, 1);
+            }
+
+            return $this->db->transaction(function () use ($context, $sessionId, $runId, $runLease, $call, $scope, $step, $lease, $response, $storePrepared, $message): array {
+                $this->ledger->lockRun($context, $runId, $runLease);
+                $response = $storePrepared !== null ? $storePrepared() : $response;
+                assert($response instanceof OfficeResponse);
                 $proposal = $this->stringField($response, 'proposal_id');
                 $receipt = $this->stringField($response, 'receipt_id');
                 $state = $response->ok ? 'verified' : 'failed';
@@ -154,9 +172,16 @@ final readonly class ChatTools
                 if ($proposal !== null && ($response->result->approval ?? null) === 'human') {
                     $this->chat->append($context, $sessionId, $runId, 'approval.required', ['call_id' => $call['id'], 'proposal_id' => $proposal], $scope);
                 }
-            }, $context->tenantId);
+                if ($step->operation === OfficeOperation::Verify && $receipt !== null && $response->ok) {
+                    $this->chat->append($context, $sessionId, $runId, 'tool.verified', [
+                        'call_id' => $call['id'],
+                        'receipt_id' => $receipt,
+                        'verification' => $response->toArray(),
+                    ], $scope);
+                }
 
-            return ['state' => $response->ok ? 'verified' : 'failed', 'message' => $message + ['response' => $response->toArray()]];
+                return ['state' => $state, 'message' => $message + ['response' => $response->toArray()]];
+            }, $context->tenantId);
         }
 
         $resource = $request->input->resource_id;
@@ -182,7 +207,7 @@ final readonly class ChatTools
             $result['verification'] = $verification->toArray();
         }
         $state = match (true) {
-            ($verification?->result->outcome ?? null) === 'passed' => 'verified',
+            $verification?->ok === true && ($verification->result->outcome ?? null) === 'passed' => 'verified',
             $verification?->retryable === true,
             $response->retryable === true,
             ($response->result->state ?? null) === 'running' => 'dispatched',

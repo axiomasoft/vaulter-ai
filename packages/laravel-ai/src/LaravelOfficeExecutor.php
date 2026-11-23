@@ -30,6 +30,7 @@ use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
+use Vaulter\Ai\Core\Workspace\ChannelChatBridge;
 
 /**
  * Laravel AI executor binding all seven Office tools from the core catalog into an isolated OfficeAgent
@@ -53,6 +54,7 @@ final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
         private ?OfficeRegistry $registry = null,
         private ?ResourceDirectory $directory = null,
         private ?CommandWriteCapability $writeCapability = null,
+        private ?ChannelChatBridge $channelChat = null,
     ) {}
 
     public function key(): string
@@ -193,6 +195,8 @@ final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
     {
         $lease = $this->runs->claimLease($context, $runId, $this->workerTimeout());
         if ($lease === null) {
+            $this->channelChat?->syncLinkedRunEvents($context, $runId);
+
             return $this->runs->find($context, $runId) ?? throw OfficeException::resourceUnavailable();
         }
 
@@ -227,6 +231,7 @@ final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
 
                 if ($reconciledState !== 'partially_applied' || ! $this->hasUnfinishedOrConflictedResource($stepsAfterReconcile, $expectedResources)) {
                     $this->runs->finishRun($context, $runId, $lease, $reconciledState);
+                    $this->channelChat?->syncLinkedRunEvents($context, $runId);
 
                     return $this->runs->find($context, $runId) ?? $run;
                 }
@@ -262,6 +267,7 @@ final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
             $expectedResources = $this->expectedResourcesFromRun($run);
             $nextState = $this->stateReducer->reduce($steps, expectedResources: $expectedResources);
             $this->runs->finishRun($context, $runId, $lease, $nextState);
+            $this->channelChat?->syncLinkedRunEvents($context, $runId);
 
             return $this->runs->find($context, $runId) ?? $run;
         } catch (Throwable $failure) {
@@ -293,6 +299,7 @@ final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
             $steps = $this->runs->listSteps($context, $runId);
             $nextState = $this->stateReducer->reduce($steps);
             $this->runs->finishRun($context, $runId, $lease, $nextState);
+            $this->channelChat?->syncLinkedRunEvents($context, $runId);
 
             return $this->runs->find($context, $runId);
         } catch (Throwable $failure) {

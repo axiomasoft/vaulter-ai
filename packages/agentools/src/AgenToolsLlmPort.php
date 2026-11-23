@@ -56,15 +56,17 @@ final readonly class AgenToolsLlmPort implements LlmPort
         $maxOutputBytes = $this->intConfig('vaulter-ai-agentools.chat.max_output_bytes', 65536, 1024, 262144);
         $maxToolCalls = $this->intConfig('vaulter-ai-agentools.chat.max_tool_calls', 32, 1, 64);
 
-        $priorToolCount = 0;
+        $priorToolCalls = [];
         foreach ($messages as $msg) {
             if (($msg['role'] ?? null) === 'tool') {
-                $priorToolCount++;
+                $priorToolCalls[] = is_string($msg['call_id'] ?? null) ? $msg['call_id'] : null;
             }
         }
+        $priorToolCount = count($priorToolCalls);
         if ($priorToolCount > $maxToolCalls) {
             throw new OfficeException(ErrorCode::LimitExceeded);
         }
+        $canRequestTool = $priorToolCount < $maxToolCalls;
 
         $filteredTools = $this->filterTools($tools, $profile);
         $sdkPort = $this->container->bound(AgenToolsSdkLlmPort::class)
@@ -72,18 +74,24 @@ final readonly class AgenToolsLlmPort implements LlmPort
             : null;
 
         if ($sdkPort !== null) {
-            yield from $this->streamViaSdkPort($sdkPort, $messages, $filteredTools, $profile, $cancelled, $maxRetries, $backoffMs, $maxOutputBytes);
+            yield from $this->streamViaSdkPort(
+                $sdkPort, $messages, $filteredTools, $profile, $cancelled,
+                $maxRetries, $backoffMs, $maxOutputBytes, $canRequestTool, $priorToolCalls,
+            );
 
             return;
         }
 
-        yield from $this->streamViaHttp($messages, $filteredTools, $profile, $cancelled, $maxRetries, $backoffMs, $timeout, $maxOutputBytes);
+        yield from $this->streamViaHttp(
+            $messages, $filteredTools, $profile, $cancelled, $maxRetries, $backoffMs, $timeout, $maxOutputBytes, $canRequestTool,
+        );
     }
 
     /**
      * @param  list<array<string, mixed>>  $messages
      * @param  array<string, array<string, mixed>>  $tools
      * @param  Closure(): bool  $cancelled
+     * @param  list<?string>  $priorToolCalls
      * @return iterable<
      *     array{type:'textDelta', text:string}
      *     |array{type:'toolInputComplete', tool:string, input:string, providerToolCallId?:string, replayCallId?:string}
@@ -99,6 +107,8 @@ final readonly class AgenToolsLlmPort implements LlmPort
         int $maxRetries,
         int $backoffMs,
         int $maxOutputBytes,
+        bool $canRequestTool,
+        array $priorToolCalls,
     ): iterable {
         $payload = [
             'instructions' => $this->instructions($profile, $tools),
@@ -147,6 +157,10 @@ final readonly class AgenToolsLlmPort implements LlmPort
 
                 if (is_array($response['tool_call'] ?? null)) {
                     $tc = $response['tool_call'];
+                    $replayCallId = $tc['replayCallId'] ?? null;
+                    if (! $canRequestTool && (! is_string($replayCallId) || ! in_array($replayCallId, $priorToolCalls, true))) {
+                        throw new OfficeException(ErrorCode::LimitExceeded);
+                    }
                     $toolName = $tc['tool'] ?? null;
                     if (! is_string($toolName) || ! isset($tools[$toolName])) {
                         throw OfficeException::resourceUnavailable();
@@ -164,8 +178,8 @@ final readonly class AgenToolsLlmPort implements LlmPort
                     if (is_string($tc['providerToolCallId'] ?? null)) {
                         $event['providerToolCallId'] = $tc['providerToolCallId'];
                     }
-                    if (is_string($tc['replayCallId'] ?? null)) {
-                        $event['replayCallId'] = $tc['replayCallId'];
+                    if (is_string($replayCallId)) {
+                        $event['replayCallId'] = $replayCallId;
                     }
                     $yielded = true;
                     yield $event;
@@ -210,6 +224,7 @@ final readonly class AgenToolsLlmPort implements LlmPort
         int $backoffMs,
         int $timeout,
         int $maxOutputBytes,
+        bool $canRequestTool,
     ): iterable {
         $connection = $profile->providerConnection ?? 'office_model';
         $secret = $this->secretStore->resolve($connection);
@@ -269,16 +284,25 @@ final readonly class AgenToolsLlmPort implements LlmPort
                         continue;
                     }
                     $buffer .= $chunk;
-                    while (($pos = strpos($buffer, "\n\n")) !== false) {
+                    while (preg_match('/\r?\n\r?\n/', $buffer, $boundary, PREG_OFFSET_CAPTURE) === 1) {
+                        [$separator, $pos] = $boundary[0];
                         $frame = substr($buffer, 0, $pos);
-                        $buffer = substr($buffer, $pos + 2);
+                        $buffer = substr($buffer, $pos + strlen($separator));
                         $data = $this->parseSseData($frame);
                         if ($data === null) {
                             continue;
                         }
                         $type = $data['type'] ?? '';
-                        if ($type === 'error' || $type === 'response.failed') {
+                        if (in_array($type, ['error', 'response.failed', 'response.incomplete', 'response.cancelled'], true)) {
                             throw OfficeException::temporarilyUnavailable();
+                        }
+                        if ($type === 'response.completed' || $type === '[DONE]') {
+                            if ($pendingToolCalls !== []) {
+                                throw OfficeException::temporarilyUnavailable();
+                            }
+                            yield ['type' => 'finish'];
+
+                            return;
                         }
                         if ($type === 'response.output_text.delta') {
                             $delta = is_string($data['delta'] ?? null) ? $data['delta'] : '';
@@ -320,6 +344,9 @@ final readonly class AgenToolsLlmPort implements LlmPort
                             if ($call === null) {
                                 continue;
                             }
+                            if (! $canRequestTool) {
+                                throw new OfficeException(ErrorCode::LimitExceeded);
+                            }
                             $name = $call['name'];
                             if (! isset($tools[$name])) {
                                 throw OfficeException::resourceUnavailable();
@@ -340,9 +367,7 @@ final readonly class AgenToolsLlmPort implements LlmPort
                     }
                 }
 
-                yield ['type' => 'finish'];
-
-                return;
+                throw OfficeException::temporarilyUnavailable();
             } catch (OfficeException $officeFailure) {
                 throw $officeFailure;
             } catch (Throwable $failure) {
@@ -456,7 +481,7 @@ final readonly class AgenToolsLlmPort implements LlmPort
         }
         $raw = implode("\n", $dataLines);
         if ($raw === '[DONE]') {
-            return null;
+            return ['type' => '[DONE]'];
         }
         try {
             $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);

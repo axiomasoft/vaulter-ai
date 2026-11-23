@@ -10,6 +10,7 @@ use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Foundation\Application;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
 use Laravel\Ai\AiServiceProvider;
 use Packman\PackmanServiceProvider;
@@ -21,7 +22,10 @@ use Vaulter\Ai\AgenTools\AgenToolsServiceProvider;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\OfficeServiceProvider;
+use Vaulter\Ai\Core\Persistence\Runs;
+use Vaulter\Ai\Core\Workspace\ChatWorkspace;
 use Vaulter\Ai\Documents\DocumentsAiServiceProvider;
+use Vaulter\Ai\LaravelAi\ExecuteOfficeRun;
 use Vaulter\Ai\LaravelAi\LaravelAiServiceProvider;
 use Vaulter\Documents\VaulterDocumentsServiceProvider;
 use Vaulter\Drive\Facades\Vaulter;
@@ -197,6 +201,9 @@ test('external channel links partial/final/duplicate/approval cleanly to a persi
             ->and($shownPartial['messages'])->toBe([]);
 
         // 2. Final event creates 1 run linked into that same chat_session_id and mirrors awaiting_approval state.
+        if ($expectedChannel === 'laravel-ai') {
+            Bus::fake([ExecuteOfficeRun::class]);
+        }
         $finalResp = channelChatReq($app, 'POST', '/office/channel/events', $writerToken, [
             'session_id' => 'ext-sess-92',
             'event_id' => 'evt-f1',
@@ -208,6 +215,40 @@ test('external channel links partial/final/duplicate/approval cleanly to a persi
         expect($final['chat_session_id'])->toBe($chatSessionId)
             ->and($final['run_count'])->toBe(1)
             ->and($runId)->not->toBe('');
+
+        if ($expectedChannel === 'laravel-ai') {
+            $context = $app->make(CallContextResolver::class)->resolve(Request::create(
+                '/office/channel/events', 'POST', server: ['HTTP_AUTHORIZATION' => 'Bearer '.$writerToken],
+            ));
+            expect($context)->toBeInstanceOf(CallContext::class);
+            $runs = $app->make(Runs::class);
+            $chat = $app->make(ChatWorkspace::class);
+            expect($runs->listSteps($context, $runId))->toBe([]);
+            Bus::assertDispatched(ExecuteOfficeRun::class);
+            $job = Bus::dispatched(ExecuteOfficeRun::class)->sole();
+            $app->call([$job, 'handle']);
+            expect(array_column($chat->events($context, $chatSessionId, 0), 'type'))->toContain('approval.required');
+            expect(array_column($chat->show($context, $chatSessionId)['tool_calls'], 'state'))->toContain('awaiting_approval');
+
+            $otherDoc = (string) $seed['second_resource_id'];
+            $unlinked = $runs->createOrFind($context, $expectedChannel, 'evt-unlinked', $context->policyRevision, [
+                'resource_id' => $doc,
+                'session_id' => 'ext-sess-92',
+                'chat_session_id' => $chatSessionId,
+            ]);
+            foreach ([
+                ['session_id' => 'ext-sess-92', 'resource_id' => $otherDoc],
+                ['session_id' => 'wrong-session', 'resource_id' => $doc],
+            ] as $mismatch) {
+                $response = channelChatReq($app, 'POST', '/office/channel/events', $writerToken, $mismatch + [
+                    'event_id' => 'evt-unlinked',
+                    'phase' => 'final',
+                ], ['Content-Type' => 'application/json', 'Accept' => 'application/json']);
+                expect($response->getStatusCode())->toBe(409)
+                    ->and($chat->sessionBindingForRun($context, $unlinked->runId))->toBeNull();
+            }
+            expect(DB::table('stand_channel_inbox')->where('event_id', 'evt-unlinked')->exists())->toBeFalse();
+        }
 
         // Duplicate final event keeps 1 run_id and same chat_session_id without duplicating chat messages or events.
         $dupResp = channelChatReq($app, 'POST', '/office/channel/events', $writerToken, [

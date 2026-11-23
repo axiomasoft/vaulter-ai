@@ -91,6 +91,9 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
 
   let subscription: ChatEventSubscription | null = null
   let fragmentCounter = 0
+  let fragmentSnapshotSeq = 0
+  let proposalEpoch = 0
+  let streamGeneration = 0
 
   const autoLoadProposals = options.autoLoadProposals ?? true
 
@@ -102,12 +105,21 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
     resourceIds.value = Array.from(new Set(ids.filter((id) => id.trim() !== '')))
   }
 
-  function applySessionSnapshot(details: ChatSessionDetails): void {
+  function verifiedReceipt(call: ChatToolCallSummary): boolean {
+    if (call.hidden === true || !call.receipt_id) {
+      return false
+    }
+    return call.receipt_verified ?? (call.state === 'verified' && call.tool === 'office.commit')
+  }
+
+  function applySessionSnapshot(details: ChatSessionDetails, resetCursor = false): void {
+    const sameSession = sessionId.value === details.session_id
+    const canRestoreFragments = resetCursor || !sameSession || details.last_seq >= lastSeq.value
     session.value = details
     sessionId.value = details.session_id
     provider.value = details.provider
     runs.value = [...details.runs]
-    lastSeq.value = Math.max(lastSeq.value, details.last_seq)
+    lastSeq.value = sameSession && !resetCursor ? Math.max(lastSeq.value, details.last_seq) : details.last_seq
 
     const hiddenRunIds = new Set<string>()
     const completedAssistantRuns = new Set<string>()
@@ -141,17 +153,21 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
       if (tc.receipt_id !== null && (tc.state === 'committed' || tc.state === 'verified')) {
         nextCommitted[tc.run_id] = true
       }
-      if (tc.state === 'verified' && tc.receipt_id !== null) {
+      if (verifiedReceipt(tc)) {
         nextVerified[tc.run_id] = true
       }
-      if (tc.state === 'committed') {
+      if (tc.receipt_verification_failed ?? tc.state === 'committed') {
         nextFailedVerify[tc.run_id] = true
       }
       return tc
     })
 
+    if (details.live_fragments?.some((fragment) => fragment.hidden)) {
+      foundHidden = true
+    }
     if (foundHidden) {
       hasHiddenContent.value = true
+      proposalEpoch += 1
       // Scrub cached selection & proposal cards associated with hidden runs or revoked scope.
       const nextProposals: Record<string, ProposalDetails> = {}
       for (const [pid, prop] of Object.entries(proposalsById.value)) {
@@ -166,19 +182,26 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
       proposalsById.value = nextProposals
     }
 
-    // Reconcile live fragments: drop finished assistant duplicates & wipe any hidden ones.
-    liveFragments.value = liveFragments.value
-      .filter((frag) => !frag.run_id || !completedAssistantRuns.has(frag.run_id) || frag.hidden || frag.interrupted)
-      .map((frag) => {
-        if (foundHidden || (frag.run_id && hiddenRunIds.has(frag.run_id))) {
-          return {
-            ...frag,
-            text: '',
-            hidden: true,
-          }
-        }
-        return frag
-      })
+    if (details.live_fragments && canRestoreFragments) {
+      fragmentSnapshotSeq = details.last_seq
+      liveFragments.value = details.live_fragments.map((fragment) => ({
+        ...fragment,
+        id: `snapshot-${fragment.seqs[0]}`,
+        finished: !!fragment.run_id && completedAssistantRuns.has(fragment.run_id),
+      }))
+      interruptedByRun.value = {}
+    } else if (resetCursor || !sameSession) {
+      fragmentSnapshotSeq = 0
+      liveFragments.value = []
+      interruptedByRun.value = {}
+    } else {
+      liveFragments.value = liveFragments.value
+        .filter((frag) => !frag.run_id || !completedAssistantRuns.has(frag.run_id) || frag.hidden || frag.interrupted)
+        .map((frag) => foundHidden ? { ...frag, text: '', hidden: true } : frag)
+      if (foundHidden) {
+        interruptedByRun.value = {}
+      }
+    }
 
     if (Object.keys(nextWaiting).length > 0 || foundHidden) {
       approvalWaitingByRun.value = foundHidden ? nextWaiting : { ...approvalWaitingByRun.value, ...nextWaiting }
@@ -188,6 +211,9 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
     }
     if (Object.keys(nextVerified).length > 0 || foundHidden) {
       verifiedByRun.value = foundHidden ? nextVerified : { ...verifiedByRun.value, ...nextVerified }
+    }
+    if (foundHidden) {
+      verifiedOutcomeByRun.value = {}
     }
     if (Object.keys(nextFailedVerify).length > 0 || foundHidden) {
       verificationFailedByRun.value = foundHidden ? nextFailedVerify : { ...verificationFailedByRun.value, ...nextFailedVerify }
@@ -210,8 +236,12 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
     if (typeof client.getProposal !== 'function') {
       return
     }
+    const epoch = proposalEpoch
     try {
       const prop = await client.getProposal(proposalId)
+      if (epoch !== proposalEpoch) {
+        return
+      }
       proposalsById.value = {
         ...proposalsById.value,
         [proposalId]: prop,
@@ -226,14 +256,16 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
         if (prop.execution.owner_status === 'committed') {
           ownerCommittedByRun.value = { ...ownerCommittedByRun.value, [rid]: true }
         }
-        if (prop.verification.status === 'passed') {
+        if (prop.verification.status === 'passed' && prop.execution.receipt_id) {
           verifiedByRun.value = { ...verifiedByRun.value, [rid]: true }
         } else if (prop.verification.status === 'failed') {
           verificationFailedByRun.value = { ...verificationFailedByRun.value, [rid]: true }
         }
       }
     } catch {
-      // Revoked or inaccessible proposal stays hidden safely.
+      if (epoch !== proposalEpoch) {
+        return
+      }
       const copy = { ...proposalsById.value }
       delete copy[proposalId]
       proposalsById.value = copy
@@ -260,7 +292,7 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
     }
   }
 
-  async function refreshSession(targetSessionId?: string): Promise<ChatSessionDetails> {
+  async function refreshSession(targetSessionId?: string, fromStream?: { generation: number; resetCursor?: boolean }): Promise<ChatSessionDetails> {
     const id = targetSessionId ?? sessionId.value
     if (!id) {
       throw new OfficeWorkspaceApiError('No chat session id specified.', 400, 'invalid_input', false, 'fail')
@@ -269,17 +301,29 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
     error.value = null
     try {
       const details = await client.getChatSession(id)
-      applySessionSnapshot(details)
+      if (!fromStream || fromStream.generation === streamGeneration) {
+        applySessionSnapshot(details, fromStream?.resetCursor)
+      }
       return details
     } catch (err) {
-      error.value = normalizeError(err)
-      throw error.value
+      const apiError = normalizeError(err)
+      if (!fromStream || fromStream.generation === streamGeneration) {
+        error.value = apiError
+        if (apiError.status === 410 || apiError.status === 404) {
+          clearSessionContent()
+        }
+      }
+      throw apiError
     } finally {
       loading.value = false
     }
   }
 
   function handleSseEvent(event: ChatSseEvent): void {
+    if ((event.type === 'assistant.delta' || event.type === 'assistant.interrupted') &&
+        event.seq !== null && event.seq <= fragmentSnapshotSeq) {
+      return
+    }
     if (event.seq !== null && event.seq > lastSeq.value) {
       lastSeq.value = event.seq
     }
@@ -432,13 +476,14 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
         const verification = (event.data.verification ?? {}) as Record<string, unknown>
         const nestedResult = (verification.result ?? verification) as Record<string, unknown>
         const outcome = typeof nestedResult.outcome === 'string' ? nestedResult.outcome : null
+        const verified = outcome === 'passed' && !!receiptId && verification.ok === true
         if (eventRunId) {
           approvalWaitingByRun.value = { ...approvalWaitingByRun.value, [eventRunId]: false }
           ownerCommittedByRun.value = { ...ownerCommittedByRun.value, [eventRunId]: true }
           verifiedOutcomeByRun.value = { ...verifiedOutcomeByRun.value, [eventRunId]: outcome }
-          if (outcome === 'passed') {
+          if (verified) {
             verifiedByRun.value = { ...verifiedByRun.value, [eventRunId]: true }
-          } else {
+          } else if (outcome !== 'passed') {
             verificationFailedByRun.value = { ...verificationFailedByRun.value, [eventRunId]: true }
           }
         }
@@ -446,10 +491,12 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
           tc.call_id === callId && !('hidden' in tc && tc.hidden === true)
             ? {
               ...tc,
-              state: outcome === 'passed' ? 'verified' : 'committed',
+              state: verified ? 'verified' : 'committed',
               proposal_id: proposalId ?? tc.proposal_id,
               command_id: commandId ?? tc.command_id,
               receipt_id: receiptId ?? tc.receipt_id,
+              receipt_verified: verified,
+              receipt_verification_failed: !verified,
             }
             : tc
         ))
@@ -511,6 +558,7 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
   }
 
   function disconnectStream(): void {
+    streamGeneration += 1
     subscription?.close()
     subscription = null
     streamConnected.value = false
@@ -523,26 +571,68 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
     }
     disconnectStream()
 
-    const cursor = startCursor ?? lastSeq.value
-    subscription = client.connectChatEvents(id, {
-      cursor,
-      baseReconnectDelayMs: options.baseReconnectDelayMs,
-      maxReconnectAttempts: options.maxReconnectAttempts,
-      onOpen: () => {
-        streamConnected.value = true
-      },
-      onEvent: handleSseEvent,
-      onReset: async () => {
-        streamConnected.value = false
-        liveFragments.value = []
-        const refreshed = await refreshSession(id)
-        connectStream(refreshed.session_id, refreshed.last_seq)
-      },
-      onError: (apiError) => {
-        streamConnected.value = false
-        error.value = apiError
-      },
-    })
+    const generation = streamGeneration
+    const subscribe = (cursor: number, recoveredCursor?: number): void => {
+      let needsSnapshot = false
+      subscription = client.connectChatEvents(id, {
+        cursor,
+        baseReconnectDelayMs: options.baseReconnectDelayMs,
+        maxReconnectAttempts: options.maxReconnectAttempts,
+        onOpen: async () => {
+          if (needsSnapshot) {
+            await refreshSession(id, { generation })
+          }
+          needsSnapshot = true
+          if (generation === streamGeneration) {
+            streamConnected.value = true
+          }
+        },
+        onEvent: handleSseEvent,
+        onReset: async () => {
+          streamConnected.value = false
+          try {
+            const refreshed = await refreshSession(id, { generation, resetCursor: true })
+            if (generation !== streamGeneration) {
+              return
+            }
+            if (refreshed.last_seq === recoveredCursor) {
+              error.value = new OfficeWorkspaceApiError('Chat cursor could not be restored.', 410, 'cursor_expired', false, 'fail')
+              return
+            }
+            subscribe(refreshed.last_seq, refreshed.last_seq)
+          } catch {
+            // refreshSession records the failure for the panel.
+          }
+        },
+        onError: (apiError) => {
+          needsSnapshot = true
+          streamConnected.value = false
+          error.value = apiError
+          if (apiError.status === 410 || apiError.status === 404) {
+            clearSessionContent()
+          }
+        },
+      })
+    }
+    subscribe(startCursor ?? lastSeq.value)
+  }
+
+  function clearSessionContent(): void {
+    proposalEpoch += 1
+    session.value = null
+    activeRunId.value = null
+    messages.value = []
+    runs.value = []
+    liveFragments.value = []
+    toolCalls.value = []
+    proposalsById.value = {}
+    selection.value = null
+    approvalWaitingByRun.value = {}
+    ownerCommittedByRun.value = {}
+    verifiedByRun.value = {}
+    verifiedOutcomeByRun.value = {}
+    verificationFailedByRun.value = {}
+    interruptedByRun.value = {}
   }
 
   async function sendMessage(content: string, customSelection?: ChatEditorSelection | null, customMessageId?: string): Promise<string> {
@@ -611,8 +701,12 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
       submittingProposalIds.value = [...submittingProposalIds.value, proposalId]
     }
     error.value = null
+    const epoch = proposalEpoch
     try {
       const res = await client.decideProposal(proposalId, { digest, approved, commandId })
+      if (epoch !== proposalEpoch) {
+        return res
+      }
       lastDecisionWon.value = res.won
       proposalsById.value = {
         ...proposalsById.value,
@@ -624,7 +718,7 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
         if (res.proposal.execution.owner_status === 'committed') {
           ownerCommittedByRun.value = { ...ownerCommittedByRun.value, [rid]: true }
         }
-        if (res.proposal.verification.status === 'passed') {
+        if (res.proposal.verification.status === 'passed' && res.proposal.execution.receipt_id) {
           verifiedByRun.value = { ...verifiedByRun.value, [rid]: true }
         }
       }
@@ -678,7 +772,7 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
       return true
     }
     return toolCalls.value.some(
-      (tc) => !('hidden' in tc && tc.hidden === true) && (!rid || tc.run_id === rid) && tc.state === 'verified',
+      (tc) => (!rid || tc.run_id === rid) && verifiedReceipt(tc),
     )
   })
 
@@ -693,6 +787,10 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
       (p) => !rid || !p.run?.run_id || p.run.run_id === rid,
     )
   })
+
+  if (options.initialSession) {
+    applySessionSnapshot(options.initialSession)
+  }
 
   if (getCurrentInstance()) {
     onBeforeUnmount(() => {

@@ -14,6 +14,7 @@ use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandScope;
 use Vaulter\Ai\Core\Data\HostProfile;
 use Vaulter\Ai\Core\Data\ProviderSecret;
+use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Jobs\DispatchApprovedCommand;
 use Vaulter\Ai\Core\Jobs\ExecuteChatRun;
@@ -33,6 +34,33 @@ use Vaulter\Drive\Access\ValueObjects\Subject;
 use Vaulter\Drive\Data\Access\GrantInput;
 
 uses(OfficeTestCase::class);
+
+test('chat snapshots restore the unfinished answer and enforce event ACLs and retention', function (): void {
+    Bus::fake([ExecuteChatRun::class]);
+    $fixture = new TextCommandFixture($this->app);
+    $fixture->authorizeHttp();
+    $chat = $this->app->make(ChatWorkspace::class);
+    $session = $chat->open($fixture->context, 60);
+    $scope = [$fixture->node->id];
+    $run = $chat->post($fixture->context, $session, 'unfinished', 'Question', $scope);
+    $chat->append($fixture->context, $session, $run, 'assistant.delta', ['text' => 'Partial reply'], $scope);
+    $chat->append($fixture->context, $session, $run, 'assistant.interrupted', [], $scope);
+
+    $snapshot = $chat->show($fixture->context, $session);
+    expect($snapshot['last_seq'])->toBe(2)
+        ->and($snapshot['live_fragments'])->toBe([
+            ['run_id' => $run, 'seqs' => [1, 2], 'text' => 'Partial reply', 'interrupted' => true, 'hidden' => false],
+        ]);
+
+    $fixture->revoke();
+    $hidden = $chat->show($fixture->context, $session)['live_fragments'];
+    expect($hidden)->each->toMatchArray(['text' => '', 'hidden' => true]);
+    expect($hidden)->not->toBeEmpty();
+
+    $this->fixedClock->advanceSeconds(60);
+    $this->withToken('scenario-test-token')->getJson('/office/chat/sessions/'.$session)
+        ->assertGone()->assertJsonPath('error.code', ErrorCode::CursorExpired->value);
+});
 
 test('chat session open endpoint, bounded editor selection upload/encryption, and revocation redaction work end to end', function (): void {
     Bus::fake([ExecuteChatRun::class]);

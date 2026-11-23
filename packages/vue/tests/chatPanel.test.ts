@@ -224,7 +224,7 @@ describe('@vaulter/ai-vue ChatPanel & useOfficeChat', () => {
     expect(wrapper.text()).toContain('подготовлено предложение.')
   })
 
-  it('collapses fragments and redacts selections/receipts immediately on hidden or reset after ACL revocation', async () => {
+  it('revalidates the transcript and redacts revoked content on an idle SSE reconnect', async () => {
     const sessionId = '019a0000-0000-7000-8000-00000000c002'
     const runId = '019a0000-0000-7000-8000-00000000r002'
     let stage: 'initial' | 'revoked' = 'initial'
@@ -237,7 +237,10 @@ describe('@vaulter/ai-vue ChatPanel & useOfficeChat', () => {
       last_seq: 0,
       provider: { configured: true, connection: 'office_model', driver: 'openai', model: 'gpt-4o-mini', hint: null },
       runs: [{ run_id: runId, state: 'completed', channel: 'chat', created_at: '2026-11-23T00:00:00Z', updated_at: '2026-11-23T00:00:00Z' }],
-      tool_calls: [],
+      tool_calls: [{
+        call_id: 'c-secret', run_id: runId, step_id: 1, tool: 'office.commit', tool_version: '1',
+        state: 'verified', resource_id: 'doc-secret', proposal_id: null, command_id: 'cmd-secret', receipt_id: 'rcpt-secret',
+      }],
       messages: [
         {
           message_id: 'm1',
@@ -272,12 +275,7 @@ describe('@vaulter/ai-vue ChatPanel & useOfficeChat', () => {
             `id: 1\nevent: assistant.delta\ndata: ${JSON.stringify({ run_id: runId, text: 'СЕКРЕТНЫЙ ОТВЕТ' })}\n\n`,
           ]), { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
         }
-        if (sseAttempt === 2) {
-          stage = 'revoked'
-          return new Response(encodeSse([
-            `id: 2\nevent: hidden\ndata: {}\n\nevent: reset\ndata: {}\n\n`,
-          ]), { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
-        }
+        stage = 'revoked'
         return new Response(encodeSse([`: idle\n\n`]), { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
       }
       return new Response(JSON.stringify({ data: revokedSession }), { status: 200 })
@@ -310,5 +308,112 @@ describe('@vaulter/ai-vue ChatPanel & useOfficeChat', () => {
     expect(wrapper.text()).not.toContain('СЕКРЕТНЫЙ ТЕКСТ ПОЛЬЗОВАТЕЛЯ')
     expect(wrapper.text()).not.toContain('СЕКРЕТНЫЙ ОТВЕТ')
     expect(wrapper.text()).not.toContain('секретная выдержка')
+    expect(wrapper.text()).not.toContain('rcpt-secret')
+    expect(wrapper.find('[data-testid="chat-status-verified"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('restores an interrupted draft at the snapshot cursor without treating a read as receipt verification', async () => {
+    const sessionId = 'session-reload'
+    const runId = 'run-reload'
+    const snapshot: ChatSessionDetails = {
+      session_id: sessionId,
+      state: 'active',
+      profile_revision: 'rev-1',
+      last_seq: 2,
+      provider: { configured: false, connection: '', driver: null, model: null, hint: null },
+      runs: [{ run_id: runId, state: 'reconcile', channel: 'chat', created_at: '', updated_at: '' }],
+      tool_calls: [{
+        call_id: 'read-1', run_id: runId, step_id: 1, tool: 'office.read', tool_version: '1',
+        state: 'verified', resource_id: 'doc-1', proposal_id: null, command_id: null, receipt_id: null,
+      }, {
+        call_id: 'status-1', run_id: runId, step_id: 2, tool: 'office.status', tool_version: '1',
+        state: 'verified', resource_id: 'doc-1', proposal_id: null, command_id: 'cmd-1', receipt_id: 'rcpt-1',
+      }],
+      messages: [],
+      live_fragments: [{ run_id: runId, seqs: [1, 2], text: 'Unfinished draft', interrupted: true, hidden: false }],
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/events')) {
+        expect((init?.headers as Record<string, string>)['Last-Event-ID']).toBe('2')
+        return new Response(encodeSse([': idle\n\n']))
+      }
+      return new Response(JSON.stringify({ data: snapshot }))
+    })
+    const client = createOfficeWorkspaceClient({ baseUrl: 'https://host.example', fetchImpl: fetchMock as typeof fetch })
+    const wrapper = mount(ChatPanel, { props: { client, sessionId, maxReconnectAttempts: 0 } })
+
+    await flushPromises()
+    expect(wrapper.text()).toContain('Unfinished draft')
+    expect(wrapper.find('[data-testid="chat-status-interrupted"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="chat-status-verified"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('stops after discovering that the session is expired during a cursor reset', async () => {
+    const snapshot: ChatSessionDetails = {
+      session_id: 'session-expired',
+      state: 'active',
+      profile_revision: 'rev-1',
+      last_seq: 1,
+      provider: { configured: false, connection: '', driver: null, model: null, hint: null },
+      runs: [],
+      tool_calls: [],
+      messages: [{ message_id: 'm1', role: 'user', run_id: null, content: 'Expired content' }],
+    }
+    let streamRequests = 0
+    let snapshotRequests = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('/events')) {
+        streamRequests += 1
+      } else if (snapshotRequests++ === 0) {
+        return new Response(JSON.stringify({ data: snapshot }))
+      }
+      return new Response(JSON.stringify({ error: { code: 'cursor_expired', retryable: false } }), { status: 410 })
+    })
+    const client = createOfficeWorkspaceClient({ baseUrl: 'https://host.example', fetchImpl: fetchMock as typeof fetch })
+    const wrapper = mount(ChatPanel, {
+      props: { client, sessionId: snapshot.session_id, maxReconnectAttempts: 2, baseReconnectDelayMs: 1 },
+    })
+
+    await flushPromises()
+    expect(wrapper.get('[data-testid="chat-error"]').text()).toContain('cursor_expired')
+    expect(wrapper.text()).not.toContain('Expired content')
+    expect(streamRequests).toBe(1)
+    expect(snapshotRequests).toBe(2)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('recovers a stale cursor once and stops if the reset repeats (%s)', async (resetRepeats) => {
+    const snapshot: ChatSessionDetails = {
+      session_id: 'session-reset',
+      state: 'active',
+      profile_revision: 'rev-1',
+      last_seq: 3,
+      provider: { configured: false, connection: '', driver: null, model: null, hint: null },
+      runs: [],
+      tool_calls: [],
+      messages: [],
+    }
+    const cursors: string[] = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).includes('/events')) {
+        return new Response(JSON.stringify({ data: snapshot }))
+      }
+      cursors.push((init?.headers as Record<string, string>)['Last-Event-ID'])
+      if (cursors.length === 1 || resetRepeats) {
+        return new Response(JSON.stringify({ error: { code: 'cursor_expired', retryable: false } }), { status: 410 })
+      }
+      return new Response(encodeSse([': idle\n\n']))
+    })
+    const client = createOfficeWorkspaceClient({ baseUrl: 'https://host.example', fetchImpl: fetchMock as typeof fetch })
+    const wrapper = mount(ChatPanel, {
+      props: { client, initialSession: { ...snapshot, last_seq: 9 }, maxReconnectAttempts: 0 },
+    })
+
+    await flushPromises()
+    expect(cursors).toEqual(['9', '3'])
+    expect(wrapper.find('[data-testid="chat-error"]').exists()).toBe(resetRepeats)
+    wrapper.unmount()
   })
 })

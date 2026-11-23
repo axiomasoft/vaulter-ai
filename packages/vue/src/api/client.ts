@@ -57,7 +57,7 @@ export interface ConnectChatEventsOptions {
   onEvent: (event: ChatSseEvent) => void
   onReset?: () => void | Promise<void>
   onError?: (error: OfficeWorkspaceApiError) => void
-  onOpen?: () => void
+  onOpen?: () => void | Promise<void>
 }
 
 export interface ChatEventSubscription {
@@ -393,7 +393,7 @@ export function createOfficeWorkspaceClient(options: OfficeWorkspaceClientOption
 
             if (!response.ok) {
               const apiError = await parseError(response)
-              if (response.status === 410 || apiError.code === 'cursor_expired') {
+              if (apiError.code === 'cursor_expired') {
                 eventOptions.onEvent({ seq: null, type: 'reset', data: {} })
                 await eventOptions.onReset?.()
                 isClosed = true
@@ -407,8 +407,11 @@ export function createOfficeWorkspaceClient(options: OfficeWorkspaceClientOption
               throw apiError
             }
 
+            await eventOptions.onOpen?.()
+            if (isClosed) {
+              return
+            }
             attempt = 0
-            eventOptions.onOpen?.()
 
             let resetTriggered = false
             const processBuffer = async (input: string, flushAll: boolean): Promise<string> => {
@@ -508,7 +511,7 @@ export function createOfficeWorkspaceClient(options: OfficeWorkspaceClientOption
                 'retry',
               )
             eventOptions.onError?.(apiError)
-            if (attempt >= maxAttempts) {
+            if (!apiError.retryable || attempt >= maxAttempts) {
               isClosed = true
               return
             }

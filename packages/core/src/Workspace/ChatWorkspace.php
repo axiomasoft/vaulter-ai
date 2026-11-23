@@ -13,8 +13,10 @@ use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\ProviderSecretStore;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Data\OfficeRunStep;
 use Vaulter\Ai\Core\Data\ResourceEntry;
 use Vaulter\Ai\Core\Enums\ErrorCode;
+use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Jobs\ExecuteChatRun;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
@@ -144,6 +146,12 @@ final readonly class ChatWorkspace
         [$scope, $normalizedSelection, $digest] = $this->prepareUserMessagePayload($messageId, $content, $scope, $selection);
 
         $this->db->transaction(function () use ($context, $sessionId, $messageId, $runId, $content, $scope, $normalizedSelection, $digest): void {
+            $run = $this->runs->find($context, $runId) ?? throw OfficeException::resourceUnavailable();
+            $resourceId = $run->input['resource_id'] ?? null;
+            if ($run->channel === 'chat' || $run->sourceEventId !== $messageId || ! is_string($resourceId)
+                || $scope !== [$resourceId] || ($run->input['chat_session_id'] ?? null) !== $sessionId) {
+                throw new OfficeException(ErrorCode::IdempotencyConflict);
+            }
             $session = $this->session($context, $sessionId, lock: true);
             if (! $this->canRead($scope, $this->accessible($context, $scope))) {
                 throw OfficeException::resourceUnavailable();
@@ -175,23 +183,25 @@ final readonly class ChatWorkspace
      */
     public function sessionBindingForRun(CallContext $context, string $runId): ?array
     {
-        $row = $this->db->query('ai_chat_messages')
-            ->where('run_id', $runId)
-            ->where('role', 'user')
-            ->first();
-        if ($row === null) {
-            return null;
-        }
-        $sessionId = QueryRecord::str($row, 'session_id');
-        $session = $this->sessionQuery($context, $sessionId)->first();
-        if ($session === null) {
-            return null;
-        }
+        return $this->db->transaction(function () use ($context, $runId): ?array {
+            $row = $this->db->query('ai_chat_messages')
+                ->where('run_id', $runId)
+                ->where('role', 'user')
+                ->first();
+            if ($row === null) {
+                return null;
+            }
+            $sessionId = QueryRecord::str($row, 'session_id');
+            $session = $this->sessionQuery($context, $sessionId)->first();
+            if ($session === null || $this->expired($session)) {
+                return null;
+            }
 
-        return [
-            'session_id' => $sessionId,
-            'scope' => $this->storedScope($row),
-        ];
+            return [
+                'session_id' => $sessionId,
+                'scope' => $this->storedScope($row),
+            ];
+        }, $context->tenantId);
     }
 
     /**
@@ -287,118 +297,137 @@ final readonly class ChatWorkspace
         return [$scope, $normalizedSelection, $digest];
     }
 
-    /** @return array{session_id:string, state:string, profile_revision:string, last_seq:int, provider:array{configured:bool, connection:string, driver:?string, model:?string, hint:?string}, runs:list<array<string,mixed>>, tool_calls:list<array<string,mixed>>, messages:list<array<string,mixed>>} */
+    /** @return array{session_id:string, state:string, profile_revision:string, last_seq:int, provider:array{configured:bool, connection:string, driver:?string, model:?string, hint:?string}, runs:list<array<string,mixed>>, tool_calls:list<array<string,mixed>>, messages:list<array<string,mixed>>, live_fragments:list<array{run_id:?string, seqs:list<int>, text:string, interrupted:bool, hidden:bool}>} */
     public function show(CallContext $context, string $sessionId): array
     {
         return $this->db->transaction(function () use ($context, $sessionId): array {
-            $session = $this->session($context, $sessionId, allowExpired: true);
+            $session = $this->session($context, $sessionId);
+            $lastSeq = QueryRecord::int($session, 'last_seq');
             $messages = [];
             $runsOut = [];
+            $externalRuns = [];
             $callsOut = [];
             $profile = $this->policy->profile($context);
 
-            if (! $this->expired($session)) {
-                $rows = $this->db->query('ai_chat_messages')->where('session_id', $sessionId)
-                    ->orderByDesc('created_at')->orderByDesc('message_id')->limit(self::PAGE_SIZE)->get();
-                $allScopeIds = $this->collectScope($rows);
-                $runIds = [];
-                /** @var array<string, list<string>> $runScopeByRunId */
-                $runScopeByRunId = [];
-                foreach ($rows as $row) {
-                    $rid = QueryRecord::raw($row, 'run_id');
-                    if (is_string($rid) && $rid !== '') {
-                        $runIds[$rid] = $rid;
-                        if (QueryRecord::str($row, 'role') === 'user') {
-                            $runScopeByRunId[$rid] = $this->storedScope($row);
-                        }
+            $rows = $this->db->query('ai_chat_messages')->where('session_id', $sessionId)
+                ->orderByDesc('created_at')->orderByDesc('message_id')->limit(self::PAGE_SIZE)->get();
+            $allScopeIds = $this->collectScope($rows);
+            $runIds = [];
+            /** @var array<string, list<string>> $runScopeByRunId */
+            $runScopeByRunId = [];
+            foreach ($rows as $row) {
+                $rid = QueryRecord::raw($row, 'run_id');
+                if (is_string($rid) && $rid !== '') {
+                    $runIds[$rid] = $rid;
+                    if (QueryRecord::str($row, 'role') === 'user') {
+                        $runScopeByRunId[$rid] = $this->storedScope($row);
                     }
                 }
+            }
 
-                $callRows = $runIds === []
-                    ? []
-                    : $this->db->query('ai_tool_calls')
-                        ->whereIn('run_id', array_values($runIds))
-                        ->orderBy('run_id')
-                        ->orderBy('step_id')
-                        ->get()
-                        ->all();
-                $stepResources = [];
-                foreach ($runIds as $rid) {
-                    foreach ($this->runs->listSteps($context, $rid) as $step) {
-                        $stepResources[$rid.':'.$step->stepId] = $step->resourceId;
-                        if ($step->resourceId !== null && $step->resourceId !== '') {
-                            $allScopeIds[] = $step->resourceId;
-                        }
+            $callRows = $runIds === []
+                ? []
+                : $this->db->query('ai_tool_calls')
+                    ->whereIn('run_id', array_values($runIds))
+                    ->orderBy('run_id')
+                    ->orderBy('step_id')
+                    ->get()
+                    ->all();
+            $steps = [];
+            foreach ($runIds as $rid) {
+                foreach ($this->runs->listSteps($context, $rid) as $step) {
+                    $steps[$rid.':'.$step->stepId] = $step;
+                    if ($step->resourceId !== null && $step->resourceId !== '') {
+                        $allScopeIds[] = $step->resourceId;
                     }
                 }
-                $allScopeIds = array_values(array_unique($allScopeIds));
-                $allowed = $this->accessible($context, $allScopeIds);
+            }
+            $allScopeIds = array_values(array_unique($allScopeIds));
+            $allowed = $this->accessible($context, $allScopeIds);
 
-                foreach ($rows->reverse() as $row) {
-                    $scope = $this->storedScope($row);
-                    $id = QueryRecord::str($row, 'message_id');
-                    $role = QueryRecord::str($row, 'role');
-                    $decoded = $this->canRead($scope, $allowed) ? $this->messagePayload($context, $sessionId, $row, $scope) : null;
-                    if ($decoded === null) {
-                        $messages[] = ['message_id' => $id, 'hidden' => true];
+            $completedAssistantRuns = [];
+            foreach ($rows->reverse() as $row) {
+                $scope = $this->storedScope($row);
+                $id = QueryRecord::str($row, 'message_id');
+                $role = QueryRecord::str($row, 'role');
+                if ($role === 'assistant') {
+                    $completedAssistantRuns[QueryRecord::str($row, 'run_id')] = true;
+                }
+                $decoded = $this->canRead($scope, $allowed) ? $this->messagePayload($context, $sessionId, $row, $scope) : null;
+                if ($decoded === null) {
+                    $messages[] = ['message_id' => $id, 'hidden' => true];
 
-                        continue;
+                    continue;
+                }
+                $item = [
+                    'message_id' => $id,
+                    'role' => $role,
+                    'run_id' => QueryRecord::raw($row, 'run_id'),
+                    'content' => $decoded['content'],
+                ];
+                if ($decoded['selection'] !== null) {
+                    $item['selection'] = $decoded['selection'];
+                }
+                $messages[] = $item;
+            }
+
+            foreach (array_values($runIds) as $rid) {
+                $run = $this->runs->find($context, $rid);
+                if ($run !== null) {
+                    if ($run->channel !== 'chat') {
+                        $externalRuns[$rid] = $run->state;
                     }
-                    $item = [
-                        'message_id' => $id,
-                        'role' => $role,
-                        'run_id' => QueryRecord::raw($row, 'run_id'),
-                        'content' => $decoded['content'],
+                    $runsOut[] = [
+                        'run_id' => $run->runId,
+                        'state' => $run->state,
+                        'channel' => $run->channel,
+                        'created_at' => $run->createdAt->format('Y-m-d\TH:i:s\Z'),
+                        'updated_at' => $run->updatedAt->format('Y-m-d\TH:i:s\Z'),
                     ];
-                    if ($decoded['selection'] !== null) {
-                        $item['selection'] = $decoded['selection'];
-                    }
-                    $messages[] = $item;
                 }
+            }
 
-                foreach (array_values($runIds) as $rid) {
-                    $run = $this->runs->find($context, $rid);
-                    if ($run !== null) {
-                        $runsOut[] = [
-                            'run_id' => $run->runId,
-                            'state' => $run->state,
-                            'channel' => $run->channel,
-                            'created_at' => $run->createdAt->format('Y-m-d\TH:i:s\Z'),
-                            'updated_at' => $run->updatedAt->format('Y-m-d\TH:i:s\Z'),
-                        ];
-                    }
-                }
-
-                foreach ($callRows as $callRow) {
-                    $rid = QueryRecord::str($callRow, 'run_id');
-                    $cid = QueryRecord::str($callRow, 'call_id');
-                    $sid = QueryRecord::int($callRow, 'step_id');
-                    $stepResource = $stepResources[$rid.':'.$sid] ?? null;
-                    $requiredScope = $stepResource !== null && $stepResource !== ''
-                        ? [$stepResource]
-                        : ($runScopeByRunId[$rid] ?? []);
-                    if ($requiredScope !== [] && ! $this->canRead($requiredScope, $allowed)) {
-                        $callsOut[] = [
-                            'call_id' => $cid,
-                            'run_id' => $rid,
-                            'hidden' => true,
-                        ];
-
-                        continue;
-                    }
+            foreach ($callRows as $callRow) {
+                $rid = QueryRecord::str($callRow, 'run_id');
+                $cid = QueryRecord::str($callRow, 'call_id');
+                $sid = QueryRecord::int($callRow, 'step_id');
+                $step = $steps[$rid.':'.$sid] ?? null;
+                $stepResource = $step?->resourceId;
+                $requiredScope = $stepResource !== null && $stepResource !== ''
+                    ? [$stepResource]
+                    : ($runScopeByRunId[$rid] ?? []);
+                if ($requiredScope !== [] && ! $this->canRead($requiredScope, $allowed)) {
                     $callsOut[] = [
                         'call_id' => $cid,
                         'run_id' => $rid,
-                        'step_id' => $sid,
-                        'tool' => QueryRecord::str($callRow, 'tool_name'),
-                        'tool_version' => QueryRecord::str($callRow, 'tool_version'),
-                        'state' => QueryRecord::str($callRow, 'state'),
-                        'resource_id' => $stepResource,
-                        'proposal_id' => QueryRecord::raw($callRow, 'proposal_id'),
-                        'command_id' => QueryRecord::raw($callRow, 'command_id'),
-                        'receipt_id' => QueryRecord::raw($callRow, 'receipt_id'),
+                        'hidden' => true,
                     ];
+
+                    continue;
                 }
+                $state = QueryRecord::str($callRow, 'state');
+                $receiptId = QueryRecord::raw($callRow, 'receipt_id');
+                $result = $step?->compactResult['result'] ?? null;
+                $verification = $step?->compactResult['verification'] ?? null;
+                $verificationFailed = $step?->operation === OfficeOperation::Commit && $state === 'committed' && is_array($verification);
+                $receiptVerified = is_string($receiptId) && $state === 'verified' && (
+                    $step?->operation === OfficeOperation::Commit
+                    || ($step?->operation === OfficeOperation::Verify && is_array($result) && ($result['outcome'] ?? null) === 'passed')
+                );
+                $callsOut[] = [
+                    'call_id' => $cid,
+                    'run_id' => $rid,
+                    'step_id' => $sid,
+                    'tool' => QueryRecord::str($callRow, 'tool_name'),
+                    'tool_version' => QueryRecord::str($callRow, 'tool_version'),
+                    'state' => $state,
+                    'resource_id' => $stepResource,
+                    'proposal_id' => QueryRecord::raw($callRow, 'proposal_id'),
+                    'command_id' => QueryRecord::raw($callRow, 'command_id'),
+                    'receipt_id' => $receiptId,
+                    'receipt_verified' => $receiptVerified,
+                    'receipt_verification_failed' => $verificationFailed,
+                ];
             }
 
             $provider = $this->secretStore !== null
@@ -415,11 +444,12 @@ final readonly class ChatWorkspace
                 'session_id' => $sessionId,
                 'state' => QueryRecord::str($session, 'state'),
                 'profile_revision' => QueryRecord::str($session, 'profile_revision'),
-                'last_seq' => QueryRecord::int($session, 'last_seq'),
+                'last_seq' => $lastSeq,
                 'provider' => $provider,
                 'runs' => $runsOut,
-                'tool_calls' => $callsOut,
+                'tool_calls' => [...$callsOut, ...$this->externalToolCalls($context, $sessionId, $lastSeq, $externalRuns, $steps, $allowed)],
                 'messages' => $messages,
+                'live_fragments' => $this->liveFragments($context, $sessionId, $lastSeq, array_values($runIds), $completedAssistantRuns, $allowed),
             ];
         }, $context->tenantId);
     }
@@ -521,12 +551,7 @@ final readonly class ChatWorkspace
                     continue;
                 }
                 $type = QueryRecord::str($row, 'event_type');
-                $key = QueryRecord::raw($row, 'key_id');
-                $data = is_string($key) ? $this->cipher->decrypt(
-                    $key,
-                    $this->db->decodeBinary(QueryRecord::raw($row, 'encrypted_payload')),
-                    $this->aad($context, 'ai_chat_events', $sessionId, (string) $seq, $type, $scope),
-                ) : [];
+                $data = $this->eventPayload($context, $sessionId, $row, $seq, $type, $scope);
                 $events[] = ['seq' => $seq, 'type' => $type, 'data' => ['run_id' => QueryRecord::raw($row, 'run_id')] + $data];
             }
 
@@ -534,7 +559,155 @@ final readonly class ChatWorkspace
         }, $context->tenantId);
     }
 
-    private function session(CallContext $context, string $sessionId, bool $lock = false, bool $allowExpired = false): object
+    /**
+     * @param  list<string>  $runIds
+     * @param  array<string, true>  $completedAssistantRuns
+     * @param  array<string, ResourceEntry>  $allowed
+     * @return list<array{run_id:?string, seqs:list<int>, text:string, interrupted:bool, hidden:bool}>
+     */
+    private function liveFragments(CallContext $context, string $sessionId, int $lastSeq, array $runIds, array $completedAssistantRuns, array $allowed): array
+    {
+        $rows = $this->db->query('ai_chat_events')->useWritePdo()->where('session_id', $sessionId)
+            ->whereIn('run_id', $runIds)->where('seq', '<=', $lastSeq)
+            ->where(static function (Builder $query) use ($completedAssistantRuns): void {
+                $query->where('event_type', 'assistant.interrupted')
+                    ->orWhere(static function (Builder $deltas) use ($completedAssistantRuns): void {
+                        $deltas->where('event_type', 'assistant.delta')
+                            ->whereNotIn('run_id', array_keys($completedAssistantRuns));
+                    });
+            })->orderBy('seq')->cursor();
+        $fragments = [];
+        $fragment = null;
+        foreach ($rows as $row) {
+            $runId = QueryRecord::str($row, 'run_id');
+            $seq = QueryRecord::int($row, 'seq');
+            $scope = $this->storedScope($row);
+            $type = QueryRecord::str($row, 'event_type');
+            $hidden = ! $this->canRead($scope, $allowed);
+            $text = '';
+            if (! $hidden && $type === 'assistant.delta') {
+                $data = $this->eventPayload($context, $sessionId, $row, $seq, $type, $scope);
+                $text = is_string($data['text'] ?? null) ? $data['text'] : '';
+            }
+            if ($fragment === null || $fragment['run_id'] !== $runId || $fragment['hidden'] !== $hidden
+                || ($fragment['interrupted'] && $type === 'assistant.delta')) {
+                if ($fragment !== null) {
+                    $fragments[] = $fragment;
+                }
+                $fragment = ['run_id' => $runId, 'seqs' => [], 'text' => '', 'interrupted' => false, 'hidden' => $hidden];
+            }
+            $fragment['seqs'][] = $seq;
+            $fragment['text'] .= $text;
+            $fragment['interrupted'] = ! $hidden && $type === 'assistant.interrupted';
+        }
+        if ($fragment !== null) {
+            $fragments[] = $fragment;
+        }
+
+        return array_map(static function (array $fragment): array {
+            if ($fragment['hidden']) {
+                $fragment['run_id'] = null;
+            }
+
+            return $fragment;
+        }, $fragments);
+    }
+
+    /**
+     * @param  array<string, string>  $runStates
+     * @param  array<string, OfficeRunStep>  $steps
+     * @param  array<string, ResourceEntry>  $allowed
+     * @return list<array<string, mixed>>
+     */
+    private function externalToolCalls(CallContext $context, string $sessionId, int $lastSeq, array $runStates, array $steps, array $allowed): array
+    {
+        if ($runStates === []) {
+            return [];
+        }
+
+        $stepsByCall = [];
+        foreach ($steps as $step) {
+            $stepsByCall['ext-step-'.$step->runId.'-'.$step->stepId] = $step;
+        }
+        $rows = $this->db->query('ai_chat_events')->useWritePdo()->where('session_id', $sessionId)
+            ->whereIn('run_id', array_keys($runStates))->where('seq', '<=', $lastSeq)
+            ->whereIn('event_type', ['tool.requested', 'approval.required', 'tool.committed', 'tool.verified'])
+            ->orderBy('seq')->cursor();
+        $calls = [];
+        $settledProposals = [];
+        foreach ($rows as $row) {
+            $runId = QueryRecord::str($row, 'run_id');
+            $scope = $this->storedScope($row);
+            if (! $this->canRead($scope, $allowed)) {
+                $hiddenId = 'hidden-external-'.$runId;
+                $calls[$hiddenId] = ['call_id' => $hiddenId, 'run_id' => $runId, 'hidden' => true];
+
+                continue;
+            }
+            $type = QueryRecord::str($row, 'event_type');
+            $data = $this->eventPayload($context, $sessionId, $row, QueryRecord::int($row, 'seq'), $type, $scope);
+            $callId = $data['call_id'] ?? null;
+            $step = is_string($callId) ? ($stepsByCall[$callId] ?? null) : null;
+            if (! is_string($callId) || $step === null) {
+                continue;
+            }
+            $call = $calls[$callId] ?? [
+                'call_id' => $callId, 'run_id' => $runId, 'step_id' => $step->stepId,
+                'tool' => $step->operation->value, 'tool_version' => '1', 'resource_id' => $step->resourceId,
+                'proposal_id' => null, 'command_id' => null, 'receipt_id' => null, 'receipt_verified' => false,
+            ];
+            $verification = is_array($data['verification'] ?? null) ? $data['verification'] : [];
+            $result = is_array($verification['result'] ?? null) ? $verification['result'] : [];
+            $verified = ($verification['ok'] ?? null) === true && ($result['outcome'] ?? null) === 'passed'
+                && is_string($data['receipt_id'] ?? null);
+            $call['state'] = match ($type) {
+                'approval.required' => 'awaiting_approval',
+                'tool.committed' => 'committed',
+                'tool.verified' => $verified ? 'verified' : 'committed',
+                default => 'requested',
+            };
+            foreach (['proposal_id', 'command_id', 'receipt_id'] as $field) {
+                if (is_string($data[$field] ?? null)) {
+                    $call[$field] = $data[$field];
+                }
+            }
+            $call['receipt_verified'] = $verified;
+            $call['receipt_verification_failed'] = $type === 'tool.verified' && ! $verified;
+            $proposalId = $call['proposal_id'] ?? null;
+            if (is_string($proposalId) && is_string($call['receipt_id'] ?? null)) {
+                $settledProposals[$proposalId] = true;
+            }
+            $calls[$callId] = $call;
+        }
+
+        foreach ($calls as &$call) {
+            $proposalId = $call['proposal_id'] ?? null;
+            if (($call['state'] ?? null) === 'awaiting_approval'
+                && ((is_string($proposalId) && isset($settledProposals[$proposalId]))
+                    || ($runStates[$call['run_id']] ?? null) === 'rejected')) {
+                $call['state'] = 'finished';
+            }
+        }
+        unset($call);
+
+        return array_values($calls);
+    }
+
+    /** @param list<string> $scope
+     * @return array<string, mixed>
+     */
+    private function eventPayload(CallContext $context, string $sessionId, object $row, int $seq, string $type, array $scope): array
+    {
+        $key = QueryRecord::raw($row, 'key_id');
+
+        return is_string($key) ? $this->cipher->decrypt(
+            $key,
+            $this->db->decodeBinary(QueryRecord::raw($row, 'encrypted_payload')),
+            $this->aad($context, 'ai_chat_events', $sessionId, (string) $seq, $type, $scope),
+        ) : [];
+    }
+
+    private function session(CallContext $context, string $sessionId, bool $lock = false): object
     {
         if (! Str::isUuid($sessionId) || strtolower($sessionId) !== $sessionId) {
             throw OfficeException::resourceUnavailable();
@@ -549,7 +722,7 @@ final readonly class ChatWorkspace
             }
         }
         $row = $query->first() ?? throw OfficeException::resourceUnavailable();
-        if (! $allowExpired && $this->expired($row)) {
+        if ($this->expired($row)) {
             throw new OfficeException(ErrorCode::CursorExpired);
         }
 

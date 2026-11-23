@@ -389,18 +389,19 @@ Route::post('/office/channel/events', static function (
             ->where('source_event_id', $eventId);
     };
 
-    DB::table('stand_channel_inbox')->insertOrIgnore([
+    $inboxKey = [
         'tenant_id' => $viewer->tenantId,
         'project_scope' => $viewer->projectScope,
         'effective_subject' => $viewer->effectiveSubject,
         'channel' => $channel,
-        'session_id' => $sessionId,
         'event_id' => $eventId,
+    ];
+    $inboxEvent = [
+        'session_id' => $sessionId,
         'phase' => $phase,
         'resource_id' => $resourceId,
-        'run_id' => null,
         'chat_session_id' => $chatSessionId,
-    ]);
+    ];
 
     $respond = static function (bool $published, bool $duplicate, ?string $runId) use ($sessionId, $chatSessionId, $eventId, $phase, $channel, $runQuery): JsonResponse {
         return response()->json([
@@ -418,33 +419,13 @@ Route::post('/office/channel/events', static function (
     };
 
     if ($phase === 'partial') {
+        DB::table('stand_channel_inbox')->insertOrIgnore($inboxKey + $inboxEvent);
+
         return $respond(false, false, null);
     }
 
     $existingRunId = $runQuery()->value('run_id');
-    if (is_string($existingRunId) && $existingRunId !== '') {
-        DB::table('stand_channel_inbox')
-            ->where('tenant_id', $viewer->tenantId)
-            ->where('project_scope', $viewer->projectScope)
-            ->where('effective_subject', $viewer->effectiveSubject)
-            ->where('channel', $channel)
-            ->where('event_id', $eventId)
-            ->whereNull('run_id')
-            ->update(['run_id' => $existingRunId, 'chat_session_id' => $chatSessionId]);
-
-        $chatBridge->linkAndSyncExternalRun(
-            context: $viewer,
-            channel: $channel,
-            externalSessionId: $sessionId,
-            eventId: $eventId,
-            runId: $existingRunId,
-            scope: [$resourceId],
-            content: is_string($request->input('content')) ? $request->input('content') : null,
-        );
-
-        return $respond(true, true, $existingRunId);
-    }
-
+    $duplicate = is_string($existingRunId) && $existingRunId !== '';
     $profileRevision = (string) config('vaulter-ai.profiles.documents.revision', $viewer->policyRevision);
     if ($profileRevision === '') {
         $profileRevision = $viewer->policyRevision;
@@ -464,9 +445,23 @@ Route::post('/office/channel/events', static function (
         'event_id' => $eventId,
     ]);
 
-    $contextExists = DB::table('stand_run_contexts')->where('run_id', $run->runId)->exists();
-    if (! $contextExists) {
-        DB::table('stand_run_contexts')->insert([
+    try {
+        $chatSessionId = $chatBridge->linkAndSyncExternalRun(
+            context: $viewer,
+            channel: $channel,
+            externalSessionId: $sessionId,
+            eventId: $eventId,
+            runId: $run->runId,
+            scope: [$resourceId],
+            content: is_string($request->input('content')) ? $request->input('content') : null,
+        );
+    } catch (OfficeException $e) {
+        return standOfficeError($e->errorCode);
+    }
+
+    $inbox = DB::table('stand_channel_inbox')->where($inboxKey);
+    if ($run->state === 'queued' && $inbox->value('run_id') === null) {
+        DB::table('stand_run_contexts')->insertOrIgnore([
             'run_id' => $run->runId,
             'tenant_id' => $viewer->tenantId,
             'project_scope' => $viewer->projectScope,
@@ -474,44 +469,32 @@ Route::post('/office/channel/events', static function (
             'drive_id' => $viewer->driveId,
             'resource_id' => $resourceId,
             'profile' => 'documents',
-            'policy_revision' => $profileRevision,
+            'policy_revision' => $run->profileRevision,
             'fault_mode' => null,
         ]);
+
+        if ($channel === 'agentools') {
+            $executor->dispatch($viewer, [
+                'channel' => 'agentools',
+                'source_event_id' => $eventId,
+                'scenario' => standAgentoolsReplaceScenario(),
+                'scenario_context' => ['resource_id' => $resourceId],
+            ]);
+        } else {
+            $executor->dispatch($viewer, [
+                'channel' => 'laravel-ai',
+                'source_event_id' => $eventId,
+                'prompt' => 'Change payment days in 4.2 from 15 to 30.',
+                'resource_id' => $resourceId,
+            ]);
+        }
+        $chatBridge->syncExternalRunEvents($viewer, $chatSessionId, $run->runId, [$resourceId]);
     }
 
-    if ($channel === 'agentools') {
-        $executor->dispatch($viewer, [
-            'channel' => 'agentools',
-            'source_event_id' => $eventId,
-            'scenario' => standAgentoolsReplaceScenario(),
-            'scenario_context' => ['resource_id' => $resourceId],
-        ]);
-    } else {
-        $executor->dispatch($viewer, [
-            'channel' => 'laravel-ai',
-            'source_event_id' => $eventId,
-            'prompt' => 'Change payment days in 4.2 from 15 to 30.',
-            'resource_id' => $resourceId,
-        ]);
-    }
+    $inboxEvent['chat_session_id'] = $chatSessionId;
+    $inboxEvent['run_id'] = $run->runId;
+    $inbox->insertOrIgnore($inboxKey + $inboxEvent);
+    $inbox->whereNull('run_id')->update($inboxEvent);
 
-    $chatBridge->linkAndSyncExternalRun(
-        context: $viewer,
-        channel: $channel,
-        externalSessionId: $sessionId,
-        eventId: $eventId,
-        runId: $run->runId,
-        scope: [$resourceId],
-        content: is_string($request->input('content')) ? $request->input('content') : null,
-    );
-
-    DB::table('stand_channel_inbox')
-        ->where('tenant_id', $viewer->tenantId)
-        ->where('project_scope', $viewer->projectScope)
-        ->where('effective_subject', $viewer->effectiveSubject)
-        ->where('channel', $channel)
-        ->where('event_id', $eventId)
-        ->update(['run_id' => $run->runId, 'chat_session_id' => $chatSessionId]);
-
-    return $respond(true, false, $run->runId);
+    return $respond(true, $duplicate, $run->runId);
 });

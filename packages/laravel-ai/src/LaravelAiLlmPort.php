@@ -21,6 +21,7 @@ use Laravel\Ai\Messages\AssistantMessage;
 use Laravel\Ai\Messages\Message;
 use Laravel\Ai\Messages\ToolResultMessage;
 use Laravel\Ai\Messages\UserMessage;
+use Laravel\Ai\Responses\Data\FinishReason;
 use Laravel\Ai\Responses\Data\ToolCall;
 use Laravel\Ai\Responses\Data\ToolResult;
 use Laravel\Ai\Streaming\Events\Error as StreamErrorEvent;
@@ -150,6 +151,9 @@ final readonly class LaravelAiLlmPort implements LlmPort
                     }
 
                     if ($event instanceof ToolCallEvent) {
+                        if ($priorToolCount >= $maxToolCalls) {
+                            throw new OfficeException(ErrorCode::LimitExceeded);
+                        }
                         $toolCall = $event->toolCall;
                         if (! isset($tools[$toolCall->name]) || OfficeOperation::fromToolName($toolCall->name) === null) {
                             throw OfficeException::resourceUnavailable();
@@ -168,6 +172,10 @@ final readonly class LaravelAiLlmPort implements LlmPort
 
                         return;
                     }
+                }
+
+                if ($stepStream->getReturn()?->finishReason !== FinishReason::Stop) {
+                    throw OfficeException::temporarilyUnavailable();
                 }
 
                 yield ['type' => 'finish'];
