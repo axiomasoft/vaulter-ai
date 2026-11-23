@@ -498,6 +498,7 @@ final readonly class Runs
         ?string $safeError = null,
         ?int $responseBytes = null,
         ?int $latencyMs = null,
+        bool $clearSafeError = false,
     ): OfficeRunStep {
         if (! $this->isLowerUuid($runId)) {
             throw OfficeException::invalidInput('run_id must be a valid UUID.');
@@ -513,6 +514,7 @@ final readonly class Runs
             $safeError,
             $responseBytes,
             $latencyMs,
+            $clearSafeError,
         ): OfficeRunStep {
             if ($this->scopedRunQuery($context)->where('run_id', $runId)->first(['run_id']) === null) {
                 throw OfficeException::resourceUnavailable();
@@ -536,7 +538,7 @@ final readonly class Runs
             if ($receiptId !== null) {
                 $updates['receipt_id'] = $receiptId;
             }
-            if ($safeError !== null) {
+            if ($safeError !== null || $clearSafeError) {
                 $updates['safe_error'] = $safeError;
             }
             if ($responseBytes !== null) {

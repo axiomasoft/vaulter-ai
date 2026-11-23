@@ -203,7 +203,7 @@ test('ScenarioRunner drives OfficeToolPort through read->prepare->commit->verify
         ->and($runs->findCommitStepByProposal($fixture->context, $run->runId, (string) $result->stepResults['prepare']['proposal_id'])?->operation)->toBe(OfficeOperation::Commit);
 });
 
-test('AgenToolsOfficeExecutor preserves awaiting_approval and resumes the same run through verify after approval (F6)', function (): void {
+test('AgenToolsOfficeExecutor preserves awaiting_approval and resumes the same run through verify after approval (F6)', function (bool $objectArguments): void {
     $fixture = new TextCommandFixture($this->app, automatic: false);
     Config::set('vaulter-ai.profiles.documents', [
         'executor' => 'agentools',
@@ -254,7 +254,7 @@ test('AgenToolsOfficeExecutor preserves awaiting_approval and resumes the same r
                     'resource_id' => '$ctx.resource_id',
                     'command' => '"text.replace_exact@1"',
                     'read_token' => '$steps.read_block.read_token',
-                    'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+                    'arguments' => '$ctx.command_args',
                 ],
             ],
             [
@@ -284,9 +284,12 @@ test('AgenToolsOfficeExecutor preserves awaiting_approval and resumes the same r
     $runs = $this->app->make(Runs::class);
     $sourceEventId = 'evt-human-scenario-1';
 
-    $first = $executor->runScenario($fixture->context, 'agentools', $sourceEventId, $scenario, [
+    $commandArgs = ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'];
+    $scenarioContext = [
         'resource_id' => $fixture->node->id,
-    ]);
+        'command_args' => $objectArguments ? (object) $commandArgs : $commandArgs,
+    ];
+    $first = $executor->runScenario($fixture->context, 'agentools', $sourceEventId, $scenario, $scenarioContext);
     $pausedRun = $runs->createOrFind($fixture->context, 'agentools', $sourceEventId, 'rev-at-human-1', []);
     expect($first->outcome)->toBe(ScenarioOutcome::Failed)
         ->and($pausedRun->state)->toBe('awaiting_approval');
@@ -316,9 +319,7 @@ test('AgenToolsOfficeExecutor preserves awaiting_approval and resumes the same r
     expect($resolver->resolve(new CommandScope($fixture->context, $fixture->node->id, $commandId), $proposalId, $digest, $approverContext, true))->toBeTrue();
 
     // Retry the exact same source event -> resumes the awaiting_approval run and reaches verify.
-    $resumed = $executor->runScenario($fixture->context, 'agentools', $sourceEventId, $scenario, [
-        'resource_id' => $fixture->node->id,
-    ]);
+    $resumed = $executor->runScenario($fixture->context, 'agentools', $sourceEventId, $scenario, $scenarioContext);
     $completedRun = $runs->find($fixture->context, $pausedRun->runId);
 
     expect($resumed->outcome)->toBe(ScenarioOutcome::Completed)
@@ -330,4 +331,4 @@ test('AgenToolsOfficeExecutor preserves awaiting_approval and resumes the same r
     expect($owner->table('v_ai_text_commands')->count())->toBe(1)
         ->and($owner->table('v_outbox')->where('type', 'office.text_command_committed')->count())->toBe(1)
         ->and($runs->listSteps($fixture->context, $pausedRun->runId))->toHaveCount(4);
-});
+})->with(['array arguments' => false, 'object arguments' => true]);

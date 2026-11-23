@@ -8,14 +8,18 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Laravel\Ai\Responses\Data\ToolCall;
 use Symfony\Component\Process\Process;
+use Vaulter\Ai\Core\Actions\ResolveProposal;
+use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Contracts\RunContextResolver;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandScope;
+use Vaulter\Ai\Core\Data\OfficeRequest;
+use Vaulter\Ai\Core\Data\OfficeResponse;
+use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
+use Vaulter\Ai\Core\Persistence\ApprovedDispatches;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
-use Vaulter\Ai\Core\Persistence\OwnerRoutes;
-use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\LaravelAi\ExecuteOfficeRun;
 use Vaulter\Ai\LaravelAi\LaravelOfficeExecutor;
@@ -318,7 +322,7 @@ test('worker SIGKILL after owner commit resumes via office.status with a new too
         ->and($fixture->snapshot()->stateVersion)->toBe(2);
 });
 
-test('resumeStep recovers both pre-route crash (operation_unknown -> replay same command_id) and post-commit unsettled route via office.status', function (): void {
+test('resumeStep recovers a pre-route crash by replaying the saved command and recovers a settled receipt via office.status', function (): void {
     $fixture = new TextCommandFixture($this->app, automatic: true);
     configureDeterministicLaravelAi($this->app, $fixture);
 
@@ -357,6 +361,53 @@ test('resumeStep recovers both pre-route crash (operation_unknown -> replay same
     $again = $coordinator->resumeStep($fixture->context, $run->runId, $step->stepId);
     expect($again['step']->receiptId)->toBe($resumed?->receiptId)
         ->and($owner->table('v_ai_text_commands')->count())->toBe(1);
+});
+
+test('resumeStep rejects a competing commit bound after it looked up the saved command route (F1)', function (): void {
+    $fixture = new TextCommandFixture($this->app);
+    configureDeterministicLaravelAi($this->app, $fixture);
+    $runs = $this->app->make(Runs::class);
+
+    $proposal = $fixture->prepare('15', '30');
+    $competingProposal = $fixture->prepare('15', '45');
+    $run = $runs->createOrFind($fixture->context, 'laravel-ai', 'evt-f1-competing-route', 'rev-1', ['prompt' => 'edit']);
+    $commandId = 'cmd-f1-competing-route';
+    $step = $runs->beginCommitStep(
+        context: $fixture->context,
+        runId: $run->runId,
+        resourceId: $fixture->node->id,
+        proposalId: $proposal->proposal_id,
+        digest: $proposal->digest,
+        initialCommandId: $commandId,
+        ownerKey: 'documents.single_text@1',
+    );
+
+    // Interleave the competing commit after the coordinator saw the empty route, before Office handles its request.
+    $office = $this->app->make(Office::class);
+    $competingRequest = new OfficeRequest(1, OfficeOperation::Commit, (object) (
+        ['resource_id' => $fixture->node->id] + $fixture->commitInput($competingProposal, $commandId)
+    ));
+    $interleavedOffice = new class($office, $competingRequest) implements Office
+    {
+        public ?OfficeResponse $competingResponse = null;
+
+        public function __construct(private readonly Office $office, private readonly OfficeRequest $competingRequest) {}
+
+        public function handle(CallContext $context, OfficeRequest $request): OfficeResponse
+        {
+            $this->competingResponse ??= $this->office->handle($context, $this->competingRequest);
+
+            return $this->office->handle($context, $request);
+        }
+    };
+    $coordinator = $this->app->makeWith(StepCommitCoordinator::class, ['office' => $interleavedOffice]);
+
+    $resumed = $coordinator->resumeStep($fixture->context, $run->runId, $step->stepId);
+
+    expect($interleavedOffice->competingResponse?->errorCode)->toBeNull()
+        ->and($interleavedOffice->competingResponse?->result->state ?? null)->toBe('committed')
+        ->and($resumed['response']->errorCode)->toBe(ErrorCode::IdempotencyConflict)
+        ->and($resumed['step']->receiptId)->toBeNull();
 });
 
 test('worker SIGKILL reconciles saved commit BEFORE prompting so a fresh read+prepare fake cannot double-commit (F2)', function (): void {
@@ -479,48 +530,36 @@ test('worker SIGKILL reconciles saved commit BEFORE prompting so a fresh read+pr
 });
 
 test('explicit resumeStep job keeps recovery scheduled under active dispatch lease and settles parent run when owner commits (F3)', function (): void {
-    $fixture = new TextCommandFixture($this->app, automatic: true);
-    configureDeterministicLaravelAi($this->app, $fixture);
+    Queue::fake();
+    $fixture = new TextCommandFixture($this->app, automatic: false);
+    configureDeterministicLaravelAi($this->app, $fixture, approval: 'human');
 
     $executor = $this->app->make(LaravelOfficeExecutor::class);
+    $coordinator = $this->app->make(StepCommitCoordinator::class);
     $runs = $this->app->make(Runs::class);
-    $routes = $this->app->make(OwnerRoutes::class);
-    $proposals = $this->app->make(Proposals::class);
-    $db = $this->app->make(OfficeDatabase::class);
     $owner = $this->app->make(VaulterDatabase::class)->connection();
 
     $prep = $fixture->prepare('15', '30', 'p42');
     $run = $runs->createOrFind($fixture->context, 'laravel-ai', 'evt-f3-active-lease', 'rev-1', ['prompt' => 'edit']);
-    $step = $runs->beginCommitStep(
+    $commandId = 'cmd-f3-lease-1';
+    $pending = $coordinator->executeOrResume(
         context: $fixture->context,
         runId: $run->runId,
         resourceId: $fixture->node->id,
         proposalId: $prep->proposal_id,
         digest: $prep->digest,
-        initialCommandId: 'cmd-f3-lease-1',
-        ownerKey: 'documents.single_text@1',
+        preferredCommandId: $commandId,
     );
+    $step = $pending['step'];
+    expect($pending['response']->errorCode)->toBe(ErrorCode::ApprovalRequired)
+        ->and($step?->state)->toBe('waiting')
+        ->and($step?->safeError)->toBe(ErrorCode::ApprovalRequired->value);
+    expect($executor->reconcileRunState($fixture->context, $run->runId)->state)->toBe('awaiting_approval');
 
-    $stored = $proposals->find($fixture->context, $fixture->node->id, $prep->proposal_id);
-    expect($stored)->not->toBeNull();
-    $scope = new CommandScope($fixture->context, $fixture->node->id, 'cmd-f3-lease-1');
-    $routes->bind($scope, $stored->plan);
-
-    // Insert an active dispatch lease on v_ai_dispatches (simulating DispatchApprovedCommand running on another worker).
-    $now = $this->fixedClock->now();
-    $db->transaction(function () use ($db, $prep, $now): void {
-        $db->query('ai_dispatches')->insert([
-            'event_id' => $db->newUuid(),
-            'proposal_id' => $prep->proposal_id,
-            'state' => 'leased',
-            'attempts' => 1,
-            'available_at' => $db->utcTimestamp($now),
-            'lease_token' => $db->newUuid(),
-            'lease_until' => $db->utcTimestamp($now->modify('+60 seconds')),
-        ]);
-    }, $fixture->context->tenantId);
-
-    Queue::fake();
+    $scope = new CommandScope($fixture->context, $fixture->node->id, $commandId);
+    $resolver = $this->app->make(ResolveProposal::class);
+    expect($resolver->resolve($scope, $prep->proposal_id, $prep->digest, $fixture->context, true))->toBeTrue();
+    expect($this->app->make(ApprovedDispatches::class)->claim($scope, $prep->proposal_id))->not->toBeNull();
 
     // Attempt 1: active dispatch lease -> step moves to waiting, parent run stays in reconcile, follow-up job scheduled!
     $resumeJob1 = new ExecuteOfficeRun($fixture->context->tenantId, $run->runId, $step->stepId);
@@ -529,6 +568,7 @@ test('explicit resumeStep job keeps recovery scheduled under active dispatch lea
     $afterFirst = $runs->findStep($fixture->context, $run->runId, $step->stepId);
     $runAfterFirst = $runs->find($fixture->context, $run->runId);
     expect($afterFirst?->state)->toBe('waiting')
+        ->and($afterFirst?->safeError)->toBeNull()
         ->and($runAfterFirst?->state)->toBe('reconcile')
         ->and($owner->table('v_ai_text_commands')->count())->toBe(0);
 
@@ -540,7 +580,7 @@ test('explicit resumeStep job keeps recovery scheduled under active dispatch lea
     $commitOutcome = $fixture->call(OfficeOperation::Commit, [
         'proposal_id' => $prep->proposal_id,
         'digest' => $prep->digest,
-        'command_id' => 'cmd-f3-lease-1',
+        'command_id' => $commandId,
     ]);
     expect($commitOutcome->ok)->toBeTrue();
     $receiptId = (string) $commitOutcome->result->receipt_id;

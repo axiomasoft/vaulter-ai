@@ -43,8 +43,8 @@ final readonly class StepCommitCoordinator
 
     /**
      * Execute or resume a commit step inside a persisted run.
-     * On any retry (including a new provider toolCallId), extracts the saved command_id
-     * and queries office.status first before considering a commit replay.
+     * On retry (including a new provider toolCallId), reuses the saved command_id
+     * and queries office.status once the command is bound to the saved proposal.
      *
      * @return array{step: ?OfficeRunStep, response: OfficeResponse}
      */
@@ -234,7 +234,7 @@ final readonly class StepCommitCoordinator
     }
 
     /**
-     * Resume a previously persisted commit step by querying office.status first.
+     * Resume a previously persisted commit step using its saved command ID.
      *
      * @return array{step: OfficeRunStep, response: OfficeResponse}
      */
@@ -293,6 +293,11 @@ final readonly class StepCommitCoordinator
                 'step' => $step,
                 'response' => $validationError,
             ];
+        }
+
+        if ($route === null) {
+            // Commit validates ownership of the route if another proposal binds this command ID first.
+            return $this->dispatchCommit($context, $step, $resourceId, $proposalId, $effectiveDigest, $startedAt);
         }
 
         $statusResponse = $this->office->handle($context, new OfficeRequest(
@@ -358,6 +363,7 @@ final readonly class StepCommitCoordinator
                         compactResult: $this->decodeResult($statusResponse),
                         responseBytes: $statusResponse->wireBytes(),
                         latencyMs: $this->elapsedMs($startedAt),
+                        clearSafeError: true,
                     );
 
                     return [

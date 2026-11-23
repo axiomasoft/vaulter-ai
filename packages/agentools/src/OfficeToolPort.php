@@ -128,16 +128,16 @@ final readonly class OfficeToolPort implements ToolPort
             return $this->handleCommit($arguments, $idempotencyKey);
         }
 
+        $input = $this->toStdClass($arguments);
         if ($operation === OfficeOperation::Prepare && $this->runId !== null) {
-            $replayed = $this->replayPreparedStepIfPresent($arguments, $idempotencyKey);
+            $replayed = $this->replayPreparedStepIfPresent($input, $idempotencyKey);
             if ($replayed !== null) {
                 return $replayed;
             }
         }
 
-        $input = $this->toStdClass($arguments);
         $response = $this->office->handle($this->context, new OfficeRequest(1, $operation, $input));
-        $this->recordStep($operation, $arguments, $response, $idempotencyKey, $startedAt);
+        $this->recordStep($operation, $input, $response, $idempotencyKey, $startedAt);
 
         return $this->toToolResult($response);
     }
@@ -145,10 +145,8 @@ final readonly class OfficeToolPort implements ToolPort
     /**
      * Replay a previously persisted successful office.prepare step within the same run/action key
      * (e.g. when resuming a ScenarioRunner run after human approval) after verifying live ACL & arguments.
-     *
-     * @param  array<string, mixed>  $arguments
      */
-    private function replayPreparedStepIfPresent(array $arguments, string $idempotencyKey): ?ToolExecutionResult
+    private function replayPreparedStepIfPresent(stdClass $input, string $idempotencyKey): ?ToolExecutionResult
     {
         if ($this->context === null || $this->runId === null) {
             return null;
@@ -165,9 +163,9 @@ final readonly class OfficeToolPort implements ToolPort
             return null;
         }
 
-        $resourceId = $arguments['resource_id'] ?? null;
-        $command = $arguments['command'] ?? null;
-        $cmdArgs = $arguments['arguments'] ?? null;
+        $resourceId = $input->resource_id ?? null;
+        $command = $input->command ?? null;
+        $cmdArgs = $input->arguments ?? null;
         if (! is_string($resourceId) || $resourceId === '' || ! is_string($command) || $command === '') {
             return null;
         }
@@ -175,10 +173,14 @@ final readonly class OfficeToolPort implements ToolPort
         $savedResourceId = $existing->resumeInput['resource_id'] ?? $existing->resourceId;
         $savedCommand = $existing->resumeInput['command'] ?? null;
         $savedArgs = $existing->resumeInput['arguments'] ?? null;
+        if (is_array($savedArgs)) {
+            $savedArgs = json_encode($savedArgs, JSON_THROW_ON_ERROR);
+        }
         if (
             ($savedResourceId !== null && $savedResourceId !== $resourceId)
             || ($savedCommand !== null && $savedCommand !== $command)
-            || (is_array($savedArgs) && $savedArgs !== $cmdArgs)
+            || ! $cmdArgs instanceof stdClass
+            || (is_string($savedArgs) && $savedArgs !== json_encode($cmdArgs, JSON_THROW_ON_ERROR))
         ) {
             return $this->toToolResult($this->errorMapper->toResponse(OfficeOperation::Prepare, ErrorCode::IdempotencyConflict));
         }
@@ -275,12 +277,9 @@ final readonly class OfficeToolPort implements ToolPort
         return $this->toToolResult($outcome['response']);
     }
 
-    /**
-     * @param  array<string, mixed>  $arguments
-     */
     private function recordStep(
         OfficeOperation $operation,
-        array $arguments,
+        stdClass $input,
         OfficeResponse $response,
         string $idempotencyKey,
         int $startedAt,
@@ -293,9 +292,9 @@ final readonly class OfficeToolPort implements ToolPort
             return;
         }
 
-        $resourceId = is_string($arguments['resource_id'] ?? null) ? $arguments['resource_id'] : null;
-        $commandId = is_string($arguments['command_id'] ?? null) ? $arguments['command_id'] : null;
-        $receiptId = is_string($arguments['receipt_id'] ?? null) ? $arguments['receipt_id'] : null;
+        $resourceId = is_string($input->resource_id ?? null) ? $input->resource_id : null;
+        $commandId = is_string($input->command_id ?? null) ? $input->command_id : null;
+        $receiptId = is_string($input->receipt_id ?? null) ? $input->receipt_id : null;
         $proposalId = null;
 
         if ($response->ok && $response->result instanceof stdClass) {
@@ -321,11 +320,13 @@ final readonly class OfficeToolPort implements ToolPort
             }
         }
 
+        $cmdArgs = $input->arguments ?? null;
         $resumeInput = $operation === OfficeOperation::Prepare
             ? [
                 'resource_id' => $resourceId,
-                'command' => is_string($arguments['command'] ?? null) ? $arguments['command'] : null,
-                'arguments' => is_array($arguments['arguments'] ?? null) ? $arguments['arguments'] : [],
+                'command' => is_string($input->command ?? null) ? $input->command : null,
+                // Keep the JSON shape through the associative decode of encrypted resume input.
+                'arguments' => $cmdArgs instanceof stdClass ? json_encode($cmdArgs, JSON_THROW_ON_ERROR) : null,
             ]
             : null;
 
