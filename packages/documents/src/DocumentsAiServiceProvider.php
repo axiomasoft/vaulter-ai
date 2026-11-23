@@ -5,15 +5,20 @@ declare(strict_types=1);
 namespace Vaulter\Ai\Documents;
 
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
+use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Support\ServiceProvider;
 use Override;
+use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Contracts\TransactionRunner;
+use Vaulter\Ai\Core\Persistence\RegistryCommandWriteCapability;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Documents\Commands\ReplaceExact;
 use Vaulter\Ai\Documents\Console\RebuildTextIndex;
 use Vaulter\Ai\Documents\Contracts\DocumentScopeResolver;
+use Vaulter\Ai\Documents\Host\DocumentsCommandWriteCapability;
+use Vaulter\Ai\Documents\Host\TextDocumentAccess;
 use Vaulter\Ai\Documents\Host\VaulterResourceDirectory;
 use Vaulter\Ai\Documents\Persistence\TextCommands;
 use Vaulter\Ai\Documents\Persistence\VaulterTransactionRunner;
@@ -60,6 +65,14 @@ final class DocumentsAiServiceProvider extends ServiceProvider
         $this->app->singleton(ReplaceExact::class);
 
         $this->app->singleton(ResourceDirectory::class, VaulterResourceDirectory::class);
+        $this->app->singleton(DocumentsCommandWriteCapability::class, static fn (Container $app): DocumentsCommandWriteCapability => new DocumentsCommandWriteCapability(
+            registry: $app->make(OfficeRegistry::class),
+            access: $app->make(TextDocumentAccess::class),
+            live: $app->bound(LiveTextOwner::class) ? $app->make(LiveTextOwner::class) : null,
+            fallback: $app->make(RegistryCommandWriteCapability::class),
+            directory: $app->make(ResourceDirectory::class),
+        ));
+        $this->app->singleton(CommandWriteCapability::class, DocumentsCommandWriteCapability::class);
 
         if (class_exists(VaulterPluginRegistrar::class)) {
             VaulterPluginRegistrar::register($this->app, AiDocumentsModule::class, dirname(__DIR__).'/composer.json');

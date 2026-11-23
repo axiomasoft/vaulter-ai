@@ -88,3 +88,58 @@ $renderWorkspacePanel = static function (
 
 Route::get('/office/workspace', $renderWorkspacePanel)->name('stand.proposals.workspace');
 Route::get('/stand/proposals', $renderWorkspacePanel)->name('stand.proposals.index');
+
+Route::get('/_stand-assets/vue.esm-browser.prod.js', static function (): Response {
+    $path = dirname(__DIR__, 5).'/node_modules/vue/dist/vue.esm-browser.prod.js';
+    if (! is_file($path)) {
+        abort(404);
+    }
+
+    return response((string) file_get_contents($path), 200, [
+        'Content-Type' => 'application/javascript; charset=utf-8',
+        'Cache-Control' => 'no-store',
+    ]);
+});
+
+Route::get('/_stand-assets/vaulter-ai-vue.js', static function (): Response {
+    $path = dirname(__DIR__, 5).'/packages/vue/dist/vaulter-ai-vue.js';
+    if (! is_file($path)) {
+        abort(404);
+    }
+
+    return response((string) file_get_contents($path), 200, [
+        'Content-Type' => 'application/javascript; charset=utf-8',
+        'Cache-Control' => 'no-store',
+    ]);
+});
+
+Route::get('/office/chat', static function (
+    Request $request,
+    CallContextResolver $contexts,
+): Response|JsonResponse {
+    $viewer = $contexts->resolve($request);
+    if ($viewer === null) {
+        return response()->json(['error' => ['code' => 'authentication_required']], 401);
+    }
+
+    $resourceId = is_string($request->query('resource_id')) && $request->query('resource_id') !== ''
+        ? $request->query('resource_id')
+        : '';
+    $sessionId = is_string($request->query('session_id')) && $request->query('session_id') !== ''
+        ? $request->query('session_id')
+        : '';
+    $blockId = is_string($request->query('block_id')) && $request->query('block_id') !== ''
+        ? $request->query('block_id')
+        : '';
+    $excerpt = is_string($request->query('excerpt')) && $request->query('excerpt') !== ''
+        ? $request->query('excerpt')
+        : '';
+
+    return response()->view('chat', [
+        'viewer' => $viewer,
+        'resourceId' => $resourceId,
+        'sessionId' => $sessionId,
+        'blockId' => $blockId,
+        'excerpt' => $excerpt,
+    ])->header('Cache-Control', 'private, no-store');
+})->name('stand.chat');

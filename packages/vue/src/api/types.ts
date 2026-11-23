@@ -196,3 +196,122 @@ export interface ResumeRunOptions {
   argumentsByResource?: Record<string, Record<string, unknown>>
   rereadOnly?: boolean
 }
+
+export interface ChatTextBlockSelection {
+  kind: 'text_block'
+  resource_id: string
+  block_id: string
+  excerpt?: string | null
+  start_utf16?: number | null
+  end_utf16?: number | null
+}
+
+export interface ChatSheetRangeSelection {
+  kind: 'sheet_range'
+  resource_id: string
+  sheet_id: string
+  table_id: string
+  row_ids?: string[] | null
+  columns?: string[] | null
+}
+
+export type ChatEditorSelection = ChatTextBlockSelection | ChatSheetRangeSelection
+
+export interface ChatProviderStatus {
+  configured: boolean
+  connection: string
+  driver: string | null
+  model: string | null
+  hint: string | null
+}
+
+export interface ChatRunSummary {
+  run_id: string
+  state: string
+  channel: string
+  created_at: string
+  updated_at: string
+}
+
+export interface VisibleChatToolCall {
+  call_id: string
+  run_id: string
+  step_id: number
+  tool: string
+  tool_version: string
+  state: string
+  resource_id: string | null
+  proposal_id: string | null
+  command_id: string | null
+  receipt_id: string | null
+  hidden?: false
+}
+
+export interface HiddenChatToolCall {
+  call_id: string
+  run_id: string
+  hidden: true
+}
+
+export type ChatToolCallSummary = VisibleChatToolCall | HiddenChatToolCall
+
+export interface VisibleChatMessage {
+  message_id: string
+  role: 'user' | 'assistant' | string
+  run_id: string | null
+  content: string
+  selection?: ChatEditorSelection
+  hidden?: false
+}
+
+export interface HiddenChatMessage {
+  message_id: string
+  hidden: true
+}
+
+export type ChatMessage = VisibleChatMessage | HiddenChatMessage
+
+export interface ChatSessionDetails {
+  session_id: string
+  state: string
+  profile_revision: string
+  last_seq: number
+  provider: ChatProviderStatus
+  runs: ChatRunSummary[]
+  tool_calls: ChatToolCallSummary[]
+  messages: ChatMessage[]
+}
+
+export interface CreateChatSessionInput {
+  retentionSeconds?: number
+}
+
+export interface PostChatMessageInput {
+  messageId: string
+  content: string
+  resourceIds?: string[]
+  selection?: ChatEditorSelection | null
+}
+
+export interface PostChatMessageResult {
+  message_id: string
+  run_id: string
+}
+
+export type ChatSseEventType =
+  | 'assistant.delta'
+  | 'assistant.interrupted'
+  | 'tool.requested'
+  | 'approval.required'
+  | 'tool.committed'
+  | 'tool.verified'
+  | 'run.finished'
+  | 'hidden'
+  | 'reset'
+  | (string & {})
+
+export interface ChatSseEvent {
+  seq: number | null
+  type: ChatSseEventType
+  data: Record<string, unknown>
+}

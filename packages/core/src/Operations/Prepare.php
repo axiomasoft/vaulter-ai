@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vaulter\Ai\Core\Operations;
 
 use stdClass;
+use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
@@ -26,6 +27,7 @@ final readonly class Prepare
         private HostPolicy $policy,
         private ReadTokens $tokens,
         private Proposals $proposals,
+        private ?CommandWriteCapability $writeCapability = null,
     ) {}
 
     public function handle(CallContext $context, OfficeRequest $request): OfficeResponse
@@ -45,6 +47,9 @@ final readonly class Prepare
         if ($resource === null || $resource->resourceType !== $descriptor->resourceType
             || ! $this->policy->allowsCommand($context, $resource, $name)) {
             throw OfficeException::resourceUnavailable();
+        }
+        if ($this->writeCapability !== null && ! $this->writeCapability->canWrite($context, $resource, $descriptor)) {
+            throw OfficeException::unsupportedContent();
         }
 
         $token = $this->tokens->verify($context, $rawToken, $resourceId);

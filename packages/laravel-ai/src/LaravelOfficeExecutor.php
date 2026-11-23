@@ -13,8 +13,10 @@ use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Testing\Fakes\BusFake;
 use stdClass;
 use Throwable;
+use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\Office;
+use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Contracts\ResumableOfficeExecutor;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\OfficeRequest;
@@ -27,6 +29,7 @@ use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
+use Vaulter\Ai\Core\Registry\OfficeRegistry;
 
 /**
  * Laravel AI executor binding all seven Office tools from the core catalog into an isolated OfficeAgent
@@ -47,6 +50,9 @@ final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
         private ConfigRepository $config,
         private Dispatcher $bus,
         private Container $container,
+        private ?OfficeRegistry $registry = null,
+        private ?ResourceDirectory $directory = null,
+        private ?CommandWriteCapability $writeCapability = null,
     ) {}
 
     public function key(): string
@@ -107,15 +113,35 @@ final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
     }
 
     /**
-     * Create all seven OfficeTool instances for the active CallContext and current HostProfile.
+     * Create authorized OfficeTool instances for the active CallContext and current HostProfile.
+     * When $resourceIds is supplied, write tools are omitted unless at least one scoped resource
+     * has live Edit permission, an installed command version, and 3.5 readiness for journal mode.
      *
+     * @param  list<string>  $resourceIds
      * @return list<OfficeTool>
      */
-    public function toolsFor(CallContext $context, ?string $runId = null): array
+    public function toolsFor(CallContext $context, ?string $runId = null, array $resourceIds = []): array
     {
         $profile = $this->policy->profile($context);
+        $allowsWrites = true;
+        if ($resourceIds !== [] && $this->registry !== null && $this->directory !== null) {
+            $allowsWrites = false;
+            $accessible = $this->directory->filterAccessible($context, $resourceIds);
+            foreach ($accessible as $entry) {
+                foreach ($this->registry->allowedDescriptors($context, $this->policy, $entry, $this->writeCapability) as $descriptor) {
+                    if ($this->directory->findAccessible($context, $entry->resourceId, $descriptor->requiredPermission) !== null) {
+                        $allowsWrites = true;
+                        break 2;
+                    }
+                }
+            }
+        }
+
         $tools = [];
         foreach (OfficeOperation::cases() as $operation) {
+            if (! $allowsWrites && in_array($operation, [OfficeOperation::Describe, OfficeOperation::Prepare, OfficeOperation::Commit], true)) {
+                continue;
+            }
             $tools[] = new OfficeTool(
                 operation: $operation,
                 context: $context,
@@ -125,6 +151,9 @@ final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
                 commits: $this->commits,
                 errorMapper: $this->errorMapper,
                 runId: $runId,
+                registry: $this->registry,
+                directory: $this->directory,
+                writeCapability: $this->writeCapability,
             );
         }
 
@@ -207,7 +236,19 @@ final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
             }
 
             $prompt = is_string($run->input['prompt'] ?? null) ? $run->input['prompt'] : '';
-            $agent = $this->buildAgent($context, $runId, priorSteps: $priorSteps);
+            $resourceId = is_string($run->input['resource_id'] ?? null) && $run->input['resource_id'] !== ''
+                ? $run->input['resource_id']
+                : null;
+            $agent = new OfficeAgent(
+                context: $context,
+                profile: $this->policy->profile($context),
+                tools: $this->toolsFor($context, $runId, $resourceId !== null ? [$resourceId] : []),
+                config: $this->config,
+                providerConnection: $this->policy->profile($context)->providerConnection,
+                modelName: null,
+                timeoutSeconds: $this->toolTimeout(),
+                priorSteps: $priorSteps,
+            );
             $agent->prompt($prompt);
 
             $steps = $this->runs->listSteps($context, $runId);

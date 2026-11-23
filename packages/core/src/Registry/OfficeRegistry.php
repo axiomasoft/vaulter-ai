@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vaulter\Ai\Core\Registry;
 
 use Vaulter\Ai\Core\Contracts\CommandOwner;
+use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\OfficeCommand;
 use Vaulter\Ai\Core\Contracts\OfficeExecutor;
@@ -132,8 +133,12 @@ final class OfficeRegistry
     /**
      * @return list<CommandDescriptor>
      */
-    public function allowedDescriptors(CallContext $context, HostPolicy $policy, ResourceEntry $resource): array
-    {
+    public function allowedDescriptors(
+        CallContext $context,
+        HostPolicy $policy,
+        ResourceEntry $resource,
+        ?CommandWriteCapability $writeCapability = null,
+    ): array {
         $allowed = [];
         foreach ($policy->allowedCommands($context, $resource) as $name) {
             $cmd = $this->command($name);
@@ -141,9 +146,13 @@ final class OfficeRegistry
                 continue;
             }
             $descriptor = $cmd->descriptor();
-            if ($descriptor->resourceType === $resource->resourceType && $policy->allowsCommand($context, $resource, $name)) {
-                $allowed[] = $descriptor;
+            if ($descriptor->resourceType !== $resource->resourceType || ! $policy->allowsCommand($context, $resource, $name)) {
+                continue;
             }
+            if ($writeCapability !== null && ! $writeCapability->canWrite($context, $resource, $descriptor)) {
+                continue;
+            }
+            $allowed[] = $descriptor;
         }
 
         return $allowed;

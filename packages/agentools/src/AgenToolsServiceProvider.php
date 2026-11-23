@@ -8,11 +8,12 @@ use AgenTools\Contracts\ToolDescriptorRegistry;
 use AgenTools\Contracts\ToolPort;
 use Illuminate\Support\ServiceProvider;
 use Override;
+use Vaulter\Ai\Core\Contracts\LlmPort;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 
 /**
  * Service provider for axiomasoft/vaulter-ai-agentools.
- * Opt-in adapter wiring OfficeToolPort, OfficeToolDescriptorRegistry, and ActionKeyMap.
+ * Opt-in adapter wiring OfficeToolPort, OfficeToolDescriptorRegistry, ActionKeyMap, and AgenToolsLlmPort.
  */
 final class AgenToolsServiceProvider extends ServiceProvider
 {
@@ -27,6 +28,8 @@ final class AgenToolsServiceProvider extends ServiceProvider
         $this->app->singleton(OfficeToolPort::class);
         $this->app->singleton(ToolPort::class, OfficeToolPort::class);
         $this->app->singleton(AgenToolsOfficeExecutor::class);
+        $this->app->singleton(AgenToolsLlmPort::class);
+        $this->app->singletonIf(LlmPort::class, AgenToolsLlmPort::class);
     }
 
     public function boot(): void

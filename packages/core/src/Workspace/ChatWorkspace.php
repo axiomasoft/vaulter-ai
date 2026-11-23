@@ -10,6 +10,7 @@ use Illuminate\Support\Str;
 use RuntimeException;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
+use Vaulter\Ai\Core\Contracts\ProviderSecretStore;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\ResourceEntry;
@@ -26,6 +27,12 @@ final readonly class ChatWorkspace
 {
     private const int PAGE_SIZE = 100;
 
+    private const int MAX_SELECTION_EXCERPT_BYTES = 2048;
+
+    private const int MAX_SELECTION_ID_BYTES = 128;
+
+    private const int MAX_SELECTION_ITEMS = 20;
+
     public function __construct(
         private OfficeDatabase $db,
         private Runs $runs,
@@ -34,6 +41,7 @@ final readonly class ChatWorkspace
         private ResourceDirectory $resources,
         private HostPolicy $policy,
         private Dispatcher $dispatcher,
+        private ?ProviderSecretStore $secretStore = null,
     ) {}
 
     /** Host entry point for opening a chat in an already authenticated workspace. */
@@ -68,24 +76,15 @@ final readonly class ChatWorkspace
         }, $context->tenantId);
     }
 
-    /** @param list<string> $scope */
-    public function post(CallContext $context, string $sessionId, string $messageId, string $content, array $scope): string
+    /**
+     * @param  list<string>  $scope
+     * @param  array<string, mixed>|null  $selection
+     */
+    public function post(CallContext $context, string $sessionId, string $messageId, string $content, array $scope, ?array $selection = null): string
     {
-        if ($messageId === '' || strlen($messageId) > 255 || str_contains($messageId, "\0")
-            || ! mb_check_encoding($messageId, 'UTF-8') || trim($content) === ''
-            || strlen($content) > 65536 || ! mb_check_encoding($content, 'UTF-8') || count($scope) > 20) {
-            throw OfficeException::invalidInput();
-        }
-        foreach ($scope as $id) {
-            if ($id === '' || strlen($id) > 255 || str_contains($id, "\0") || ! mb_check_encoding($id, 'UTF-8')) {
-                throw OfficeException::invalidInput();
-            }
-        }
-        $scope = array_values(array_unique($scope));
-        sort($scope, SORT_STRING);
-        $digest = hash('sha256', ProposalDigest::canonicalize((object) ['content' => $content, 'resource_ids' => $scope]), true);
+        [$scope, $normalizedSelection, $digest] = $this->prepareUserMessagePayload($messageId, $content, $scope, $selection);
 
-        return $this->db->transaction(function () use ($context, $sessionId, $messageId, $content, $scope, $digest): string {
+        return $this->db->transaction(function () use ($context, $sessionId, $messageId, $content, $scope, $normalizedSelection, $digest): string {
             $session = $this->session($context, $sessionId, lock: true);
             if (! $this->canRead($scope, $this->accessible($context, $scope))) {
                 throw OfficeException::resourceUnavailable();
@@ -113,7 +112,7 @@ final readonly class ChatWorkspace
                     ['session_id' => $sessionId, 'profile' => $context->profile],
                     max(1, ($until?->getTimestamp() ?? 0) - $now->getTimestamp()),
                 );
-                $this->insertMessage($context, $sessionId, $messageId, $run->runId, 'user', $content, $scope, $digest);
+                $this->insertMessage($context, $sessionId, $messageId, $run->runId, 'user', $content, $scope, $digest, $normalizedSelection);
                 $this->sessionQuery($context, $sessionId)->update(['updated_at' => $this->db->utcTimestamp($now)]);
             }
 
@@ -127,38 +126,305 @@ final readonly class ChatWorkspace
         }, $context->tenantId);
     }
 
-    /** @return array{session_id:string, state:string, profile_revision:string, last_seq:int, messages:list<array<string,mixed>>} */
+    /**
+     * Bind an already created external channel run (e.g. laravel-ai / agentools) into a chat session.
+     *
+     * @param  list<string>  $scope
+     * @param  array<string, mixed>|null  $selection
+     */
+    public function linkExternalRunMessage(
+        CallContext $context,
+        string $sessionId,
+        string $messageId,
+        string $runId,
+        string $content,
+        array $scope,
+        ?array $selection = null,
+    ): void {
+        [$scope, $normalizedSelection, $digest] = $this->prepareUserMessagePayload($messageId, $content, $scope, $selection);
+
+        $this->db->transaction(function () use ($context, $sessionId, $messageId, $runId, $content, $scope, $normalizedSelection, $digest): void {
+            $session = $this->session($context, $sessionId, lock: true);
+            if (! $this->canRead($scope, $this->accessible($context, $scope))) {
+                throw OfficeException::resourceUnavailable();
+            }
+
+            $message = $this->db->query('ai_chat_messages')->where('session_id', $sessionId)->where('message_id', $messageId)->first();
+            if ($message !== null) {
+                $stored = $this->db->decodeBinary(QueryRecord::raw($message, 'content_digest'));
+                if (! hash_equals($stored, $digest) || QueryRecord::str($message, 'role') !== 'user' || QueryRecord::str($message, 'run_id') !== $runId) {
+                    throw new OfficeException(ErrorCode::IdempotencyConflict);
+                }
+
+                return;
+            }
+
+            if (QueryRecord::str($session, 'state') !== 'active') {
+                throw OfficeException::preconditionFailed();
+            }
+            $this->insertMessage($context, $sessionId, $messageId, $runId, 'user', $content, $scope, $digest, $normalizedSelection);
+            $now = $this->db->clockNow($this->clock);
+            $this->sessionQuery($context, $sessionId)->update(['updated_at' => $this->db->utcTimestamp($now)]);
+        }, $context->tenantId);
+    }
+
+    /**
+     * Resolve the owning chat session and resource scope for a run linked to any chat message.
+     *
+     * @return array{session_id:string, scope:list<string>}|null
+     */
+    public function sessionBindingForRun(CallContext $context, string $runId): ?array
+    {
+        $row = $this->db->query('ai_chat_messages')
+            ->where('run_id', $runId)
+            ->where('role', 'user')
+            ->first();
+        if ($row === null) {
+            return null;
+        }
+        $sessionId = QueryRecord::str($row, 'session_id');
+        $session = $this->sessionQuery($context, $sessionId)->first();
+        if ($session === null) {
+            return null;
+        }
+
+        return [
+            'session_id' => $sessionId,
+            'scope' => $this->storedScope($row),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @param  list<string>  $scope
+     */
+    public function appendOnceForRun(CallContext $context, string $sessionId, string $runId, string $type, array $payload, array $scope): ?int
+    {
+        return $this->db->transaction(function () use ($context, $sessionId, $runId, $type, $payload, $scope): ?int {
+            $session = $this->session($context, $sessionId, lock: true);
+            if ($this->runMessage($sessionId, $runId) === null) {
+                throw OfficeException::resourceUnavailable();
+            }
+
+            $existing = $this->db->query('ai_chat_events')
+                ->where('session_id', $sessionId)
+                ->where('run_id', $runId)
+                ->where('event_type', $type)
+                ->get();
+            foreach ($existing as $row) {
+                $seq = QueryRecord::int($row, 'seq');
+                $key = QueryRecord::raw($row, 'key_id');
+                $rowScope = $this->storedScope($row);
+                $decoded = is_string($key) ? $this->cipher->decrypt(
+                    $key,
+                    $this->db->decodeBinary(QueryRecord::raw($row, 'encrypted_payload')),
+                    $this->aad($context, 'ai_chat_events', $sessionId, (string) $seq, $type, $rowScope),
+                ) : [];
+                $sameCall = ($payload['call_id'] ?? null) === ($decoded['call_id'] ?? null);
+                $sameProposal = ($payload['proposal_id'] ?? null) === ($decoded['proposal_id'] ?? null);
+                $sameState = ($payload['state'] ?? null) === ($decoded['state'] ?? null);
+                if ($sameCall && $sameProposal && $sameState) {
+                    return null;
+                }
+            }
+
+            $seq = QueryRecord::int($session, 'last_seq') + 1;
+            $aad = $this->aad($context, 'ai_chat_events', $sessionId, (string) $seq, $type, $scope);
+            $encrypted = $this->cipher->encrypt($payload, $aad);
+            $stamp = $this->db->utcTimestamp($this->db->clockNow($this->clock));
+            $this->sessionQuery($context, $sessionId)->update(['last_seq' => $seq, 'updated_at' => $stamp]);
+            $fields = [
+                'session_id' => $sessionId,
+                'seq' => $seq,
+                'run_id' => $runId,
+                'event_type' => $type,
+                'resource_scope_json' => json_encode($scope, JSON_THROW_ON_ERROR),
+                'key_id' => $encrypted['key_id'],
+                'encrypted_payload' => $this->db->binaryLiteral($encrypted['ciphertext']),
+                'created_at' => $stamp,
+            ];
+            if ($this->db->driver() !== 'pgsql') {
+                $fields['event_id'] = $this->db->newUuid();
+            }
+            $this->db->query('ai_chat_events')->insert($fields);
+
+            return $seq;
+        }, $context->tenantId);
+    }
+
+    /**
+     * @param  list<string>  $scope
+     * @param  array<string, mixed>|null  $selection
+     * @return array{0:list<string>, 1:?array<string,mixed>, 2:string}
+     */
+    private function prepareUserMessagePayload(string $messageId, string $content, array $scope, ?array $selection): array
+    {
+        if ($messageId === '' || strlen($messageId) > 255 || str_contains($messageId, "\0")
+            || ! mb_check_encoding($messageId, 'UTF-8') || trim($content) === ''
+            || strlen($content) > 65536 || ! mb_check_encoding($content, 'UTF-8') || count($scope) > 20) {
+            throw OfficeException::invalidInput();
+        }
+        foreach ($scope as $id) {
+            if ($id === '' || strlen($id) > 255 || str_contains($id, "\0") || ! mb_check_encoding($id, 'UTF-8')) {
+                throw OfficeException::invalidInput();
+            }
+        }
+        $scope = array_values(array_unique($scope));
+        sort($scope, SORT_STRING);
+        $normalizedSelection = $this->normalizeSelection($selection, $scope);
+        $digestInput = ['content' => $content, 'resource_ids' => $scope];
+        if ($normalizedSelection !== null) {
+            $digestInput['selection'] = $normalizedSelection;
+        }
+        $canonicalInput = json_decode(
+            json_encode($digestInput, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            false,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        $digest = hash('sha256', ProposalDigest::canonicalize($canonicalInput), true);
+
+        return [$scope, $normalizedSelection, $digest];
+    }
+
+    /** @return array{session_id:string, state:string, profile_revision:string, last_seq:int, provider:array{configured:bool, connection:string, driver:?string, model:?string, hint:?string}, runs:list<array<string,mixed>>, tool_calls:list<array<string,mixed>>, messages:list<array<string,mixed>>} */
     public function show(CallContext $context, string $sessionId): array
     {
         return $this->db->transaction(function () use ($context, $sessionId): array {
             $session = $this->session($context, $sessionId, allowExpired: true);
             $messages = [];
+            $runsOut = [];
+            $callsOut = [];
+            $profile = $this->policy->profile($context);
+
             if (! $this->expired($session)) {
                 $rows = $this->db->query('ai_chat_messages')->where('session_id', $sessionId)
                     ->orderByDesc('created_at')->orderByDesc('message_id')->limit(self::PAGE_SIZE)->get();
-                $allowed = $this->accessible($context, $this->collectScope($rows));
+                $allScopeIds = $this->collectScope($rows);
+                $runIds = [];
+                /** @var array<string, list<string>> $runScopeByRunId */
+                $runScopeByRunId = [];
+                foreach ($rows as $row) {
+                    $rid = QueryRecord::raw($row, 'run_id');
+                    if (is_string($rid) && $rid !== '') {
+                        $runIds[$rid] = $rid;
+                        if (QueryRecord::str($row, 'role') === 'user') {
+                            $runScopeByRunId[$rid] = $this->storedScope($row);
+                        }
+                    }
+                }
+
+                $callRows = $runIds === []
+                    ? []
+                    : $this->db->query('ai_tool_calls')
+                        ->whereIn('run_id', array_values($runIds))
+                        ->orderBy('run_id')
+                        ->orderBy('step_id')
+                        ->get()
+                        ->all();
+                $stepResources = [];
+                foreach ($runIds as $rid) {
+                    foreach ($this->runs->listSteps($context, $rid) as $step) {
+                        $stepResources[$rid.':'.$step->stepId] = $step->resourceId;
+                        if ($step->resourceId !== null && $step->resourceId !== '') {
+                            $allScopeIds[] = $step->resourceId;
+                        }
+                    }
+                }
+                $allScopeIds = array_values(array_unique($allScopeIds));
+                $allowed = $this->accessible($context, $allScopeIds);
+
                 foreach ($rows->reverse() as $row) {
                     $scope = $this->storedScope($row);
                     $id = QueryRecord::str($row, 'message_id');
                     $role = QueryRecord::str($row, 'role');
-                    $body = $this->canRead($scope, $allowed) ? $this->messageBody($context, $sessionId, $row, $scope) : null;
-                    $messages[] = $body === null
-                        ? ['message_id' => $id, 'hidden' => true]
-                        : ['message_id' => $id, 'role' => $role, 'run_id' => QueryRecord::raw($row, 'run_id'), 'content' => $body];
+                    $decoded = $this->canRead($scope, $allowed) ? $this->messagePayload($context, $sessionId, $row, $scope) : null;
+                    if ($decoded === null) {
+                        $messages[] = ['message_id' => $id, 'hidden' => true];
+
+                        continue;
+                    }
+                    $item = [
+                        'message_id' => $id,
+                        'role' => $role,
+                        'run_id' => QueryRecord::raw($row, 'run_id'),
+                        'content' => $decoded['content'],
+                    ];
+                    if ($decoded['selection'] !== null) {
+                        $item['selection'] = $decoded['selection'];
+                    }
+                    $messages[] = $item;
+                }
+
+                foreach (array_values($runIds) as $rid) {
+                    $run = $this->runs->find($context, $rid);
+                    if ($run !== null) {
+                        $runsOut[] = [
+                            'run_id' => $run->runId,
+                            'state' => $run->state,
+                            'channel' => $run->channel,
+                            'created_at' => $run->createdAt->format('Y-m-d\TH:i:s\Z'),
+                            'updated_at' => $run->updatedAt->format('Y-m-d\TH:i:s\Z'),
+                        ];
+                    }
+                }
+
+                foreach ($callRows as $callRow) {
+                    $rid = QueryRecord::str($callRow, 'run_id');
+                    $cid = QueryRecord::str($callRow, 'call_id');
+                    $sid = QueryRecord::int($callRow, 'step_id');
+                    $stepResource = $stepResources[$rid.':'.$sid] ?? null;
+                    $requiredScope = $stepResource !== null && $stepResource !== ''
+                        ? [$stepResource]
+                        : ($runScopeByRunId[$rid] ?? []);
+                    if ($requiredScope !== [] && ! $this->canRead($requiredScope, $allowed)) {
+                        $callsOut[] = [
+                            'call_id' => $cid,
+                            'run_id' => $rid,
+                            'hidden' => true,
+                        ];
+
+                        continue;
+                    }
+                    $callsOut[] = [
+                        'call_id' => $cid,
+                        'run_id' => $rid,
+                        'step_id' => $sid,
+                        'tool' => QueryRecord::str($callRow, 'tool_name'),
+                        'tool_version' => QueryRecord::str($callRow, 'tool_version'),
+                        'state' => QueryRecord::str($callRow, 'state'),
+                        'resource_id' => $stepResource,
+                        'proposal_id' => QueryRecord::raw($callRow, 'proposal_id'),
+                        'command_id' => QueryRecord::raw($callRow, 'command_id'),
+                        'receipt_id' => QueryRecord::raw($callRow, 'receipt_id'),
+                    ];
                 }
             }
+
+            $provider = $this->secretStore !== null
+                ? $this->secretStore->status($profile->providerConnection)
+                : [
+                    'configured' => false,
+                    'connection' => $profile->providerConnection ?? '',
+                    'driver' => null,
+                    'model' => null,
+                    'hint' => null,
+                ];
 
             return [
                 'session_id' => $sessionId,
                 'state' => QueryRecord::str($session, 'state'),
                 'profile_revision' => QueryRecord::str($session, 'profile_revision'),
                 'last_seq' => QueryRecord::int($session, 'last_seq'),
+                'provider' => $provider,
+                'runs' => $runsOut,
+                'tool_calls' => $callsOut,
                 'messages' => $messages,
             ];
         }, $context->tenantId);
     }
 
-    /** @return array{content:string, resource_ids:list<string>} */
+    /** @return array{content:string, resource_ids:list<string>, selection:?array<string,mixed>} */
     public function turnInput(CallContext $context, string $sessionId, string $runId): array
     {
         return $this->db->transaction(function () use ($context, $sessionId, $runId): array {
@@ -173,7 +439,13 @@ final readonly class ChatWorkspace
                 throw OfficeException::resourceUnavailable();
             }
 
-            return ['content' => $this->messageBody($context, $sessionId, $row, $scope), 'resource_ids' => $scope];
+            $payload = $this->messagePayload($context, $sessionId, $row, $scope);
+
+            return [
+                'content' => $payload['content'],
+                'resource_ids' => $scope,
+                'selection' => $payload['selection'],
+            ];
         }, $context->tenantId);
     }
 
@@ -308,11 +580,27 @@ final readonly class ChatWorkspace
         ])->first();
     }
 
-    /** @param list<string> $scope */
-    private function insertMessage(CallContext $context, string $sessionId, string $messageId, string $runId, string $role, string $body, array $scope, string $digest): void
-    {
+    /**
+     * @param  list<string>  $scope
+     * @param  array<string, mixed>|null  $selection
+     */
+    private function insertMessage(
+        CallContext $context,
+        string $sessionId,
+        string $messageId,
+        string $runId,
+        string $role,
+        string $body,
+        array $scope,
+        string $digest,
+        ?array $selection = null,
+    ): void {
         $aad = $this->aad($context, 'ai_chat_messages', $sessionId, $messageId, $role, $scope);
-        $encrypted = $this->cipher->encrypt(['content' => $body], $aad);
+        $plain = ['content' => $body];
+        if ($selection !== null) {
+            $plain['selection'] = $selection;
+        }
+        $encrypted = $this->cipher->encrypt($plain, $aad);
         $this->db->query('ai_chat_messages')->insert([
             'session_id' => $sessionId,
             'message_id' => $messageId,
@@ -327,8 +615,11 @@ final readonly class ChatWorkspace
         ]);
     }
 
-    /** @param list<string> $scope */
-    private function messageBody(CallContext $context, string $sessionId, object $row, array $scope): string
+    /**
+     * @param  list<string>  $scope
+     * @return array{content:string, selection:?array<string, mixed>}
+     */
+    private function messagePayload(CallContext $context, string $sessionId, object $row, array $scope): array
     {
         $body = $this->cipher->decrypt(
             QueryRecord::str($row, 'key_id'),
@@ -336,8 +627,123 @@ final readonly class ChatWorkspace
             $this->aad($context, 'ai_chat_messages', $sessionId, QueryRecord::str($row, 'message_id'), QueryRecord::str($row, 'role'), $scope),
         );
         $content = $body['content'] ?? null;
+        if (! is_string($content)) {
+            throw new RuntimeException('Malformed chat message.');
+        }
 
-        return is_string($content) ? $content : throw new RuntimeException('Malformed chat message.');
+        $selection = null;
+        if (is_array($body['selection'] ?? null)) {
+            /** @var array<string, mixed> $typedSelection */
+            $typedSelection = $body['selection'];
+            $selection = $typedSelection;
+        }
+
+        return ['content' => $content, 'selection' => $selection];
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $selection
+     * @param  list<string>  $scope
+     * @return array<string, mixed>|null
+     */
+    private function normalizeSelection(?array $selection, array $scope): ?array
+    {
+        if ($selection === null) {
+            return null;
+        }
+
+        $kind = $selection['kind'] ?? null;
+        $resourceId = $selection['resource_id'] ?? null;
+        if (! is_string($kind) || ! is_string($resourceId) || ! $this->isValidBoundedToken($resourceId, 255)
+            || ! in_array($resourceId, $scope, true)) {
+            throw OfficeException::invalidInput();
+        }
+
+        if ($kind === 'text_block') {
+            $allowedKeys = ['kind', 'resource_id', 'block_id', 'excerpt', 'start_utf16', 'end_utf16'];
+            if (array_diff(array_keys($selection), $allowedKeys) !== []) {
+                throw OfficeException::invalidInput();
+            }
+            $blockId = $selection['block_id'] ?? null;
+            if (! is_string($blockId) || ! $this->isValidBoundedToken($blockId, self::MAX_SELECTION_ID_BYTES)) {
+                throw OfficeException::invalidInput();
+            }
+
+            $normalized = [
+                'kind' => 'text_block',
+                'resource_id' => $resourceId,
+                'block_id' => $blockId,
+            ];
+
+            if (array_key_exists('excerpt', $selection) && $selection['excerpt'] !== null) {
+                $excerpt = $selection['excerpt'];
+                if (! is_string($excerpt) || strlen($excerpt) > self::MAX_SELECTION_EXCERPT_BYTES
+                    || str_contains($excerpt, "\0") || ! mb_check_encoding($excerpt, 'UTF-8')) {
+                    throw OfficeException::invalidInput();
+                }
+                $normalized['excerpt'] = $excerpt;
+            }
+
+            $start = $selection['start_utf16'] ?? null;
+            $end = $selection['end_utf16'] ?? null;
+            if ($start !== null || $end !== null) {
+                if (! is_int($start) || ! is_int($end) || $start < 0 || $end < $start
+                    || ($end - $start) > self::MAX_SELECTION_EXCERPT_BYTES) {
+                    throw OfficeException::invalidInput();
+                }
+                $normalized['start_utf16'] = $start;
+                $normalized['end_utf16'] = $end;
+            }
+
+            return $normalized;
+        }
+
+        if ($kind === 'sheet_range') {
+            $allowedKeys = ['kind', 'resource_id', 'sheet_id', 'table_id', 'row_ids', 'columns'];
+            if (array_diff(array_keys($selection), $allowedKeys) !== []) {
+                throw OfficeException::invalidInput();
+            }
+            $sheetId = $selection['sheet_id'] ?? null;
+            $tableId = $selection['table_id'] ?? null;
+            if (! is_string($sheetId) || ! $this->isValidBoundedToken($sheetId, self::MAX_SELECTION_ID_BYTES)
+                || ! is_string($tableId) || ! $this->isValidBoundedToken($tableId, self::MAX_SELECTION_ID_BYTES)) {
+                throw OfficeException::invalidInput();
+            }
+
+            $normalized = [
+                'kind' => 'sheet_range',
+                'resource_id' => $resourceId,
+                'sheet_id' => $sheetId,
+                'table_id' => $tableId,
+            ];
+
+            foreach (['row_ids', 'columns'] as $listKey) {
+                if (array_key_exists($listKey, $selection) && $selection[$listKey] !== null) {
+                    $list = $selection[$listKey];
+                    if (! is_array($list) || ! array_is_list($list) || count($list) > self::MAX_SELECTION_ITEMS) {
+                        throw OfficeException::invalidInput();
+                    }
+                    $items = [];
+                    foreach ($list as $item) {
+                        if (! is_string($item) || ! $this->isValidBoundedToken($item, self::MAX_SELECTION_ID_BYTES)) {
+                            throw OfficeException::invalidInput();
+                        }
+                        $items[] = $item;
+                    }
+                    $normalized[$listKey] = $items;
+                }
+            }
+
+            return $normalized;
+        }
+
+        throw OfficeException::invalidInput();
+    }
+
+    private function isValidBoundedToken(string $value, int $maxBytes): bool
+    {
+        return $value !== '' && strlen($value) <= $maxBytes
+            && ! str_contains($value, "\0") && mb_check_encoding($value, 'UTF-8');
     }
 
     /** @return list<string> */

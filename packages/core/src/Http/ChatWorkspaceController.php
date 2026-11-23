@@ -27,6 +27,35 @@ final readonly class ChatWorkspaceController
         private ResponseFactory $responses,
     ) {}
 
+    public function open(Request $request): JsonResponse
+    {
+        try {
+            $context = $this->context($request);
+            $retention = 86400;
+            $rawContent = $request->getContent();
+            if ($request->isJson() && trim($rawContent) !== '') {
+                $body = json_decode($rawContent, false, 512, JSON_THROW_ON_ERROR);
+                if (! $body instanceof stdClass) {
+                    throw OfficeException::invalidInput();
+                }
+                if (property_exists($body, 'retention_seconds')) {
+                    if (! is_int($body->retention_seconds) || $body->retention_seconds < 1 || $body->retention_seconds > 604800) {
+                        throw OfficeException::invalidInput();
+                    }
+                    $retention = $body->retention_seconds;
+                }
+            }
+            $chat = $this->workspace();
+            $sessionId = $chat->open($context, $retention);
+
+            return new JsonResponse(['data' => $chat->show($context, $sessionId)], 201);
+        } catch (JsonException) {
+            return $this->error(OfficeException::invalidInput());
+        } catch (OfficeException $exception) {
+            return $this->error($exception);
+        }
+    }
+
     public function show(Request $request, string $id): JsonResponse
     {
         try {
@@ -55,7 +84,20 @@ final readonly class ChatWorkspaceController
                 throw OfficeException::invalidInput();
             }
 
-            $runId = $this->workspace()->post($context, $id, $message, $content, $resources);
+            $selection = null;
+            if (property_exists($body, 'selection') && $body->selection !== null) {
+                if (! $body->selection instanceof stdClass) {
+                    throw OfficeException::invalidInput();
+                }
+                $decoded = json_decode(json_encode($body->selection, JSON_THROW_ON_ERROR), true, 16, JSON_THROW_ON_ERROR);
+                if (! is_array($decoded)) {
+                    throw OfficeException::invalidInput();
+                }
+                /** @var array<string, mixed> $decoded */
+                $selection = $decoded;
+            }
+
+            $runId = $this->workspace()->post($context, $id, $message, $content, $resources, $selection);
 
             return new JsonResponse(['data' => ['message_id' => $message, 'run_id' => $runId]], 202);
         } catch (JsonException) {

@@ -6,6 +6,7 @@ namespace Vaulter\Ai\LaravelAi;
 
 use Illuminate\Support\ServiceProvider;
 use Override;
+use Vaulter\Ai\Core\Contracts\LlmPort;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 
 /**
@@ -20,6 +21,8 @@ final class LaravelAiServiceProvider extends ServiceProvider
         $this->mergeConfigFrom(__DIR__.'/../config/vaulter-ai-laravel-ai.php', 'vaulter-ai-laravel-ai');
 
         $this->app->singleton(LaravelOfficeExecutor::class);
+        $this->app->singleton(LaravelAiLlmPort::class);
+        $this->app->singletonIf(LlmPort::class, LaravelAiLlmPort::class);
     }
 
     public function boot(): void

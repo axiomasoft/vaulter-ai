@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vaulter\Ai\Documents\Writing;
 
 use Illuminate\Contracts\Auth\Access\Authorizable;
+use JsonException;
 use stdClass;
 use Vaulter\Ai\Core\Contracts\CommandOwner;
 use Vaulter\Ai\Core\Contracts\TextVerificationEvidence;
@@ -38,23 +39,54 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
         return $command === ReplaceExact::COMMAND && ($writeMode === null || $writeMode === 'journal');
     }
 
+    /**
+     * Verify whether a live-journal resource meets the 3.5 strict-profile journal requirement.
+     */
+    public function supportsLiveJournal(CallContext $context, ResourceEntry $resource, int $generation, int $version): bool
+    {
+        try {
+            return $this->projected($context, $resource, $generation, $version) !== null;
+        } catch (OfficeException $exception) {
+            return $exception->errorCode === ErrorCode::ProjectionPending;
+        }
+    }
+
     public function commit(CommandScope $scope, PreparedPlan $plan): CommandOutcome
     {
         $resource = $this->access->resource($scope->context, $scope->resourceId);
         $actor = $this->actor($scope->context, $resource);
         $condition = $plan->preconditions;
+        $schema = $this->requireInt($condition, 'schema');
+        $blockId = $this->requireString($condition, 'block_id');
+        $expected = $this->requireString($condition, 'expected');
+        $replacement = $this->requireString($condition, 'replacement');
+        $blockIdentity = $this->requireString($condition, 'block_identity');
+
+        try {
+            $expectedBlock = json_decode($blockIdentity, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            throw OfficeException::preconditionFailed();
+        }
+
         try {
             $record = $this->journal->register(
-                $actor, $scope->commandId, $plan->proposalId, $plan->digest,
-                $plan->base->generation, (int) $condition['schema'], $plan->base->position,
+                $actor,
+                $scope->commandId,
+                $plan->proposalId,
+                $plan->digest,
+                $plan->base->generation,
+                $schema,
+                $plan->base->position,
                 [
                     'preconditions' => [[
-                        'block_id' => $condition['block_id'],
-                        'expected_block' => json_decode($condition['block_identity'], true, flags: JSON_THROW_ON_ERROR),
+                        'block_id' => $blockId,
+                        'expected_block' => $expectedBlock,
                     ]],
                     'atomic_effects' => [[
-                        'effect' => 'replace_exact', 'block_id' => $condition['block_id'],
-                        'expected' => $condition['expected'], 'replacement' => $condition['replacement'],
+                        'effect' => 'replace_exact',
+                        'block_id' => $blockId,
+                        'expected' => $expected,
+                        'replacement' => $replacement,
                     ]],
                 ],
             );
@@ -83,7 +115,11 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
             throw $this->translate($failure);
         }
 
-        return $marker === null ? null : new Marker($marker['generation'], $marker['position']);
+        if (! is_array($marker)) {
+            return null;
+        }
+
+        return new Marker($this->requireInt($marker, 'generation'), $this->requireInt($marker, 'position'));
     }
 
     public function projected(CallContext $context, ResourceEntry $resource, int $generation, int $version): ?Marker
@@ -94,17 +130,26 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
             throw $this->translate($failure);
         }
 
-        return $marker === null ? null : new Marker($marker['generation'], $marker['position']);
+        if (! is_array($marker)) {
+            return null;
+        }
+
+        return new Marker($this->requireInt($marker, 'generation'), $this->requireInt($marker, 'position'));
     }
 
     public function verify(CallContext $context, string $resourceId, string $receiptId, string $mode): stdClass
     {
         $resource = $this->access->resource($context, $resourceId);
         [$marker, $range] = $this->evidence($context, $resource, $receiptId);
-        $expected = $this->checks($range['block'], $range, $range['start_utf16']);
+        $block = $this->requireArray($range, 'block');
+        $start = $this->requireInt($range, 'start_utf16');
+        $replacement = $this->requireString($range, 'replacement');
+        $expected = $this->checks($block, $range, $start);
         $actual = [
-            'text' => $expected['text'], 'textPassed' => $expected['text'] === $range['replacement'],
-            'marks' => $expected['marks'] ?? [], 'marksPassed' => $expected['marks'] !== null,
+            'text' => $expected['text'],
+            'textPassed' => $expected['text'] === $replacement,
+            'marks' => $expected['marks'] ?? [],
+            'marksPassed' => $expected['marks'] !== null,
         ];
         if ($mode === 'current') {
             try {
@@ -128,7 +173,9 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
         }
 
         return (object) [
-            'receipt_id' => $receiptId, 'mode' => $mode, 'marker' => $marker->toStdClass(),
+            'receipt_id' => $receiptId,
+            'mode' => $mode,
+            'marker' => $marker->toStdClass(),
             'outcome' => $actual['textPassed'] && $actual['marksPassed'] ? 'passed' : 'failed',
             'checks' => [
                 (object) ['name' => 'text_exact', 'passed' => $actual['textPassed'], 'actual' => $actual['text']],
@@ -143,9 +190,14 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
         if ($recorded->generation !== $marker->generation || $recorded->position !== $marker->position) {
             throw new OfficeException(ErrorCode::EvidenceUnavailable);
         }
-        $checks = $this->checks($range['block'], $range, $range['start_utf16']);
+        $block = $this->requireArray($range, 'block');
+        $start = $this->requireInt($range, 'start_utf16');
+        $checks = $this->checks($block, $range, $start);
 
-        return ['text_exact' => $checks['text'], 'marks' => $checks['marks'] ?? []];
+        /** @var list<string> $marks */
+        $marks = $checks['marks'] ?? [];
+
+        return ['text_exact' => $checks['text'], 'marks' => $marks];
     }
 
     /** @return array{Marker, array<string, mixed>} */
@@ -156,19 +208,32 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
         } catch (ProblemException $failure) {
             throw $this->translate($failure);
         }
-        $range = $result['evidence']['ranges'][0] ?? null;
+
+        $evidence = $result['evidence'] ?? null;
+        $ranges = is_array($evidence) ? ($evidence['ranges'] ?? null) : null;
+        $range = is_array($ranges) ? ($ranges[0] ?? null) : null;
         if (! is_array($range) || ! is_array($range['block'] ?? null)) {
             throw new OfficeException(ErrorCode::EvidenceUnavailable);
         }
 
-        return [new Marker($result['generation'], $result['to_seq']), $range];
+        /** @var array<string, mixed> $typedRange */
+        $typedRange = $range;
+
+        return [
+            new Marker($this->requireInt($result, 'generation'), $this->requireInt($result, 'to_seq')),
+            $typedRange,
+        ];
     }
 
-    /** @param array<string, mixed> $block @param array<string, mixed> $range @return array{text: string, marks: list<string>|null} */
+    /**
+     * @param  array<string, mixed>  $block
+     * @param  array<string, mixed>  $range
+     * @return array{text: string, marks: list<string>|null}
+     */
     private function checks(array $block, array $range, int $start): array
     {
         [$text, $runs] = TextReplacement::runs($block);
-        $length = $range['length_utf16'];
+        $length = $this->requireInt($range, 'length_utf16');
         if ($length === 0) {
             return ['text' => '', 'marks' => []];
         }
@@ -178,7 +243,14 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
             $from = TextReplacement::length(substr($text, 0, $run['start']));
             $to = TextReplacement::length(substr($text, 0, $run['end']));
             if ($from <= $start && $to >= $start + $length && $run['marks'] !== null) {
-                return ['text' => $actual, 'marks' => array_values(array_column($run['marks'], 'type'))];
+                $marks = [];
+                foreach ($run['marks'] as $mark) {
+                    if (is_string($mark['type'] ?? null)) {
+                        $marks[] = $mark['type'];
+                    }
+                }
+
+                return ['text' => $actual, 'marks' => $marks];
             }
         }
 
@@ -192,17 +264,30 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
         }
         $drive = $this->access->drive($context, $resource)->snapshot();
 
-        return new CommandActor(Actor::user($context->actor)->ref(), $drive->tenantId, $context->projectScope,
-            $context->effectiveSubject, $drive->id, $resource->resourceId);
+        return new CommandActor(
+            Actor::user($context->actor)->ref(),
+            $drive->tenantId,
+            $context->projectScope,
+            $context->effectiveSubject,
+            $drive->id,
+            $resource->resourceId,
+        );
     }
 
-    /** @param array<string, mixed>|null $record */
+    /** @param array<array-key, mixed>|null $record */
     private function outcome(string $command, ?array $record): CommandOutcome
     {
-        return match ($record['state'] ?? 'unknown') {
+        $state = is_array($record) && is_string($record['state'] ?? null) ? $record['state'] : 'unknown';
+
+        return match ($state) {
             'running' => new CommandOutcome($command, 'running'),
-            'committed' => new CommandOutcome($command, 'committed', $record['receipt_id'], new Marker($record['generation'], $record['to_seq'])),
-            'rejected' => new CommandOutcome($command, 'rejected', reason: match ($record['rejection_code']) {
+            'committed' => new CommandOutcome(
+                $command,
+                'committed',
+                $this->nullableString($record ?? [], 'receipt_id'),
+                new Marker($this->requireInt($record ?? [], 'generation'), $this->requireInt($record ?? [], 'to_seq')),
+            ),
+            'rejected' => new CommandOutcome($command, 'rejected', reason: match ($record['rejection_code'] ?? null) {
                 'precondition_failed' => ErrorCode::PreconditionFailed,
                 'generation_changed' => ErrorCode::GenerationChanged,
                 'schema_changed' => ErrorCode::SchemaChanged,
@@ -214,7 +299,11 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
 
     private function translate(ProblemException $failure): OfficeException
     {
-        $reason = $failure->problemDetails()['context']['reason'] ?? null;
+        $details = $failure->problemDetails();
+        $problemContext = $details['context'] ?? null;
+        $reason = is_array($problemContext) && is_string($problemContext['reason'] ?? null)
+            ? $problemContext['reason']
+            : null;
 
         return match ($reason) {
             'key_conflict' => new OfficeException(ErrorCode::IdempotencyConflict),
@@ -227,9 +316,58 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
             default => match ($failure->httpStatus()) {
                 403, 404 => OfficeException::resourceUnavailable(),
                 409 => $failure->problemCode() === 'collaboration_epoch_mismatch'
-                    ? OfficeException::generationChanged() : OfficeException::temporarilyUnavailable(),
+                    ? OfficeException::generationChanged()
+                    : OfficeException::temporarilyUnavailable(),
                 default => OfficeException::temporarilyUnavailable(),
             },
         };
+    }
+
+    /** @param array<array-key, mixed> $source */
+    private function requireInt(array $source, string $key): int
+    {
+        $value = $source[$key] ?? null;
+        if (is_int($value)) {
+            return $value;
+        }
+        if (is_string($value) && preg_match('/\A-?\d+\z/', $value) === 1) {
+            return (int) $value;
+        }
+
+        throw new OfficeException(ErrorCode::EvidenceUnavailable);
+    }
+
+    /** @param array<array-key, mixed> $source */
+    private function requireString(array $source, string $key): string
+    {
+        $value = $source[$key] ?? null;
+        if (is_string($value)) {
+            return $value;
+        }
+
+        throw new OfficeException(ErrorCode::EvidenceUnavailable);
+    }
+
+    /** @param array<array-key, mixed> $source */
+    private function nullableString(array $source, string $key): ?string
+    {
+        $value = $source[$key] ?? null;
+
+        return is_string($value) ? $value : null;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $source
+     * @return array<string, mixed>
+     */
+    private function requireArray(array $source, string $key): array
+    {
+        $value = $source[$key] ?? null;
+        if (! is_array($value)) {
+            throw new OfficeException(ErrorCode::EvidenceUnavailable);
+        }
+
+        /** @var array<string, mixed> $value */
+        return $value;
     }
 }

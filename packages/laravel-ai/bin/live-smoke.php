@@ -39,11 +39,15 @@ use Illuminate\Translation\TranslationServiceProvider;
 use Illuminate\Validation\ValidationServiceProvider;
 use Laravel\Ai\AiServiceProvider;
 use Laravel\Ai\Events\AgentPrompted;
+use Vaulter\Ai\Core\Contracts\LlmPort;
+use Vaulter\Ai\Core\Contracts\ProviderSecretStore;
 use Vaulter\Ai\Core\Contracts\RunContextResolver;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\OfficeServiceProvider;
 use Vaulter\Ai\Core\Persistence\Runs;
+use Vaulter\Ai\Core\Workspace\ChatTurn;
+use Vaulter\Ai\Core\Workspace\ChatWorkspace;
 use Vaulter\Ai\Documents\DocumentsAiServiceProvider;
 use Vaulter\Ai\LaravelAi\LaravelAiServiceProvider;
 use Vaulter\Ai\LaravelAi\LaravelOfficeExecutor;
@@ -190,6 +194,9 @@ try {
     }
     $app['config']->set('ai.default', $providerName);
     $app['config']->set('ai.providers.'.$providerName, $providerConfig);
+    $app['config']->set('vaulter-ai.secret_store.connections', [
+        'office_model' => $providerConfig + ['model' => $modelName],
+    ]);
     $app['config']->set('vaulter-ai.profiles.documents', [
         'executor' => 'laravel-ai',
         'provider_connection' => 'office_model',
@@ -319,6 +326,46 @@ try {
     $ownerCommandCount = $ownerDb->table('v_ai_text_commands')->where('resource_id', $node->id)->count();
     $ownerReceipt = $ownerDb->table('v_ai_text_commands')->where('resource_id', $node->id)->value('receipt_id');
 
+    // Run live chat streaming + tool turn smoke against the same real provider via ChatWorkspace + ChatTurn + LlmPort.
+    $chatNode = Documents::in($drive)->create('Live Smoke Chat Contract', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [
+            ['type' => 'heading', 'attrs' => ['blockId' => 'h-42', 'level' => 2], 'content' => [['type' => 'text', 'text' => '4.2 Payment Term']]],
+            ['type' => 'paragraph', 'attrs' => ['blockId' => 'p42'], 'content' => [
+                ['type' => 'text', 'text' => 'Pay within '],
+                ['type' => 'text', 'text' => '15', 'marks' => [['type' => 'bold']]],
+                ['type' => 'text', 'text' => ' working days.'],
+            ]],
+        ],
+    ]);
+    /** @var ChatWorkspace $chat */
+    $chat = $app->make(ChatWorkspace::class);
+    /** @var ChatTurn $chatTurn */
+    $chatTurn = $app->make(ChatTurn::class);
+    /** @var LlmPort $llmPort */
+    $llmPort = $app->make(LlmPort::class);
+    /** @var ProviderSecretStore $secrets */
+    $secrets = $app->make(ProviderSecretStore::class);
+
+    $chatSessionId = $chat->open($context);
+    $chatRunId = $chat->post(
+        $context,
+        $chatSessionId,
+        'chat-live-smoke-1',
+        "Read paragraph p42 on resource {$chatNode->id}, replace '15' with '45' using text.replace_exact@1, commit, and verify with mode at_commit.",
+        [$chatNode->id],
+        ['kind' => 'text_block', 'resource_id' => $chatNode->id, 'block_id' => 'p42', 'excerpt' => 'Pay within 15 working days.'],
+    );
+    $chatDelay = $chatTurn->execute($context, $chatRunId, $llmPort);
+    $chatRun = $runs->find($context, $chatRunId);
+    $chatEvents = $chat->events($context, $chatSessionId, 0);
+    $chatEventTypes = array_values(array_unique(array_column($chatEvents, 'type')));
+    $chatOwnerCount = $ownerDb->table('v_ai_text_commands')->where('resource_id', $chatNode->id)->count();
+    $chatOwnerReceipt = $ownerDb->table('v_ai_text_commands')->where('resource_id', $chatNode->id)->value('receipt_id');
+    $chatEventsJson = json_encode($chatEvents, JSON_THROW_ON_ERROR);
+    $chatLeakedSecret = str_contains($chatEventsJson, $apiKey);
+    $chatProviderStatus = $secrets->status('office_model');
+
     $costUsd = round(
         ($observedUsage['input_tokens'] / 1_000_000) * $inCostPer1M
         + ($observedUsage['output_tokens'] / 1_000_000) * $outCostPer1M,
@@ -332,7 +379,16 @@ try {
         && $commitReceipt !== ''
         && $ownerReceipt === $commitReceipt
         && $verifyOutcome === 'passed'
-        && $verifyReceipt === $commitReceipt;
+        && $verifyReceipt === $commitReceipt
+        && $chatDelay === null
+        && $chatRun?->state === 'completed'
+        && $chatOwnerCount === 1
+        && is_string($chatOwnerReceipt)
+        && $chatOwnerReceipt !== ''
+        && in_array('tool.committed', $chatEventTypes, true)
+        && in_array('tool.verified', $chatEventTypes, true)
+        && in_array('run.finished', $chatEventTypes, true)
+        && ! $chatLeakedSecret;
 
     $report = [
         'mode' => 'live-smoke',
@@ -349,6 +405,16 @@ try {
         'receipt_id' => $commitReceipt,
         'verify_receipt_id' => $verifyReceipt,
         'verify_outcome' => $verifyOutcome,
+        'chat' => [
+            'session_id' => $chatSessionId,
+            'run_id' => $chatRunId,
+            'run_state' => $chatRun?->state,
+            'event_types' => $chatEventTypes,
+            'owner_command_count' => $chatOwnerCount,
+            'receipt_id' => $chatOwnerReceipt,
+            'provider_status' => $chatProviderStatus,
+            'secret_leaked' => $chatLeakedSecret,
+        ],
         'usage' => $observedUsage + [
             'total_tokens' => $observedUsage['input_tokens'] + $observedUsage['output_tokens'],
         ],

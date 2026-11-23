@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace Vaulter\Ai\Core\Workspace;
 
+use Illuminate\Contracts\Config\Repository as ConfigRepository;
+use Illuminate\Support\Facades\Context;
 use Throwable;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\LlmPort;
+use Vaulter\Ai\Core\Contracts\ProviderSecretStore;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
@@ -18,6 +21,8 @@ final readonly class ChatTurn
 {
     private const int MAX_TOOL_CALLS = 32;
 
+    private const int MAX_OUTPUT_BYTES = 65536;
+
     public function __construct(
         private OfficeDatabase $db,
         private Runs $runs,
@@ -25,6 +30,8 @@ final readonly class ChatTurn
         private ChatTools $tools,
         private ToolCallLedger $ledger,
         private HostPolicy $policy,
+        private ?ConfigRepository $config = null,
+        private ?ProviderSecretStore $secretStore = null,
     ) {}
 
     /** Returns the next delivery delay for a live or recoverable run. */
@@ -41,11 +48,21 @@ final readonly class ChatTurn
             return 5;
         }
 
+        Context::add([
+            'vaulter.ai.tenant_id' => $context->tenantId,
+            'vaulter.ai.project_scope' => $context->projectScope,
+            'vaulter.ai.run_id' => $runId,
+        ]);
+
         $scope = [];
         try {
             $input = $this->chat->turnInput($context, $session, $runId);
             $scope = $input['resource_ids'];
-            $messages = [['role' => 'user', 'content' => $input['content']]];
+            $userMessage = ['role' => 'user', 'content' => $input['content']];
+            if ($input['selection'] !== null) {
+                $userMessage['selection'] = $input['selection'];
+            }
+            $messages = [$userMessage];
             $calls = $this->ledger->calls($context, $runId, $lease);
             foreach ($calls as $call) {
                 $tool = $this->tools->deliver($context, $session, $runId, $lease, $call, $scope);
@@ -55,7 +72,7 @@ final readonly class ChatTurn
                 }
                 $messages[] = $tool['message'];
             }
-            if ($run->state !== 'queued') {
+            if (! in_array($run->state, ['queued', 'awaiting_approval'], true)) {
                 $this->delta($context, $session, $runId, $lease, 'assistant.interrupted', [], $scope);
             }
 
@@ -75,8 +92,16 @@ final readonly class ChatTurn
             return null;
         } catch (Throwable $exception) {
             $this->runs->releaseLease($context, $runId, $lease);
+            if ($this->secretStore !== null) {
+                $masked = $this->secretStore->maskText($exception->getMessage());
+                if ($masked !== $exception->getMessage()) {
+                    throw new \RuntimeException($masked, (int) $exception->getCode());
+                }
+            }
 
             throw $exception;
+        } finally {
+            Context::forget(['vaulter.ai.tenant_id', 'vaulter.ai.project_scope', 'vaulter.ai.run_id']);
         }
     }
 
@@ -91,6 +116,8 @@ final readonly class ChatTurn
     ): ?int {
         $text = '';
         $deliveries = 0;
+        $maxToolCalls = $this->limitInt('vaulter-ai.chat.max_tool_calls', self::MAX_TOOL_CALLS, 1, self::MAX_TOOL_CALLS);
+        $maxOutputBytes = $this->limitInt('vaulter-ai.chat.max_output_bytes', self::MAX_OUTPUT_BYTES, 1024, self::MAX_OUTPUT_BYTES);
         $deadline = hrtime(true) + 70_000_000_000;
         $cancelled = static fn (): bool => hrtime(true) >= $deadline;
         while (! $cancelled()) {
@@ -107,7 +134,7 @@ final readonly class ChatTurn
                 }
                 if ($event['type'] === 'textDelta') {
                     $text .= $event['text'];
-                    if (strlen($text) > 65536 || ! mb_check_encoding($event['text'], 'UTF-8')) {
+                    if (strlen($text) > $maxOutputBytes || ! mb_check_encoding($event['text'], 'UTF-8')) {
                         throw new OfficeException(ErrorCode::LimitExceeded);
                     }
                     $this->delta($context, $session, $runId, $lease, 'assistant.delta', ['text' => $event['text']], $scope);
@@ -115,7 +142,7 @@ final readonly class ChatTurn
                     continue;
                 }
                 $replay = $event['replayCallId'] ?? null;
-                if (++$deliveries > self::MAX_TOOL_CALLS || ($replay === null && count($calls) >= self::MAX_TOOL_CALLS)) {
+                if (++$deliveries > $maxToolCalls || ($replay === null && count($calls) >= $maxToolCalls)) {
                     throw new OfficeException(ErrorCode::LimitExceeded);
                 }
                 $index = $replay === null ? count($calls) : array_search($replay, array_column($calls, 'id'), true);
@@ -187,5 +214,15 @@ final readonly class ChatTurn
                 throw OfficeException::temporarilyUnavailable();
             }
         }, $context->tenantId);
+    }
+
+    private function limitInt(string $key, int $default, int $min, int $max): int
+    {
+        $configured = $this->config?->get($key, $default);
+        if (! is_int($configured)) {
+            return $default;
+        }
+
+        return max($min, min($max, $configured));
     }
 }

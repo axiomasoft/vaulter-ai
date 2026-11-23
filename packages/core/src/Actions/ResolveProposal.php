@@ -15,12 +15,15 @@ use Vaulter\Ai\Core\Enums\ApprovalMode;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Jobs\DispatchApprovedCommand;
+use Vaulter\Ai\Core\Jobs\ExecuteChatRun;
 use Vaulter\Ai\Core\Operations\Commit;
 use Vaulter\Ai\Core\Persistence\DefaultProposalApprovalPolicy;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\OwnerRoutes;
 use Vaulter\Ai\Core\Persistence\Proposals;
+use Vaulter\Ai\Core\Persistence\QueryRecord;
 use Vaulter\Ai\Core\Persistence\Runs;
+use Vaulter\Ai\Core\Workspace\ChannelChatBridge;
 
 /** For the host's authenticated approval application. The two contexts are resolved by the host. */
 final readonly class ResolveProposal
@@ -37,6 +40,7 @@ final readonly class ResolveProposal
         private Clock $clock,
         ?ProposalApprovalPolicy $approvalPolicy = null,
         private ?Runs $runs = null,
+        private ?ChannelChatBridge $channelBridge = null,
     ) {
         $this->approvalPolicy = $approvalPolicy ?? new DefaultProposalApprovalPolicy($this->directory);
     }
@@ -94,13 +98,16 @@ final readonly class ResolveProposal
                     'available_at' => $this->db->utcTimestamp($now),
                 ]);
                 $this->publishAfterCommit($initiator->tenantId, $proposalId);
-            } elseif ($this->runs !== null) {
-                $this->runs->syncProposalOutcomeInTransaction(
-                    context: $initiator,
-                    proposalId: $proposalId,
-                    stepState: 'failed',
-                    safeError: 'proposal_rejected',
-                );
+            } else {
+                if ($this->runs !== null) {
+                    $this->runs->syncProposalOutcomeInTransaction(
+                        context: $initiator,
+                        proposalId: $proposalId,
+                        stepState: 'failed',
+                        safeError: 'proposal_rejected',
+                    );
+                }
+                $this->publishRejectedChatResumes($initiator, $proposalId);
             }
 
             return true;
@@ -112,5 +119,82 @@ final readonly class ResolveProposal
         $this->db->afterCommit(function () use ($tenantId, $proposalId): void {
             $this->bus->dispatch(new DispatchApprovedCommand($tenantId, $proposalId));
         });
+    }
+
+    private function publishRejectedChatResumes(CallContext $initiator, string $proposalId): void
+    {
+        $chatRunIds = $this->findLinkedChatRunIds($initiator, $proposalId);
+        $externalLinks = $this->channelBridge !== null ? $this->findLinkedExternalChatSessions($initiator, $proposalId) : [];
+        if ($chatRunIds === [] && $externalLinks === []) {
+            return;
+        }
+
+        $this->db->afterCommit(function () use ($initiator, $chatRunIds, $externalLinks): void {
+            foreach ($chatRunIds as $chatRunId) {
+                $this->bus->dispatch(new ExecuteChatRun($initiator->tenantId, $chatRunId));
+            }
+            foreach ($externalLinks as $link) {
+                $this->channelBridge?->syncExternalRunEvents($initiator, $link['session_id'], $link['run_id'], $link['scope']);
+            }
+        });
+    }
+
+    /** @return list<array{session_id:string, run_id:string, scope:list<string>}> */
+    private function findLinkedExternalChatSessions(CallContext $initiator, string $proposalId): array
+    {
+        $stepsTable = $this->db->table('ai_run_steps');
+        $runsTable = $this->db->table('ai_runs');
+        $msgsTable = $this->db->table('ai_chat_messages');
+        $rows = $this->db->connection()->table($stepsTable)
+            ->join($runsTable, $runsTable.'.run_id', '=', $stepsTable.'.run_id')
+            ->join($msgsTable, $msgsTable.'.run_id', '=', $runsTable.'.run_id')
+            ->where($msgsTable.'.role', 'user')
+            ->where($stepsTable.'.proposal_id', $proposalId)
+            ->where($runsTable.'.tenant_id', $initiator->tenantId)
+            ->where($runsTable.'.project_scope', $initiator->projectScope)
+            ->where($runsTable.'.effective_subject', $initiator->effectiveSubject)
+            ->where($runsTable.'.channel', '!=', 'chat')
+            ->distinct()
+            ->get([$msgsTable.'.session_id', $runsTable.'.run_id', $msgsTable.'.resource_scope_json']);
+
+        $links = [];
+        foreach ($rows as $row) {
+            $sessionId = QueryRecord::str($row, 'session_id');
+            $runId = QueryRecord::str($row, 'run_id');
+            $rawScope = json_decode(QueryRecord::str($row, 'resource_scope_json'), true);
+            if ($sessionId !== '' && $runId !== '' && is_array($rawScope)) {
+                /** @var list<string> $scope */
+                $scope = array_values(array_filter($rawScope, is_string(...)));
+                $links[] = ['session_id' => $sessionId, 'run_id' => $runId, 'scope' => $scope];
+            }
+        }
+
+        return $links;
+    }
+
+    /** @return list<string> */
+    private function findLinkedChatRunIds(CallContext $initiator, string $proposalId): array
+    {
+        $callsTable = $this->db->table('ai_tool_calls');
+        $runsTable = $this->db->table('ai_runs');
+        $rows = $this->db->connection()->table($callsTable)
+            ->join($runsTable, $runsTable.'.run_id', '=', $callsTable.'.run_id')
+            ->where($callsTable.'.proposal_id', $proposalId)
+            ->where($runsTable.'.tenant_id', $initiator->tenantId)
+            ->where($runsTable.'.project_scope', $initiator->projectScope)
+            ->where($runsTable.'.channel', 'chat')
+            ->whereNotIn($runsTable.'.state', ['completed', 'rejected'])
+            ->distinct()
+            ->get([$callsTable.'.run_id']);
+
+        $ids = [];
+        foreach ($rows as $row) {
+            $rid = QueryRecord::str($row, 'run_id');
+            if ($rid !== '') {
+                $ids[] = $rid;
+            }
+        }
+
+        return $ids;
     }
 }

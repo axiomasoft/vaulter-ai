@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Vaulter\Ai\Core\Jobs;
 
+use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Queue\InteractsWithQueue;
 use stdClass;
 use Throwable;
 use Vaulter\Ai\Core\Contracts\ApprovedCommandContextResolver;
 use Vaulter\Ai\Core\Contracts\Office;
+use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandScope;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Enums\ErrorCode;
@@ -18,9 +20,12 @@ use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Operations\CommandResult;
 use Vaulter\Ai\Core\Operations\Commit;
 use Vaulter\Ai\Core\Persistence\ApprovedDispatches;
+use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\OwnerRoutes;
 use Vaulter\Ai\Core\Persistence\Proposals;
+use Vaulter\Ai\Core\Persistence\QueryRecord;
 use Vaulter\Ai\Core\Persistence\Runs;
+use Vaulter\Ai\Core\Workspace\ChannelChatBridge;
 
 final class DispatchApprovedCommand implements ShouldQueue
 {
@@ -42,6 +47,9 @@ final class DispatchApprovedCommand implements ShouldQueue
         ?ApprovedCommandContextResolver $resolver = null,
         ?Runs $runs = null,
         ?Office $office = null,
+        ?OfficeDatabase $db = null,
+        ?Dispatcher $bus = null,
+        ?ChannelChatBridge $channelBridge = null,
     ): void {
         $context = $resolver?->resolve($this->tenantId, $this->proposalId);
         if ($context === null || $context->tenantId !== $this->tenantId) {
@@ -71,6 +79,9 @@ final class DispatchApprovedCommand implements ShouldQueue
 
                 return;
             }
+            if ($outcome->state === 'committed' && $outcome->receiptId !== null && $route->receiptId === null) {
+                $routes->settle($scope, $outcome->receiptId);
+            }
             $settled = $dispatches->finish($scope, $this->proposalId, $lease, 'delivered', $outcome->receiptId);
             if ($settled && $runs !== null) {
                 $response = CommandResult::response(OfficeOperation::Commit, $outcome);
@@ -84,7 +95,7 @@ final class DispatchApprovedCommand implements ShouldQueue
                     );
                     $commitStep = $runs->findLatestStepForProposalInScope($context, $this->proposalId, OfficeOperation::Commit);
                     $linkedRun = $commitStep !== null ? $runs->findInScope($context, $commitStep->runId) : null;
-                    if ($office !== null && $linkedRun !== null && $linkedRun->channel !== 'agentools') {
+                    if ($office !== null && $linkedRun !== null && ! in_array($linkedRun->channel, ['agentools', 'chat'], true)) {
                         $startedAt = hrtime(true);
                         $verifyResponse = $office->handle($context, new OfficeRequest(1, OfficeOperation::Verify, (object) [
                             'resource_id' => $scope->resourceId,
@@ -116,6 +127,10 @@ final class DispatchApprovedCommand implements ShouldQueue
                     );
                 }
             }
+            if ($settled) {
+                $this->dispatchLinkedChatRuns($context, $db, $bus);
+                $this->syncExternalLinkedChats($context, $runs, $db, $channelBridge);
+            }
         } catch (OfficeException $failure) {
             if (in_array($failure->errorCode, [ErrorCode::TemporarilyUnavailable, ErrorCode::ProjectionPending], true)) {
                 if ($dispatches->finish($scope, $this->proposalId, $lease, 'ready')) {
@@ -133,10 +148,96 @@ final class DispatchApprovedCommand implements ShouldQueue
                     safeError: $failure->errorCode->value,
                 );
             }
+            if ($finished) {
+                $this->dispatchLinkedChatRuns($context, $db, $bus);
+                $this->syncExternalLinkedChats($context, $runs, $db, $channelBridge);
+            }
         } catch (Throwable $failure) {
             $dispatches->finish($scope, $this->proposalId, $lease, 'ready');
 
             throw $failure;
         }
+    }
+
+    private function dispatchLinkedChatRuns(CallContext $context, ?OfficeDatabase $db, ?Dispatcher $bus): void
+    {
+        if ($db === null || $bus === null) {
+            return;
+        }
+
+        $chatRunIds = $db->transaction(function () use ($db, $context): array {
+            $callsTable = $db->table('ai_tool_calls');
+            $runsTable = $db->table('ai_runs');
+            $rows = $db->connection()->table($callsTable)
+                ->join($runsTable, $runsTable.'.run_id', '=', $callsTable.'.run_id')
+                ->where($callsTable.'.proposal_id', $this->proposalId)
+                ->where($runsTable.'.tenant_id', $context->tenantId)
+                ->where($runsTable.'.project_scope', $context->projectScope)
+                ->where($runsTable.'.channel', 'chat')
+                ->whereNotIn($runsTable.'.state', ['completed', 'rejected'])
+                ->distinct()
+                ->get([$callsTable.'.run_id']);
+
+            $ids = [];
+            foreach ($rows as $row) {
+                $rid = QueryRecord::str($row, 'run_id');
+                if ($rid !== '') {
+                    $ids[] = $rid;
+                }
+            }
+
+            return $ids;
+        }, $context->tenantId);
+
+        foreach ($chatRunIds as $chatRunId) {
+            $bus->dispatch(new ExecuteChatRun($context->tenantId, $chatRunId));
+        }
+    }
+
+    private function syncExternalLinkedChats(
+        CallContext $context,
+        ?Runs $runs,
+        ?OfficeDatabase $db,
+        ?ChannelChatBridge $channelBridge,
+    ): void {
+        if ($runs === null || $db === null || $channelBridge === null) {
+            return;
+        }
+        $step = $runs->findLatestStepForProposalInScope($context, $this->proposalId, OfficeOperation::Commit)
+            ?? $runs->findLatestStepForProposalInScope($context, $this->proposalId, OfficeOperation::Prepare);
+        if ($step === null) {
+            return;
+        }
+        $run = $runs->findInScope($context, $step->runId);
+        if ($run === null || $run->channel === 'chat') {
+            return;
+        }
+
+        $msgRow = $db->query('ai_chat_messages')
+            ->where('run_id', $run->runId)
+            ->where('role', 'user')
+            ->first();
+        if ($msgRow === null) {
+            return;
+        }
+
+        $sessionId = QueryRecord::str($msgRow, 'session_id');
+        $rawScope = json_decode(QueryRecord::str($msgRow, 'resource_scope_json'), true);
+        if (! is_array($rawScope)) {
+            return;
+        }
+        /** @var list<string> $scope */
+        $scope = array_values(array_filter($rawScope, is_string(...)));
+        $ownerRunContext = new CallContext(
+            tenantId: $run->tenantId,
+            projectScope: $run->projectScope,
+            effectiveSubject: $run->effectiveSubject,
+            profile: $context->profile,
+            policyRevision: $run->profileRevision,
+            driveId: $context->driveId,
+            actor: $context->actor,
+        );
+
+        $channelBridge->syncExternalRunEvents($ownerRunContext, $sessionId, $run->runId, $scope);
     }
 }

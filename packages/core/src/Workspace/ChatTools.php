@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace Vaulter\Ai\Core\Workspace;
 
 use stdClass;
+use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Data\CommandDescriptor;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeResponse;
 use Vaulter\Ai\Core\Data\ResourceEntry;
@@ -39,6 +41,7 @@ final readonly class ChatTools
         private Proposals $proposals,
         private OwnerRoutes $routes,
         private StepCommitCoordinator $commits,
+        private ?CommandWriteCapability $writeCapability = null,
     ) {}
 
     /** @param list<string> $scope
@@ -55,10 +58,22 @@ final readonly class ChatTools
             return [];
         }
         $commands = [];
+        $commandMetadata = [];
         foreach ($readable as $entry) {
-            $allowed = $this->commands($context, $entry);
-            if ($allowed !== []) {
-                $commands[$entry->resourceId] = $allowed;
+            $descriptors = $this->allowedDescriptors($context, $entry);
+            if ($descriptors !== []) {
+                $commands[$entry->resourceId] = [];
+                $commandMetadata[$entry->resourceId] = [];
+                foreach ($descriptors as $descriptor) {
+                    $commands[$entry->resourceId][$descriptor->command] = $descriptor->inputSchema;
+                    $commandMetadata[$entry->resourceId][$descriptor->command] = [
+                        'command' => $descriptor->command,
+                        'name' => $descriptor->name,
+                        'version' => $descriptor->version,
+                        'effect' => $descriptor->effect,
+                        'required_permission' => $descriptor->requiredPermission,
+                    ];
+                }
             }
         }
 
@@ -70,9 +85,11 @@ final readonly class ChatTools
                 continue;
             }
             $tools[$operation->toolName()] = [
+                'version' => '1',
                 'input_schema' => $this->validator->toolInputSchema($operation),
                 'resource_ids' => $needsCommand ? array_values(array_intersect($targets, array_keys($commands))) : $targets,
                 'commands' => $needsCommand ? $commands : [],
+                'command_metadata' => $needsCommand ? $commandMetadata : [],
             ];
         }
 
@@ -124,9 +141,9 @@ final readonly class ChatTools
             return ['state' => 'dispatched', 'message' => $message];
         }
         if ($step->operation !== OfficeOperation::Commit) {
-            $response = $this->db->transaction(function () use ($context, $sessionId, $runId, $runLease, $call, $scope, $step, $request, $lease): OfficeResponse {
-                // In particular, prepare's proposal and its ledger link must commit together.
-                $response = $this->office->handle($context, $request);
+            // Prepare/Describe inspect Vaulter atomic document state, which requires running outside any Vaulter transaction.
+            $response = $this->office->handle($context, $request);
+            $this->db->transaction(function () use ($context, $sessionId, $runId, $runLease, $call, $scope, $step, $lease, $response): void {
                 $proposal = $this->stringField($response, 'proposal_id');
                 $receipt = $this->stringField($response, 'receipt_id');
                 $state = $response->ok ? 'verified' : 'failed';
@@ -137,8 +154,6 @@ final readonly class ChatTools
                 if ($proposal !== null && ($response->result->approval ?? null) === 'human') {
                     $this->chat->append($context, $sessionId, $runId, 'approval.required', ['call_id' => $call['id'], 'proposal_id' => $proposal], $scope);
                 }
-
-                return $response;
             }, $context->tenantId);
 
             return ['state' => $response->ok ? 'verified' : 'failed', 'message' => $message + ['response' => $response->toArray()]];
@@ -233,13 +248,24 @@ final readonly class ChatTools
     private function commands(CallContext $context, ResourceEntry $entry): array
     {
         $commands = [];
-        foreach ($this->registry->allowedDescriptors($context, $this->policy, $entry) as $descriptor) {
-            if ($this->resources->findAccessible($context, $entry->resourceId, $descriptor->requiredPermission) !== null) {
-                $commands[$descriptor->command] = $descriptor->inputSchema;
-            }
+        foreach ($this->allowedDescriptors($context, $entry) as $descriptor) {
+            $commands[$descriptor->command] = $descriptor->inputSchema;
         }
 
         return $commands;
+    }
+
+    /** @return list<CommandDescriptor> */
+    private function allowedDescriptors(CallContext $context, ResourceEntry $entry): array
+    {
+        $allowed = [];
+        foreach ($this->registry->allowedDescriptors($context, $this->policy, $entry, $this->writeCapability) as $descriptor) {
+            if ($this->resources->findAccessible($context, $entry->resourceId, $descriptor->requiredPermission) !== null) {
+                $allowed[] = $descriptor;
+            }
+        }
+
+        return $allowed;
     }
 
     private function stringField(OfficeResponse $response, string $field): ?string

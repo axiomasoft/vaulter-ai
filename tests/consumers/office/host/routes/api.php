@@ -14,9 +14,11 @@ use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
+use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
+use Vaulter\Ai\Core\Workspace\ChannelChatBridge;
 use Vaulter\Documents\Facades\Documents;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
 use Vaulter\Drive\Access\ValueObjects\Subject;
@@ -148,6 +150,7 @@ Route::post('/_fixture/seed', static function (Request $request): JsonResponse {
         'tenant_id' => '61',
         'project_scope' => 'default',
         'drive_id' => $driveId,
+        'owner_id' => $owner->getKey(),
         'writer_user_id' => $writer->getKey(),
         'reviewer_user_id' => $reviewer->getKey(),
         'writer_token' => $writerToken,
@@ -155,6 +158,31 @@ Route::post('/_fixture/seed', static function (Request $request): JsonResponse {
         'reader_token' => $readerToken,
         'foreign_token' => $foreignToken,
     ]);
+});
+
+Route::post('/_fixture/revoke', static function (Request $request): JsonResponse {
+    if (($deny = assertStandFixtureToken($request)) !== null) {
+        return $deny;
+    }
+
+    $ownerId = (int) $request->input('owner_id', 0);
+    $userId = (int) $request->input('user_id', 0);
+    $owner = $ownerId > 0 ? StandOwner::query()->find($ownerId) : StandOwner::query()->orderByDesc('id')->first();
+    $actor = StandActor::query()->find($userId);
+    if ($owner === null || $actor === null) {
+        return response()->json(['error' => 'not_found'], 404);
+    }
+
+    $drive = Vaulter::drive($owner)->asSystem('fixture-revoke');
+    $revokedCount = 0;
+    foreach ($drive->access()->grants($drive->root()->id) as $grant) {
+        if ((string) $grant->subject->id === (string) $actor->getKey()) {
+            $drive->access()->revoke($drive->root()->id, $grant->id);
+            $revokedCount++;
+        }
+    }
+
+    return response()->json(['ok' => true, 'revoked' => $revokedCount]);
 });
 
 Route::post('/_fixture/runs', static function (Request $request, OfficeRegistry $registry, Runs $runs): JsonResponse {
@@ -288,6 +316,7 @@ Route::post('/office/channel/events', static function (
     ResourceDirectory $directory,
     OfficeRegistry $registry,
     Runs $runs,
+    ChannelChatBridge $chatBridge,
 ): JsonResponse {
     $viewer = $contexts->resolve($request);
     if ($viewer === null) {
@@ -318,6 +347,12 @@ Route::post('/office/channel/events', static function (
     $userId = (int) $actor->getKey();
     $channel = standSelectedChannel();
 
+    try {
+        $chatSessionId = $chatBridge->resolveOrOpenExternalSession($viewer, $channel, $sessionId);
+    } catch (OfficeException $e) {
+        return standOfficeError($e->errorCode);
+    }
+
     $sessionQuery = static function () use ($viewer, $sessionId) {
         return DB::table('stand_channel_sessions')
             ->where('tenant_id', $viewer->tenantId)
@@ -332,11 +367,17 @@ Route::post('/office/channel/events', static function (
             'effective_subject' => $viewer->effectiveSubject,
             'user_id' => $userId,
             'drive_id' => $viewer->driveId,
+            'chat_session_id' => $chatSessionId,
         ]);
     }
     $bound = $sessionQuery()->first();
     if ($bound === null || (string) $bound->effective_subject !== $viewer->effectiveSubject) {
         return standOfficeError(ErrorCode::ResourceUnavailable);
+    }
+    if (! is_string($bound->chat_session_id ?? null) || $bound->chat_session_id === '') {
+        $sessionQuery()->update(['chat_session_id' => $chatSessionId]);
+    } else {
+        $chatSessionId = (string) $bound->chat_session_id;
     }
 
     $runQuery = static function () use ($viewer, $channel, $eventId) {
@@ -358,11 +399,13 @@ Route::post('/office/channel/events', static function (
         'phase' => $phase,
         'resource_id' => $resourceId,
         'run_id' => null,
+        'chat_session_id' => $chatSessionId,
     ]);
 
-    $respond = static function (bool $published, bool $duplicate, ?string $runId) use ($sessionId, $eventId, $phase, $channel, $runQuery): JsonResponse {
+    $respond = static function (bool $published, bool $duplicate, ?string $runId) use ($sessionId, $chatSessionId, $eventId, $phase, $channel, $runQuery): JsonResponse {
         return response()->json([
             'session_id' => $sessionId,
+            'chat_session_id' => $chatSessionId,
             'event_id' => $eventId,
             'phase' => $phase,
             'channel' => $channel,
@@ -387,7 +430,17 @@ Route::post('/office/channel/events', static function (
             ->where('channel', $channel)
             ->where('event_id', $eventId)
             ->whereNull('run_id')
-            ->update(['run_id' => $existingRunId]);
+            ->update(['run_id' => $existingRunId, 'chat_session_id' => $chatSessionId]);
+
+        $chatBridge->linkAndSyncExternalRun(
+            context: $viewer,
+            channel: $channel,
+            externalSessionId: $sessionId,
+            eventId: $eventId,
+            runId: $existingRunId,
+            scope: [$resourceId],
+            content: is_string($request->input('content')) ? $request->input('content') : null,
+        );
 
         return $respond(true, true, $existingRunId);
     }
@@ -407,6 +460,7 @@ Route::post('/office/channel/events', static function (
         'resource_id' => $resourceId,
         'profile' => 'documents',
         'session_id' => $sessionId,
+        'chat_session_id' => $chatSessionId,
         'event_id' => $eventId,
     ]);
 
@@ -441,13 +495,23 @@ Route::post('/office/channel/events', static function (
         ]);
     }
 
+    $chatBridge->linkAndSyncExternalRun(
+        context: $viewer,
+        channel: $channel,
+        externalSessionId: $sessionId,
+        eventId: $eventId,
+        runId: $run->runId,
+        scope: [$resourceId],
+        content: is_string($request->input('content')) ? $request->input('content') : null,
+    );
+
     DB::table('stand_channel_inbox')
         ->where('tenant_id', $viewer->tenantId)
         ->where('project_scope', $viewer->projectScope)
         ->where('effective_subject', $viewer->effectiveSubject)
         ->where('channel', $channel)
         ->where('event_id', $eventId)
-        ->update(['run_id' => $run->runId]);
+        ->update(['run_id' => $run->runId, 'chat_session_id' => $chatSessionId]);
 
     return $respond(true, false, $run->runId);
 });

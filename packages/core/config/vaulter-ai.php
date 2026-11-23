@@ -41,4 +41,22 @@ return [
     'encryption' => [
         'key_id' => env('VAULTER_AI_KEY_ID', 'app-key-v1'),
     ],
+    'secret_store' => [
+        'default_model' => env('VAULTER_AI_MODEL'),
+        'connections' => [
+            'office_model' => [
+                'driver' => env('VAULTER_AI_PROVIDER', 'openai'),
+                'key' => env('VAULTER_AI_PROVIDER_KEY', env('OPENAI_API_KEY')),
+                'model' => env('VAULTER_AI_MODEL'),
+                'url' => env('VAULTER_AI_PROVIDER_URL', env('OPENAI_BASE_URL')),
+            ],
+        ],
+    ],
+    'chat' => [
+        'max_tool_calls' => 32,
+        'max_output_bytes' => 65536,
+        'max_retries' => 2,
+        'retry_backoff_ms' => 100,
+        'request_timeout_seconds' => 30,
+    ],
 ];

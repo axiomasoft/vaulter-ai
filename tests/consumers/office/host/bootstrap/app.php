@@ -18,6 +18,7 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(static function (Middleware $middleware): void {
         $middleware->validateCsrfTokens(except: ['*']);
+        $middleware->encryptCookies(except: ['stand_token']);
     })
     ->withExceptions(static function (Exceptions $exceptions): void {})
     ->create();

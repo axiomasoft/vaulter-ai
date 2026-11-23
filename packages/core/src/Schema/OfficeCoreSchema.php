@@ -171,6 +171,53 @@ final readonly class OfficeCoreSchema
         });
     }
 
+    public function createChannelTables(): void
+    {
+        $this->db->transaction(function (): void {
+            $connection = $this->db->connection();
+            $pgsql = $this->db->driver() === 'pgsql';
+            if ($pgsql) {
+                $connection->statement("SET LOCAL lock_timeout = '2s'");
+                $connection->statement("SET LOCAL statement_timeout = '15s'");
+            }
+
+            $links = $this->q('ai_channel_sessions');
+            $sessions = $this->q('ai_chat_sessions');
+            $uuid = $pgsql ? 'uuid' : 'text';
+            $stamp = $pgsql ? 'timestamptz' : 'text';
+            $opaque = $pgsql ? 'varchar(255) COLLATE "C"' : 'text COLLATE BINARY';
+            $opaqueLength = static fn (string $column): string => $pgsql
+                ? "octet_length({$column}) BETWEEN 1 AND 255"
+                : "length(CAST({$column} AS blob)) BETWEEN 1 AND 255";
+
+            $connection->statement(<<<SQL
+                CREATE TABLE {$links} (
+                    tenant_id {$opaque} NOT NULL CHECK ({$opaqueLength('tenant_id')}),
+                    project_scope {$opaque} NOT NULL CHECK ({$opaqueLength('project_scope')}),
+                    channel varchar(64) NOT NULL CHECK (channel <> ''),
+                    external_session_id {$opaque} NOT NULL CHECK ({$opaqueLength('external_session_id')}),
+                    owner_subject {$opaque} NOT NULL CHECK ({$opaqueLength('owner_subject')}),
+                    chat_session_id {$uuid} NOT NULL REFERENCES {$sessions}(session_id) ON DELETE CASCADE,
+                    created_at {$stamp} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at {$stamp} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (tenant_id, project_scope, channel, external_session_id)
+                )
+                SQL);
+            $connection->statement("CREATE INDEX {$this->idx('ai_channel_sessions_chat_fk_idx')} ON {$links} (chat_session_id)");
+        });
+    }
+
+    public function dropChannelTables(): void
+    {
+        $this->db->transaction(function (): void {
+            if ($this->db->driver() === 'pgsql') {
+                $this->db->connection()->statement("SET LOCAL lock_timeout = '2s'");
+                $this->db->connection()->statement("SET LOCAL statement_timeout = '15s'");
+            }
+            $this->db->connection()->statement("DROP TABLE IF EXISTS {$this->q('ai_channel_sessions')}");
+        });
+    }
+
     public function dropChatTables(): void
     {
         $this->db->transaction(function (): void {

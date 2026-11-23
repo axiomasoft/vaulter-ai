@@ -10,12 +10,14 @@ use AgenTools\Error\ToolError;
 use AgenTools\Error\ToolExecutionResult;
 use JsonException;
 use stdClass;
+use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeResponse;
+use Vaulter\Ai\Core\Data\ResourceEntry;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
@@ -23,6 +25,7 @@ use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
 use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
+use Vaulter\Ai\Core\Registry\OfficeRegistry;
 
 /**
  * AgenTools ToolPort adapter invoking Office SDK operations within a trusted CallContext.
@@ -42,14 +45,19 @@ final readonly class OfficeToolPort implements ToolPort
         private WireErrorMapper $errorMapper,
         private ?CallContext $context = null,
         private ?string $runId = null,
+        private ?OfficeRegistry $officeRegistry = null,
+        private ?CommandWriteCapability $writeCapability = null,
     ) {}
 
-    public function forContext(CallContext $context, ?string $runId = null): self
+    /** @param list<ResourceEntry> $resources */
+    public function forContext(CallContext $context, ?string $runId = null, array $resources = []): self
     {
         return new self(
             office: $this->office,
             policy: $this->policy,
-            descriptors: $this->descriptors->forContext($context),
+            descriptors: $resources === []
+                ? $this->descriptors->forContext($context)
+                : $this->descriptors->forScope($context, $resources),
             actionKeyMap: $this->actionKeyMap,
             runs: $this->runs,
             proposals: $this->proposals,
@@ -58,6 +66,8 @@ final readonly class OfficeToolPort implements ToolPort
             errorMapper: $this->errorMapper,
             context: $context,
             runId: $runId,
+            officeRegistry: $this->officeRegistry,
+            writeCapability: $this->writeCapability,
         );
     }
 
@@ -121,6 +131,28 @@ final readonly class OfficeToolPort implements ToolPort
                     false,
                     'The requested command is not published for this profile.',
                 ));
+            }
+            if ($this->officeRegistry !== null) {
+                $registered = $this->officeRegistry->command($command);
+                if ($registered === null) {
+                    return ToolExecutionResult::failure(new ToolError(
+                        'vaulter.not_found.resource_unavailable',
+                        ErrorCategory::NOT_FOUND,
+                        false,
+                        'The requested Office command version is not installed.',
+                    ));
+                }
+                if (is_string($arguments['resource_id'] ?? null)) {
+                    $cmdDescriptor = $registered->descriptor();
+                    $entry = $this->directory->findAccessible($this->context, $arguments['resource_id'], $cmdDescriptor->requiredPermission);
+                    if ($entry === null || $cmdDescriptor->resourceType !== $entry->resourceType
+                        || ! $this->policy->allowsCommand($this->context, $entry, $command)) {
+                        return $this->toToolResult($this->errorMapper->toResponse($operation, ErrorCode::ResourceUnavailable));
+                    }
+                    if ($this->writeCapability !== null && ! $this->writeCapability->canWrite($this->context, $entry, $cmdDescriptor)) {
+                        return $this->toToolResult($this->errorMapper->toResponse($operation, ErrorCode::UnsupportedContent));
+                    }
+                }
             }
         }
 

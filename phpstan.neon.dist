@@ -9,6 +9,8 @@ rules:
 parameters:
     level: max
     tmpDir: build/phpstan
+    bootstrapFiles:
+        - scripts/ci/phpstan-bootstrap.php
     paths:
         - packages/core/src
         - packages/core/database

@@ -93,6 +93,7 @@ return new class extends Migration
                 $table->string('effective_subject', 191);
                 $table->unsignedBigInteger('user_id')->index();
                 $table->string('drive_id', 64);
+                $table->string('chat_session_id', 64)->nullable()->index();
                 $table->timestamp('created_at')->useCurrent();
                 $table->primary(['tenant_id', 'project_scope', 'session_id']);
             });
@@ -109,6 +110,7 @@ return new class extends Migration
                 $table->string('phase', 16);
                 $table->string('resource_id', 64);
                 $table->string('run_id', 64)->nullable();
+                $table->string('chat_session_id', 64)->nullable()->index();
                 $table->timestamp('created_at')->useCurrent();
                 $table->unique(
                     ['tenant_id', 'project_scope', 'effective_subject', 'channel', 'event_id'],

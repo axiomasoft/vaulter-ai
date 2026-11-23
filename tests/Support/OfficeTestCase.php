@@ -9,6 +9,7 @@ use Laravel\Ai\AiServiceProvider;
 use Orchestra\Testbench\TestCase as OrchestraTestCase;
 use Vaulter\Ai\AgenTools\AgenToolsServiceProvider;
 use Vaulter\Ai\Core\Contracts\Clock;
+use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\OfficeServiceProvider;
 use Vaulter\Ai\Core\Operations\Commit;
@@ -20,7 +21,9 @@ use Vaulter\Ai\Core\Operations\Status;
 use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
 use Vaulter\Ai\Core\Operations\Verify;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
+use Vaulter\Ai\Core\Workspace\ChatTools;
 use Vaulter\Ai\Documents\DocumentsAiServiceProvider;
+use Vaulter\Ai\Documents\Host\DocumentsCommandWriteCapability;
 use Vaulter\Ai\LaravelAi\LaravelAiServiceProvider;
 use Vaulter\Ai\Sheets\SheetsAiServiceProvider;
 use Vaulter\Documents\VaulterDocumentsServiceProvider;
@@ -151,6 +154,9 @@ abstract class OfficeTestCase extends OrchestraTestCase
         $this->app->forgetInstance(DispatchOfficeOperation::class);
         $this->app->forgetInstance(Office::class);
         $this->app->forgetInstance(StepCommitCoordinator::class);
+        $this->app->forgetInstance(CommandWriteCapability::class);
+        $this->app->forgetInstance(DocumentsCommandWriteCapability::class);
+        $this->app->forgetInstance(ChatTools::class);
 
         return $registry;
     }

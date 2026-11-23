@@ -8,31 +8,65 @@ use AgenTools\Contracts\ToolDescriptorRegistry;
 use AgenTools\Tool\ActionProfile;
 use AgenTools\Tool\ToolAnnotations;
 use AgenTools\Tool\ToolDescriptor;
+use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
+use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\ResourceEntry;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
+use Vaulter\Ai\Core\Registry\OfficeRegistry;
 
 /**
  * Exposes validated AgenTools ToolDescriptor metadata for the seven Office SDK v1 operations,
- * keeping MCP annotations and dev.agentools/action profiles aligned with Office side effects.
+ * scoped by HostPolicy, installed command versions, live resource permissions, and 3.5 journal readiness.
  */
 final readonly class OfficeToolDescriptorRegistry implements ToolDescriptorRegistry
 {
     /** @var array<string, ToolDescriptor> */
     private array $descriptors;
 
+    /**
+     * @param  list<ResourceEntry>  $scopedResources
+     */
     public function __construct(
         private ?HostPolicy $policy = null,
         private ?CallContext $context = null,
         private ?ResourceEntry $resource = null,
+        private ?OfficeRegistry $officeRegistry = null,
+        private ?CommandWriteCapability $writeCapability = null,
+        private ?ResourceDirectory $directory = null,
+        private array $scopedResources = [],
     ) {
         $this->descriptors = $this->buildDescriptors();
     }
 
     public function forContext(CallContext $context, ?ResourceEntry $resource = null): self
     {
-        return new self($this->policy, $context, $resource);
+        return new self(
+            policy: $this->policy,
+            context: $context,
+            resource: $resource,
+            officeRegistry: $this->officeRegistry,
+            writeCapability: $this->writeCapability,
+            directory: $this->directory,
+            scopedResources: $resource !== null ? [$resource] : [],
+        );
+    }
+
+    /**
+     * @param  list<ResourceEntry>  $resources
+     */
+    public function forScope(CallContext $context, array $resources): self
+    {
+        return new self(
+            policy: $this->policy,
+            context: $context,
+            resource: $resources[0] ?? null,
+            officeRegistry: $this->officeRegistry,
+            writeCapability: $this->writeCapability,
+            directory: $this->directory,
+            scopedResources: $resources,
+        );
     }
 
     public function descriptor(string $toolName): ?ToolDescriptor
@@ -48,11 +82,8 @@ final readonly class OfficeToolDescriptorRegistry implements ToolDescriptorRegis
         }
 
         if ($this->context !== null && $this->policy !== null
-            && in_array($canonical, [OfficeOperation::Prepare, OfficeOperation::Commit], true)) {
-            $commands = $this->resource !== null
-                ? $this->policy->allowedCommands($this->context, $this->resource)
-                : $this->policy->profile($this->context)->commands;
-            if ($commands === []) {
+            && in_array($canonical, [OfficeOperation::Describe, OfficeOperation::Prepare, OfficeOperation::Commit], true)) {
+            if (! $this->allowsWriteToolsForScope($this->context)) {
                 return null;
             }
         }
@@ -74,6 +105,110 @@ final readonly class OfficeToolDescriptorRegistry implements ToolDescriptorRegis
         }
 
         return $items;
+    }
+
+    /**
+     * @param  list<ResourceEntry>  $resources
+     * @return array<string, list<array{command: string, name: string, version: int, effect: string}>>
+     */
+    public function versionedCommandsForScope(CallContext $context, array $resources): array
+    {
+        if ($this->policy === null) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($resources as $entry) {
+            $commands = $this->allowedCommandsForEntry($context, $entry);
+            if ($commands === []) {
+                continue;
+            }
+            $out[$entry->resourceId] = [];
+            foreach ($commands as $item) {
+                $out[$entry->resourceId][] = $item;
+            }
+        }
+
+        return $out;
+    }
+
+    private function allowsWriteToolsForScope(CallContext $context): bool
+    {
+        if ($this->policy === null) {
+            return true;
+        }
+
+        $resources = $this->scopedResources !== []
+            ? $this->scopedResources
+            : ($this->resource !== null ? [$this->resource] : []);
+
+        if ($resources !== []) {
+            foreach ($resources as $entry) {
+                if ($this->allowedCommandsForEntry($context, $entry) !== []) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        $commands = $this->policy->profile($context)->commands;
+        if ($commands === []) {
+            return false;
+        }
+
+        if ($this->officeRegistry === null) {
+            return true;
+        }
+
+        foreach ($commands as $cmdName) {
+            if ($this->officeRegistry->command($cmdName) !== null) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @return list<array{command: string, name: string, version: int, effect: string}>
+     */
+    private function allowedCommandsForEntry(CallContext $context, ResourceEntry $entry): array
+    {
+        if ($this->policy === null) {
+            return [];
+        }
+
+        if ($this->officeRegistry === null) {
+            $out = [];
+            foreach ($this->policy->allowedCommands($context, $entry) as $cmdName) {
+                $parts = explode('@', $cmdName, 2);
+                $out[] = [
+                    'command' => $cmdName,
+                    'name' => $parts[0],
+                    'version' => isset($parts[1]) && is_numeric($parts[1]) ? (int) $parts[1] : 1,
+                    'effect' => 'write',
+                ];
+            }
+
+            return $out;
+        }
+
+        $out = [];
+        foreach ($this->officeRegistry->allowedDescriptors($context, $this->policy, $entry, $this->writeCapability) as $descriptor) {
+            if ($this->directory !== null
+                && $this->directory->findAccessible($context, $entry->resourceId, $descriptor->requiredPermission) === null) {
+                continue;
+            }
+            $out[] = [
+                'command' => $descriptor->command,
+                'name' => $descriptor->name,
+                'version' => $descriptor->version,
+                'effect' => $descriptor->effect,
+            ];
+        }
+
+        return $out;
     }
 
     /**

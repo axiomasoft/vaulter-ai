@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use AgenTools\Contracts\LlmPort;
 use App\Models\StandActor;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Artisan;
@@ -11,6 +12,7 @@ use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
+use Laravel\Ai\AiManager;
 use Laravel\Ai\Responses\Data\ToolCall;
 use RuntimeException;
 use Vaulter\Ai\Core\Contracts\ApprovedCommandContextResolver;
@@ -287,34 +289,48 @@ final class StandServiceProvider extends ServiceProvider
             return 0;
         });
 
-        if (config('stand.deterministic_script') === true && class_exists(OfficeAgent::class)) {
+        if (config('stand.deterministic_script') === true) {
             $runs = $this->app->make(Runs::class);
             $routes = $this->app->make(OwnerRoutes::class);
             $db = $this->app->make(OfficeDatabase::class);
 
-            OfficeAgent::fake(static function (string $prompt) use ($runs, $routes, $db): mixed {
-                $activeRunId = Context::get('vaulter.ai.run_id');
-                $runCtx = is_string($activeRunId) && $activeRunId !== ''
-                    ? DB::table('stand_run_contexts')->where('run_id', $activeRunId)->first()
-                    : DB::table('stand_run_contexts')->orderByDesc('created_at')->first();
-                if ($runCtx === null) {
-                    return 'No stand run context found.';
+            $nextChatDecision = static function (string $runId, ?string $preferredResourceId = null) use ($runs, $routes): array {
+                $runRow = DB::table('v_ai_runs')->where('run_id', $runId)->first();
+                if ($runRow === null) {
+                    return ['type' => 'text', 'text' => 'Run not found.'];
                 }
-                $actor = StandActor::query()->find($runCtx->user_id);
+                $subject = (string) $runRow->effective_subject;
+                $actorId = str_starts_with($subject, 'user/') ? (int) substr($subject, 5) : 0;
+                $actor = StandActor::query()->find($actorId);
                 if ($actor === null) {
-                    return 'Actor missing.';
+                    return ['type' => 'text', 'text' => 'Actor missing.'];
                 }
+
+                $resourceId = $preferredResourceId ?? '';
+                if ($resourceId === '') {
+                    $msgRow = DB::table('v_ai_chat_messages')
+                        ->where('run_id', $runId)
+                        ->where('role', 'user')
+                        ->first();
+                    $scope = is_object($msgRow) ? json_decode((string) $msgRow->resource_scope_json, true) : null;
+                    if (is_array($scope) && is_string($scope[0] ?? null)) {
+                        $resourceId = $scope[0];
+                    }
+                }
+                if ($resourceId === '') {
+                    return ['type' => 'text', 'text' => 'No document in chat scope.'];
+                }
+
                 $context = new CallContext(
-                    tenantId: (string) $runCtx->tenant_id,
-                    projectScope: (string) $runCtx->project_scope,
-                    effectiveSubject: 'user/'.$actor->getKey(),
-                    profile: (string) $runCtx->profile,
-                    policyRevision: (string) $runCtx->policy_revision,
-                    driveId: (string) $runCtx->drive_id,
+                    tenantId: (string) $runRow->tenant_id,
+                    projectScope: (string) $runRow->project_scope,
+                    effectiveSubject: $subject,
+                    profile: 'documents',
+                    policyRevision: (string) $runRow->profile_revision,
                     actor: $actor,
                 );
 
-                $steps = $runs->listSteps($context, (string) $runCtx->run_id);
+                $steps = $runs->listSteps($context, $runId);
                 $ops = array_map(static fn ($s): string => $s->operation->value, $steps);
                 $latest = static function (OfficeOperation $op) use ($steps): ?array {
                     $match = null;
@@ -328,71 +344,201 @@ final class StandServiceProvider extends ServiceProvider
                 };
 
                 if (! in_array(OfficeOperation::Read->value, $ops, true)) {
-                    return new ToolCall('stand_tc_read', 'office_read', [
-                        'resource_id' => (string) $runCtx->resource_id,
-                        'selector' => ['kind' => 'text_block', 'block_id' => 'p42'],
-                    ]);
+                    return [
+                        'type' => 'tool',
+                        'id' => 'chat_tc_read',
+                        'tool' => 'office_read',
+                        'input' => ['resource_id' => $resourceId, 'selector' => ['kind' => 'text_block', 'block_id' => 'p42']],
+                    ];
                 }
+
                 if (! in_array(OfficeOperation::Prepare->value, $ops, true)) {
-                    return new ToolCall('stand_tc_prepare', 'office_prepare', [
-                        'resource_id' => (string) $runCtx->resource_id,
-                        'command' => 'text.replace_exact@1',
-                        'read_token' => (string) ($latest(OfficeOperation::Read)['result']['read_token'] ?? ''),
-                        'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
-                    ]);
+                    return [
+                        'type' => 'tool',
+                        'id' => 'chat_tc_prepare',
+                        'tool' => 'office_prepare',
+                        'input' => [
+                            'resource_id' => $resourceId,
+                            'command' => 'text.replace_exact@1',
+                            'read_token' => (string) ($latest(OfficeOperation::Read)['result']['read_token'] ?? ''),
+                            'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+                        ],
+                    ];
                 }
 
                 $prepareRes = $latest(OfficeOperation::Prepare)['result'] ?? [];
                 $proposalId = (string) ($prepareRes['proposal_id'] ?? '');
                 $digest = (string) ($prepareRes['digest'] ?? '');
 
-                // A final channel message prepares one proposal. Human agreement is the
-                // decision handler's job; do not commit, and do not publish a write, until it approves.
-                if (($prepareRes['approval'] ?? null) === 'human' && $proposalId !== '') {
-                    $decision = DB::table('v_ai_proposals')->where('proposal_id', $proposalId)->value('decision');
-                    if ($decision !== 'approved') {
-                        return 'Awaiting the host decision handler before any commit.';
+                $commitCall = DB::table('v_ai_tool_calls')
+                    ->where('run_id', $runId)
+                    ->where('tool_name', OfficeOperation::Commit->value)
+                    ->first();
+
+                if ($commitCall === null || ! in_array((string) $commitCall->state, ['verified', 'committed', 'rejected'], true)) {
+                    if ($proposalId !== '' && DB::table('v_ai_proposals')->where('proposal_id', $proposalId)->value('decision') === 'rejected') {
+                        return ['type' => 'text', 'text' => 'Предложение отклонено рецензентом.'];
                     }
+
+                    return [
+                        'type' => 'tool',
+                        'id' => 'chat_tc_commit',
+                        'tool' => 'office_commit',
+                        'input' => [
+                            'resource_id' => $resourceId,
+                            'proposal_id' => $proposalId,
+                            'digest' => $digest,
+                        ],
+                    ];
                 }
 
-                $commitStep = $runs->findCommitStepByProposal($context, (string) $runCtx->run_id, $proposalId);
-                if ($commitStep === null || $commitStep->state === 'dispatched') {
-                    // If kill fault requested before settling owner route, arm one-shot SIGKILL hook and run commit.
-                    if ($runCtx->fault_mode === 'kill_after_owner_commit') {
-                        DB::table('stand_run_contexts')
-                            ->where('run_id', $runCtx->run_id)
-                            ->update(['fault_mode' => null]);
+                $receiptId = is_string($commitCall->receipt_id ?? null) && $commitCall->receipt_id !== ''
+                    ? $commitCall->receipt_id
+                    : ($routes->forProposal($context, $proposalId)?->receiptId ?? '');
 
-                        $routesTable = $db->table('ai_owner_routes');
-                        $db->connection()->beforeExecuting(static function (string $sql) use ($routesTable): void {
-                            if (str_contains($sql, $routesTable) && str_contains(strtolower($sql), 'update') && str_contains($sql, 'receipt_id')) {
-                                if (function_exists('posix_kill')) {
-                                    posix_kill(getmypid(), SIGKILL);
-                                }
-                                throw new RuntimeException('fault injected');
+                return [
+                    'type' => 'text',
+                    'text' => $receiptId !== ''
+                        ? "Изменение подтверждено и проверено. Квитанция: {$receiptId}."
+                        : 'Обработка чат-запроса завершена.',
+                ];
+            };
+
+            if (class_exists(OfficeAgent::class) && $this->app->bound(AiManager::class)) {
+                OfficeAgent::fake(static function (string $prompt) use ($runs, $routes, $db, $nextChatDecision): mixed {
+                    $activeRunId = Context::get('vaulter.ai.run_id');
+                    $runCtx = is_string($activeRunId) && $activeRunId !== ''
+                        ? DB::table('stand_run_contexts')->where('run_id', $activeRunId)->first()
+                        : DB::table('stand_run_contexts')->orderByDesc('created_at')->first();
+                    if ($runCtx === null) {
+                        if (is_string($activeRunId) && $activeRunId !== '') {
+                            $step = $nextChatDecision($activeRunId);
+
+                            return $step['type'] === 'tool'
+                                ? new ToolCall((string) $step['id'], (string) $step['tool'], (array) $step['input'])
+                                : (string) $step['text'];
+                        }
+
+                        return 'No stand run context found.';
+                    }
+                    $actor = StandActor::query()->find($runCtx->user_id);
+                    if ($actor === null) {
+                        return 'Actor missing.';
+                    }
+                    $context = new CallContext(
+                        tenantId: (string) $runCtx->tenant_id,
+                        projectScope: (string) $runCtx->project_scope,
+                        effectiveSubject: 'user/'.$actor->getKey(),
+                        profile: (string) $runCtx->profile,
+                        policyRevision: (string) $runCtx->policy_revision,
+                        driveId: (string) $runCtx->drive_id,
+                        actor: $actor,
+                    );
+
+                    $steps = $runs->listSteps($context, (string) $runCtx->run_id);
+                    $ops = array_map(static fn ($s): string => $s->operation->value, $steps);
+                    $latest = static function (OfficeOperation $op) use ($steps): ?array {
+                        $match = null;
+                        foreach ($steps as $s) {
+                            if ($s->operation === $op) {
+                                $match = $s->compactResult;
                             }
-                        });
+                        }
+
+                        return $match;
+                    };
+
+                    if (! in_array(OfficeOperation::Read->value, $ops, true)) {
+                        return new ToolCall('stand_tc_read', 'office_read', [
+                            'resource_id' => (string) $runCtx->resource_id,
+                            'selector' => ['kind' => 'text_block', 'block_id' => 'p42'],
+                        ]);
+                    }
+                    if (! in_array(OfficeOperation::Prepare->value, $ops, true)) {
+                        return new ToolCall('stand_tc_prepare', 'office_prepare', [
+                            'resource_id' => (string) $runCtx->resource_id,
+                            'command' => 'text.replace_exact@1',
+                            'read_token' => (string) ($latest(OfficeOperation::Read)['result']['read_token'] ?? ''),
+                            'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+                        ]);
                     }
 
-                    return new ToolCall('stand_tc_commit_'.($commitStep === null ? '1' : 'retry_2'), 'office_commit', [
-                        'resource_id' => (string) $runCtx->resource_id,
-                        'proposal_id' => $proposalId,
-                        'digest' => $digest,
-                    ]);
-                }
+                    $prepareRes = $latest(OfficeOperation::Prepare)['result'] ?? [];
+                    $proposalId = (string) ($prepareRes['proposal_id'] ?? '');
+                    $digest = (string) ($prepareRes['digest'] ?? '');
 
-                if (! in_array(OfficeOperation::Verify->value, $ops, true)) {
-                    $receiptId = $commitStep->receiptId ?? $routes->forProposal($context, $proposalId)?->receiptId ?? '';
+                    // A final channel message prepares one proposal. Human agreement is the
+                    // decision handler's job; do not commit, and do not publish a write, until it approves.
+                    if (($prepareRes['approval'] ?? null) === 'human' && $proposalId !== '') {
+                        $decision = DB::table('v_ai_proposals')->where('proposal_id', $proposalId)->value('decision');
+                        if ($decision !== 'approved') {
+                            return 'Awaiting the host decision handler before any commit.';
+                        }
+                    }
 
-                    return new ToolCall('stand_tc_verify', 'office_verify', [
-                        'resource_id' => (string) $runCtx->resource_id,
-                        'receipt_id' => (string) $receiptId,
-                        'mode' => 'at_commit',
-                    ]);
-                }
+                    $commitStep = $runs->findCommitStepByProposal($context, (string) $runCtx->run_id, $proposalId);
+                    if ($commitStep === null || $commitStep->state === 'dispatched') {
+                        // If kill fault requested before settling owner route, arm one-shot SIGKILL hook and run commit.
+                        if ($runCtx->fault_mode === 'kill_after_owner_commit') {
+                            DB::table('stand_run_contexts')
+                                ->where('run_id', $runCtx->run_id)
+                                ->update(['fault_mode' => null]);
 
-                return 'Completed Office task and verified receipt.';
-            });
+                            $routesTable = $db->table('ai_owner_routes');
+                            $db->connection()->beforeExecuting(static function (string $sql) use ($routesTable): void {
+                                if (str_contains($sql, $routesTable) && str_contains(strtolower($sql), 'update') && str_contains($sql, 'receipt_id')) {
+                                    if (function_exists('posix_kill')) {
+                                        posix_kill(getmypid(), SIGKILL);
+                                    }
+                                    throw new RuntimeException('fault injected');
+                                }
+                            });
+                        }
+
+                        return new ToolCall('stand_tc_commit_'.($commitStep === null ? '1' : 'retry_2'), 'office_commit', [
+                            'resource_id' => (string) $runCtx->resource_id,
+                            'proposal_id' => $proposalId,
+                            'digest' => $digest,
+                        ]);
+                    }
+
+                    if (! in_array(OfficeOperation::Verify->value, $ops, true)) {
+                        $receiptId = $commitStep->receiptId ?? $routes->forProposal($context, $proposalId)?->receiptId ?? '';
+
+                        return new ToolCall('stand_tc_verify', 'office_verify', [
+                            'resource_id' => (string) $runCtx->resource_id,
+                            'receipt_id' => (string) $receiptId,
+                            'mode' => 'at_commit',
+                        ]);
+                    }
+
+                    return 'Completed Office task and verified receipt.';
+                });
+            }
+
+            if (interface_exists(LlmPort::class)) {
+                $this->app->singleton(LlmPort::class, static fn (): object => new class($nextChatDecision) implements LlmPort
+                {
+                    public function __construct(private readonly \Closure $decide) {}
+
+                    public function respond(array $input): array
+                    {
+                        $activeRunId = Context::get('vaulter.ai.run_id');
+                        $preferred = $input['tools']['office_read']['resource_ids'][0] ?? null;
+                        $preferredId = is_string($preferred) ? $preferred : null;
+                        if (! is_string($activeRunId) || $activeRunId === '') {
+                            return ['text' => 'Stand chat completed.'];
+                        }
+                        $step = ($this->decide)($activeRunId, $preferredId);
+                        if ($step['type'] === 'tool') {
+                            return ['tool_call' => ['tool' => (string) $step['tool'], 'input' => (array) $step['input']]];
+                        }
+                        $text = (string) $step['text'];
+
+                        return ['deltas' => [$text], 'text' => $text];
+                    }
+                });
+            }
         }
     }
 }
