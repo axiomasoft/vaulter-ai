@@ -18,10 +18,10 @@ use Vaulter\Ai\Core\Data\ResourceEntry;
 use Vaulter\Ai\Core\Enums\ResourceType;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
+use Vaulter\Ai\Documents\Contracts\LiveTextJournal;
 use Vaulter\Ai\Documents\Host\TextDocumentAccess;
 use Vaulter\Ai\Documents\Projection\RichTextBlockExtractor;
 use Vaulter\Ai\Documents\Writing\DriveDocumentMutation;
-use Vaulter\Ai\Documents\Writing\LiveTextOwner;
 use Vaulter\Ai\Documents\Writing\TextReplacement;
 use Vaulter\Documents\Content\TipTap\TipTapContent;
 use Vaulter\Documents\Contracts\LockedDocumentMutation;
@@ -100,7 +100,7 @@ final readonly class ReplaceExact implements OfficeCommand
         }
         $owner = $this->registry->ownerFor(self::COMMAND, $state->writeMode) ?? throw OfficeException::unsupportedContent();
         $position = $state->position;
-        if ($owner instanceof LiveTextOwner) {
+        if ($owner instanceof LiveTextJournal) {
             $marker = $owner->projected($context, $resource, $state->generation, $state->position) ?? throw OfficeException::unsupportedContent();
             $position = $marker->position;
         }

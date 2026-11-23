@@ -16,12 +16,14 @@ use Vaulter\Ai\Core\Data\ResourceEntry;
 use Vaulter\Ai\Core\Enums\ResourceType;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Persistence\PayloadCipher;
+use Vaulter\Ai\Core\Registry\OfficeRegistry;
+use Vaulter\Ai\Documents\Commands\ReplaceExact;
 use Vaulter\Ai\Documents\Contracts\DocumentScopeResolver;
+use Vaulter\Ai\Documents\Contracts\LiveTextJournal;
 use Vaulter\Ai\Documents\Persistence\TextCommands;
 use Vaulter\Ai\Documents\Projection\ExtractedTextBlock;
 use Vaulter\Ai\Documents\Projection\RichTextBlockExtractor;
 use Vaulter\Ai\Documents\Projection\TextProjectionReader;
-use Vaulter\Ai\Documents\Writing\LiveTextOwner;
 use Vaulter\Documents\Content\TipTap\TipTapContent;
 use Vaulter\Documents\Data\Snapshots\DocumentSnapshot;
 use Vaulter\Documents\DocumentsManager;
@@ -50,7 +52,8 @@ final readonly class TextReader implements ResourceReader
         private PayloadCipher $cipher,
         private Clock $clock,
         private ConfigRepository $config,
-        private ?LiveTextOwner $live = null,
+        private ?LiveTextJournal $live = null,
+        private ?OfficeRegistry $registry = null,
     ) {}
 
     public function resourceType(): ResourceType
@@ -105,12 +108,13 @@ final readonly class TextReader implements ResourceReader
         // Validate document block identity invariants on read (never writing).
         $liveBlocks = $this->extractor->extract($snapshot->content->toArray());
 
-        if ($this->live !== null) {
-            $liveReceipt = $afterReceipt === null ? null : $this->live->receiptMarker($context, $resource, $afterReceipt);
+        $live = $this->live ?? $this->registry?->ownerFor(ReplaceExact::COMMAND, 'journal');
+        if ($live instanceof LiveTextJournal) {
+            $liveReceipt = $afterReceipt === null ? null : $live->receiptMarker($context, $resource, $afterReceipt);
             if ($liveReceipt !== null && $liveReceipt->generation !== $snapshot->epoch) {
                 throw OfficeException::generationChanged();
             }
-            $projection = $this->live->projected($context, $resource, $snapshot->epoch, $snapshot->stateVersion);
+            $projection = $live->projected($context, $resource, $snapshot->epoch, $snapshot->stateVersion);
             if ($projection !== null && ($afterReceipt === null || $liveReceipt !== null)) {
                 return $this->serveFromLiveSnapshot($context, $snapshot, $liveBlocks, $kind, $selector, $limit, $cursor, $liveReceipt, $projection);
             }

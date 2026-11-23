@@ -29,14 +29,11 @@ use Vaulter\Ai\Documents\Projection\TextProjectionOutboxConsumer;
 use Vaulter\Ai\Documents\Projection\TextProjectionReader;
 use Vaulter\Ai\Documents\Read\TextReader;
 use Vaulter\Ai\Documents\Schema\AiDocumentsSchema;
-use Vaulter\Ai\Documents\Writing\LiveTextOwner;
 use Vaulter\Ai\Documents\Writing\SingleTextOwner;
-use Vaulter\Collaboration\Persistence\CommandJournal;
 use Vaulter\Documents\Events\Documents\DocumentContentUpdated;
 use Vaulter\Documents\Events\Documents\DocumentCreated;
 use Vaulter\Documents\Events\Revisions\DocumentRestored;
 use Vaulter\Drive\Events\Nodes\NodeRestored;
-use Vaulter\Kernel;
 use Vaulter\Laravel\VaulterPluginRegistrar;
 
 /**
@@ -68,7 +65,6 @@ final class DocumentsAiServiceProvider extends ServiceProvider
         $this->app->singleton(DocumentsCommandWriteCapability::class, static fn (Container $app): DocumentsCommandWriteCapability => new DocumentsCommandWriteCapability(
             registry: $app->make(OfficeRegistry::class),
             access: $app->make(TextDocumentAccess::class),
-            live: $app->bound(LiveTextOwner::class) ? $app->make(LiveTextOwner::class) : null,
             fallback: $app->make(RegistryCommandWriteCapability::class),
             directory: $app->make(ResourceDirectory::class),
         ));
@@ -93,10 +89,6 @@ final class DocumentsAiServiceProvider extends ServiceProvider
 
         $registry = $this->app->make(OfficeRegistry::class);
         if (! $registry->isFrozen()) {
-            if (class_exists(CommandJournal::class) && $this->app->make(Kernel::class)->isActive('collaboration')) {
-                $this->app->singleton(LiveTextOwner::class);
-                $registry->registerOwner(ReplaceExact::COMMAND, 'journal', $this->app->make(LiveTextOwner::class));
-            }
             $registry->registerReader($this->app->make(TextReader::class));
             $registry->registerCommand($this->app->make(ReplaceExact::class));
             $registry->registerOwner(ReplaceExact::COMMAND, 'snapshot', $this->app->make(SingleTextOwner::class));

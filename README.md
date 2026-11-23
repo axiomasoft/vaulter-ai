@@ -18,7 +18,9 @@ Private / proprietary channel for FlexCrm and Edufy.
 | `clients/python/` | `vaulter-office-client` | Stdlib Python HTTP client |
 | `release/packages.json` | — | Private PHP ZIP and npm tgz manifest |
 
-Package trees arrive in later waves. This scaffold is the root workspace: Composer path repository `packages/*`, npm workspaces, PHPStan, PHPUnit, the release manifest and CI.
+The root workspace uses the Composer path repository `packages/*` and npm workspaces.
+
+Install `axiomasoft/vaulter-ai-collaboration` alongside AI Documents for live text. Laravel discovers `CollaborationAiServiceProvider` automatically. Hosts that register providers manually should include it with the Vaulter Collaboration provider. The legacy `Vaulter\Ai\Documents\Writing\LiveTextOwner` class name resolves to the new owner when the adapter is installed.
 
 ## Toolchain
 

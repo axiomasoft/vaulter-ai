@@ -13,8 +13,8 @@ use Vaulter\Ai\Core\Enums\ResourceType;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Persistence\RegistryCommandWriteCapability;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
+use Vaulter\Ai\Documents\Contracts\LiveTextJournal;
 use Vaulter\Ai\Documents\Writing\DriveDocumentMutation;
-use Vaulter\Ai\Documents\Writing\LiveTextOwner;
 use Vaulter\Documents\Contracts\LockedDocumentMutation;
 use Vaulter\Drive\Exceptions\Nodes\NodeNotFoundException;
 
@@ -29,7 +29,7 @@ final readonly class DocumentsCommandWriteCapability implements CommandWriteCapa
     public function __construct(
         private OfficeRegistry $registry,
         private TextDocumentAccess $access,
-        private ?LiveTextOwner $live = null,
+        private ?LiveTextJournal $live = null,
         ?RegistryCommandWriteCapability $fallback = null,
         private ?ResourceDirectory $directory = null,
     ) {
@@ -76,7 +76,7 @@ final readonly class DocumentsCommandWriteCapability implements CommandWriteCapa
             return false;
         }
 
-        if ($owner instanceof LiveTextOwner) {
+        if ($owner instanceof LiveTextJournal) {
             return $owner->supportsLiveJournal($context, $resource, $lockedState['generation'], $lockedState['position']);
         }
 

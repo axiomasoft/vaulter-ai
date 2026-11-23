@@ -1,0 +1,43 @@
+{
+    "name": "axiomasoft/vaulter-ai-collaboration",
+    "description": "Vaulter AI adapter for strict live-text commands and read markers over Vaulter Collaboration.",
+    "type": "library",
+    "license": "proprietary",
+    "homepage": "https://github.com/axiomasoft/vaulter-ai",
+    "authors": [
+        {
+            "name": "Dmitry Vostrikov",
+            "email": "dv.vostrikov@gmail.com"
+        }
+    ],
+    "require": {
+        "php": ">=8.4 <8.6",
+        "axiomasoft/vaulter-ai-core": "^1.0",
+        "axiomasoft/vaulter-ai-documents": "^1.0",
+        "axiomasoft/vaulter-collaboration": "^1.0",
+        "axiomasoft/vaulter-core": "^1.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Vaulter\\Ai\\Collaboration\\": "src/"
+        },
+        "files": ["src/aliases.php"]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Vaulter\\Ai\\Collaboration\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Vaulter\\Ai\\Collaboration\\CollaborationAiServiceProvider"
+            ]
+        },
+        "branch-alias": {
+            "dev-main": "1.0.x-dev"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}

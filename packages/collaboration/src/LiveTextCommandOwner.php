@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace Vaulter\Ai\Documents\Writing;
+namespace Vaulter\Ai\Collaboration;
 
-use Illuminate\Contracts\Auth\Access\Authorizable;
 use JsonException;
 use stdClass;
+use Vaulter\Ai\Collaboration\Internal\JournalAccess;
 use Vaulter\Ai\Core\Contracts\CommandOwner;
 use Vaulter\Ai\Core\Contracts\TextVerificationEvidence;
 use Vaulter\Ai\Core\Data\CallContext;
@@ -18,16 +18,24 @@ use Vaulter\Ai\Core\Data\ResourceEntry;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Documents\Commands\ReplaceExact;
+use Vaulter\Ai\Documents\Contracts\LiveTextJournal;
 use Vaulter\Ai\Documents\Host\TextDocumentAccess;
-use Vaulter\Collaboration\Persistence\CommandActor;
+use Vaulter\Ai\Documents\Writing\TextReplacement;
 use Vaulter\Collaboration\Persistence\CommandJournal;
 use Vaulter\Exceptions\Contracts\ProblemException;
-use Vaulter\ValueObjects\Access\Actor;
 
 /** Adapts Office text commands to the strict journal's trusted PHP entry points. */
-final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvidence
+final readonly class LiveTextCommandOwner implements CommandOwner, LiveTextJournal, TextVerificationEvidence
 {
-    public function __construct(private CommandJournal $journal, private TextDocumentAccess $access) {}
+    private JournalAccess $journalAccess;
+
+    private LiveTextReader $reader;
+
+    public function __construct(private CommandJournal $journal, private TextDocumentAccess $access)
+    {
+        $this->journalAccess = new JournalAccess($access);
+        $this->reader = new LiveTextReader($journal, $access);
+    }
 
     public function key(): string
     {
@@ -54,7 +62,7 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
     public function commit(CommandScope $scope, PreparedPlan $plan): CommandOutcome
     {
         $resource = $this->access->resource($scope->context, $scope->resourceId);
-        $actor = $this->actor($scope->context, $resource);
+        $actor = $this->journalAccess->actor($scope->context, $resource);
         $condition = $plan->preconditions;
         $schema = $this->requireInt($condition, 'schema');
         $blockId = $this->requireString($condition, 'block_id');
@@ -91,7 +99,7 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
                 ],
             );
         } catch (ProblemException $failure) {
-            throw $this->translate($failure);
+            throw JournalAccess::translate($failure);
         }
 
         return $this->outcome($scope->commandId, $record);
@@ -101,40 +109,20 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
     {
         $resource = $this->access->resource($scope->context, $scope->resourceId);
         try {
-            return $this->outcome($scope->commandId, $this->journal->status($this->actor($scope->context, $resource), $scope->commandId));
+            return $this->outcome($scope->commandId, $this->journal->status($this->journalAccess->actor($scope->context, $resource), $scope->commandId));
         } catch (ProblemException $failure) {
-            throw $this->translate($failure);
+            throw JournalAccess::translate($failure);
         }
     }
 
     public function receiptMarker(CallContext $context, ResourceEntry $resource, string $receipt): ?Marker
     {
-        try {
-            $marker = $this->journal->receiptMarker($this->actor($context, $resource), $receipt);
-        } catch (ProblemException $failure) {
-            throw $this->translate($failure);
-        }
-
-        if (! is_array($marker)) {
-            return null;
-        }
-
-        return new Marker($this->requireInt($marker, 'generation'), $this->requireInt($marker, 'position'));
+        return $this->reader->receiptMarker($context, $resource, $receipt);
     }
 
     public function projected(CallContext $context, ResourceEntry $resource, int $generation, int $version): ?Marker
     {
-        try {
-            $marker = $this->journal->projected($this->actor($context, $resource), $generation, $version);
-        } catch (ProblemException $failure) {
-            throw $this->translate($failure);
-        }
-
-        if (! is_array($marker)) {
-            return null;
-        }
-
-        return new Marker($this->requireInt($marker, 'generation'), $this->requireInt($marker, 'position'));
+        return $this->reader->projected($context, $resource, $generation, $version);
     }
 
     public function verify(CallContext $context, string $resourceId, string $receiptId, string $mode): stdClass
@@ -153,9 +141,9 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
         ];
         if ($mode === 'current') {
             try {
-                $current = $this->journal->verifyCurrent($this->actor($context, $resource), $receiptId);
+                $current = $this->journal->verifyCurrent($this->journalAccess->actor($context, $resource), $receiptId);
             } catch (ProblemException $failure) {
-                throw $this->translate($failure);
+                throw JournalAccess::translate($failure);
             }
             if ($current === null) {
                 $snapshot = $this->access->content($context, $resource);
@@ -204,13 +192,12 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
     private function evidence(CallContext $context, ResourceEntry $resource, string $receipt): array
     {
         try {
-            $result = $this->journal->evidence($this->actor($context, $resource), $receipt);
+            $result = $this->journal->evidence($this->journalAccess->actor($context, $resource), $receipt);
         } catch (ProblemException $failure) {
-            throw $this->translate($failure);
+            throw JournalAccess::translate($failure);
         }
 
-        $evidence = $result['evidence'] ?? null;
-        $ranges = is_array($evidence) ? ($evidence['ranges'] ?? null) : null;
+        $ranges = $result['evidence']['ranges'] ?? null;
         $range = is_array($ranges) ? ($ranges[0] ?? null) : null;
         if (! is_array($range) || ! is_array($range['block'] ?? null)) {
             throw new OfficeException(ErrorCode::EvidenceUnavailable);
@@ -257,23 +244,6 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
         return ['text' => $actual, 'marks' => null];
     }
 
-    private function actor(CallContext $context, ResourceEntry $resource): CommandActor
-    {
-        if (! $context->actor instanceof Authorizable) {
-            throw OfficeException::authenticationRequired();
-        }
-        $drive = $this->access->drive($context, $resource)->snapshot();
-
-        return new CommandActor(
-            Actor::user($context->actor)->ref(),
-            $drive->tenantId,
-            $context->projectScope,
-            $context->effectiveSubject,
-            $drive->id,
-            $resource->resourceId,
-        );
-    }
-
     /** @param array<array-key, mixed>|null $record */
     private function outcome(string $command, ?array $record): CommandOutcome
     {
@@ -294,32 +264,6 @@ final readonly class LiveTextOwner implements CommandOwner, TextVerificationEvid
                 default => ErrorCode::ResourceUnavailable,
             }),
             default => new CommandOutcome($command, 'unknown'),
-        };
-    }
-
-    private function translate(ProblemException $failure): OfficeException
-    {
-        $details = $failure->problemDetails();
-        $problemContext = $details['context'] ?? null;
-        $reason = is_array($problemContext) && is_string($problemContext['reason'] ?? null)
-            ? $problemContext['reason']
-            : null;
-
-        return match ($reason) {
-            'key_conflict' => new OfficeException(ErrorCode::IdempotencyConflict),
-            'key_expired' => new OfficeException(ErrorCode::IdempotencyWindowExpired),
-            'schema_changed' => new OfficeException(ErrorCode::SchemaChanged),
-            'evidence_unavailable' => new OfficeException(ErrorCode::EvidenceUnavailable),
-            'generation_changed' => OfficeException::generationChanged(),
-            'projection_behind' => OfficeException::projectionPending(),
-            'strict_profile_required' => OfficeException::unsupportedContent(),
-            default => match ($failure->httpStatus()) {
-                403, 404 => OfficeException::resourceUnavailable(),
-                409 => $failure->problemCode() === 'collaboration_epoch_mismatch'
-                    ? OfficeException::generationChanged()
-                    : OfficeException::temporarilyUnavailable(),
-                default => OfficeException::temporarilyUnavailable(),
-            },
         };
     }
 

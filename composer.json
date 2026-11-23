@@ -22,6 +22,7 @@
                 "symlink": true,
                 "versions": {
                     "axiomasoft/vaulter-ai-core": "1.0.x-dev",
+                    "axiomasoft/vaulter-ai-collaboration": "1.0.x-dev",
                     "axiomasoft/vaulter-ai-documents": "1.0.x-dev",
                     "axiomasoft/vaulter-ai-sheets": "1.0.x-dev",
                     "axiomasoft/vaulter-ai-laravel-ai": "1.0.x-dev",
@@ -46,6 +47,16 @@
                 "symlink": true,
                 "versions": {
                     "axiomasoft/vaulter-sheets": "1.0.x-dev"
+                }
+            }
+        },
+        {
+            "type": "path",
+            "url": "../vaulter-collaboration/packages/collaboration",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "axiomasoft/vaulter-collaboration": "1.0.x-dev"
                 }
             }
         },
@@ -80,6 +91,7 @@
     "require": {
         "php": ">=8.4 <8.6",
         "axiomasoft/vaulter-ai-agentools": "^1.0",
+        "axiomasoft/vaulter-ai-collaboration": "^1.0",
         "axiomasoft/vaulter-ai-core": "^1.0",
         "axiomasoft/vaulter-ai-documents": "^1.0",
         "axiomasoft/vaulter-ai-laravel-ai": "^1.0",
@@ -102,6 +114,7 @@
             "Vaulter\\Ai\\Ci\\": "scripts/ci/",
             "Vaulter\\Ai\\Tests\\": "tests/",
             "Vaulter\\Ai\\Core\\Tests\\": "packages/core/tests/",
+            "Vaulter\\Ai\\Collaboration\\Tests\\": "packages/collaboration/tests/",
             "Vaulter\\Ai\\Documents\\Tests\\": "packages/documents/tests/",
             "Vaulter\\Ai\\Sheets\\Tests\\": "packages/sheets/tests/",
             "Vaulter\\Ai\\LaravelAi\\Tests\\": "packages/laravel-ai/tests/",

@@ -13,6 +13,9 @@
         <testsuite name="documents">
             <directory>packages/documents/tests</directory>
         </testsuite>
+        <testsuite name="collaboration">
+            <directory>packages/collaboration/tests</directory>
+        </testsuite>
         <testsuite name="sheets">
             <directory>packages/sheets/tests</directory>
         </testsuite>
@@ -34,6 +37,7 @@
         <include>
             <directory>packages/core/src</directory>
             <directory>packages/documents/src</directory>
+            <directory>packages/collaboration/src</directory>
             <directory>packages/sheets/src</directory>
             <directory>packages/laravel-ai/src</directory>
             <directory>packages/agentools/src</directory>

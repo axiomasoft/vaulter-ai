@@ -130,6 +130,8 @@ $packages = [
         'axiomasoft/packman' => '0.1.1',
         'axiomasoft/packman-plugins' => '0.1.1',
     ]],
+    ['axiomasoft/vaulter-ai-collaboration', '1.0.0', $repoRoot.'/packages/collaboration', []],
+    ['axiomasoft/vaulter-collaboration', '1.0.0', $parentRoot.'/vaulter-collaboration/packages/collaboration', []],
     ['axiomasoft/vaulter-ai-laravel-ai', '1.0.0', $repoRoot.'/packages/laravel-ai', ['axiomasoft/vaulter-ai-core' => '^1.0']],
     ['axiomasoft/vaulter-ai-agentools', '1.0.0', $repoRoot.'/packages/agentools', ['axiomasoft/vaulter-ai-core' => '^1.0', 'agentools/sdk' => '^1.0']],
     ['agentools/sdk', '1.0.0', $parentRoot.'/agentools/php', []],

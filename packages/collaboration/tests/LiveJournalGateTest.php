@@ -11,41 +11,25 @@ use Packman\Plugins\Data\Plugin\PluginManifest;
 use Packman\Plugins\Laravel\PluginRegistrar;
 use Vaulter\Ai\AgenTools\AgenToolsServiceProvider;
 use Vaulter\Ai\AgenTools\OfficeToolDescriptorRegistry;
+use Vaulter\Ai\Collaboration\CollaborationAiServiceProvider;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
+use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Core\Workspace\ChatTools;
-use Vaulter\Ai\Documents\Host\TextDocumentAccess;
-use Vaulter\Ai\Documents\Writing\LiveTextOwner;
+use Vaulter\Ai\Documents\Commands\ReplaceExact;
 use Vaulter\Ai\LaravelAi\LaravelAiServiceProvider;
 use Vaulter\Ai\LaravelAi\LaravelOfficeExecutor;
 use Vaulter\Ai\Tests\Support\OfficeTestCase;
 use Vaulter\Ai\Tests\Support\TextCommandFixture;
-use Vaulter\Collaboration\Persistence\CommandJournal;
-use Vaulter\Collaboration\VaulterCollaborationServiceProvider;
 use Vaulter\Documents\Contracts\CollaborationProtocolDriver;
 use Vaulter\Documents\Data\Collaboration\CollaborationGrant;
 use Vaulter\Documents\Data\Collaboration\CollaborationMode;
 use Vaulter\Documents\Data\Collaboration\CollaborationSession;
 use Vaulter\Documents\Facades\Documents;
 use Vaulter\Laravel\VaulterPluginRegistrar;
-
-$collabSrc = dirname(__DIR__, 4).'/vaulter-collaboration/packages/collaboration/src';
-$hasSiblingCollaboration = is_dir($collabSrc);
-if ($hasSiblingCollaboration && ! class_exists(VaulterCollaborationServiceProvider::class, false)) {
-    spl_autoload_register(static function (string $class) use ($collabSrc): void {
-        $prefix = 'Vaulter\\Collaboration\\';
-        if (! str_starts_with($class, $prefix)) {
-            return;
-        }
-        $file = $collabSrc.'/'.str_replace('\\', '/', substr($class, strlen($prefix))).'.php';
-        if (is_file($file)) {
-            require_once $file;
-        }
-    });
-}
 
 final class LiveJournalGateDriver implements CollaborationProtocolDriver
 {
@@ -116,25 +100,8 @@ class LiveJournalWithoutCollabTestCase extends OfficeTestCase
     {
         return [
             ...parent::getPackageProviders($app),
+            CollaborationAiServiceProvider::class,
             LiveJournalDriverServiceProvider::class,
-            AiServiceProvider::class,
-            LaravelAiServiceProvider::class,
-            AgenToolsServiceProvider::class,
-        ];
-    }
-}
-
-class LiveJournalWithCollabTestCase extends OfficeTestCase
-{
-    protected function getPackageProviders($app): array
-    {
-        $extra = class_exists(VaulterCollaborationServiceProvider::class)
-            ? [VaulterCollaborationServiceProvider::class]
-            : [LiveJournalDriverServiceProvider::class];
-
-        return [
-            ...parent::getPackageProviders($app),
-            ...$extra,
             AiServiceProvider::class,
             LaravelAiServiceProvider::class,
             AgenToolsServiceProvider::class,
@@ -153,7 +120,8 @@ test('live journal mode without 3.5 collaboration excludes write tools and rejec
     $directory = $this->app->make(ResourceDirectory::class);
 
     $entryBefore = $directory->findAccessible($fixture->context, $fixture->node->id, 'edit');
-    expect($entryBefore)->not->toBeNull();
+    expect($entryBefore)->not->toBeNull()
+        ->and($this->app->make(OfficeRegistry::class)->ownerFor(ReplaceExact::COMMAND, 'journal'))->toBeNull();
 
     // Before transition (snapshot mode): write tools and describe succeed.
     $snapshotCatalog = $chatTools->catalog($fixture->context, [$fixture->node->id]);
@@ -198,14 +166,4 @@ test('live journal mode without 3.5 collaboration excludes write tools and rejec
     ]));
     expect($prepare->ok)->toBeFalse()
         ->and($prepare->errorCode)->toBe(ErrorCode::UnsupportedContent);
-
-    // Without strict 3.5 journal support, LiveTextOwner::supportsLiveJournal() refuses journal writes even if invoked directly.
-    if (! class_exists(CommandJournal::class, false)) {
-        require_once dirname(__DIR__, 3).'/scripts/ci/stubs/vaulter-collaboration.php';
-    }
-    if (! class_exists(VaulterCollaborationServiceProvider::class, false)) {
-        $stubJournal = new CommandJournal;
-        $liveOwner = new LiveTextOwner($stubJournal, $this->app->make(TextDocumentAccess::class));
-        expect($liveOwner->supportsLiveJournal($fixture->context, $entryBefore, 1, 1))->toBeFalse();
-    }
 });
