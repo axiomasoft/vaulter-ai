@@ -15,7 +15,7 @@ use stdClass;
 use Throwable;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\Office;
-use Vaulter\Ai\Core\Contracts\OfficeExecutor;
+use Vaulter\Ai\Core\Contracts\ResumableOfficeExecutor;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeRun;
@@ -32,7 +32,7 @@ use Vaulter\Ai\Core\Protocol\WireErrorMapper;
  * Laravel AI executor binding all seven Office tools from the core catalog into an isolated OfficeAgent
  * and restoring interrupted runs via v_ai_runs / v_ai_run_steps.
  */
-final readonly class LaravelOfficeExecutor implements OfficeExecutor
+final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
 {
     public const string KEY = 'laravel-ai';
 
@@ -188,15 +188,22 @@ final readonly class LaravelOfficeExecutor implements OfficeExecutor
 
             if ($hadCommitStep) {
                 $stepsAfterReconcile = $this->runs->listSteps($context, $runId);
-                $reconciledState = $this->stateReducer->reduce($stepsAfterReconcile);
+                $expectedResources = $this->expectedResourcesFromRun($run);
+                $reconciledState = $this->stateReducer->reduce($stepsAfterReconcile, expectedResources: $expectedResources);
                 if ($reconciledState === 'completed') {
                     $this->verifyUnverifiedCommittedSteps($context, $runId, $stepsAfterReconcile);
                     $stepsAfterReconcile = $this->runs->listSteps($context, $runId);
-                    $reconciledState = $this->stateReducer->reduce($stepsAfterReconcile);
+                    $reconciledState = $this->stateReducer->reduce($stepsAfterReconcile, expectedResources: $expectedResources);
                 }
-                $this->runs->finishRun($context, $runId, $lease, $reconciledState);
 
-                return $this->runs->find($context, $runId) ?? $run;
+                if ($reconciledState !== 'partially_applied' || ! $this->hasUnfinishedOrConflictedResource($stepsAfterReconcile, $expectedResources)) {
+                    $this->runs->finishRun($context, $runId, $lease, $reconciledState);
+
+                    return $this->runs->find($context, $runId) ?? $run;
+                }
+
+                $this->verifyUnverifiedCommittedSteps($context, $runId, $stepsAfterReconcile);
+                $priorSteps = $this->runs->listSteps($context, $runId);
             }
 
             $prompt = is_string($run->input['prompt'] ?? null) ? $run->input['prompt'] : '';
@@ -211,7 +218,8 @@ final readonly class LaravelOfficeExecutor implements OfficeExecutor
             }
 
             $steps = $this->runs->listSteps($context, $runId);
-            $nextState = $this->stateReducer->reduce($steps);
+            $expectedResources = $this->expectedResourcesFromRun($run);
+            $nextState = $this->stateReducer->reduce($steps, expectedResources: $expectedResources);
             $this->runs->finishRun($context, $runId, $lease, $nextState);
 
             return $this->runs->find($context, $runId) ?? $run;
@@ -330,6 +338,55 @@ final readonly class LaravelOfficeExecutor implements OfficeExecutor
             );
             $verifiedReceipts[$step->receiptId] = true;
         }
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function expectedResourcesFromRun(OfficeRun $run): array
+    {
+        $items = $run->input['draft_items'] ?? null;
+        if (! is_array($items)) {
+            return [];
+        }
+
+        $resources = [];
+        foreach ($items as $item) {
+            if (is_array($item) && is_string($item['resource_id'] ?? null) && $item['resource_id'] !== '') {
+                $resources[] = $item['resource_id'];
+            }
+        }
+
+        return array_values(array_unique($resources));
+    }
+
+    /**
+     * @param  list<OfficeRunStep>  $steps
+     * @param  list<string>  $expectedResources
+     */
+    private function hasUnfinishedOrConflictedResource(array $steps, array $expectedResources): bool
+    {
+        /** @var array<string, OfficeRunStep> $latestCommitByResource */
+        $latestCommitByResource = [];
+        foreach ($steps as $step) {
+            if ($step->operation === OfficeOperation::Commit && $step->resourceId !== null) {
+                $latestCommitByResource[$step->resourceId] = $step;
+            }
+        }
+
+        foreach ($latestCommitByResource as $commitStep) {
+            if ($commitStep->state === 'failed') {
+                return true;
+            }
+        }
+
+        foreach ($expectedResources as $resourceId) {
+            if (! isset($latestCommitByResource[$resourceId])) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function canEnqueueAsync(): bool

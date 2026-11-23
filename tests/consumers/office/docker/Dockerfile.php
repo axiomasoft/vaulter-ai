@@ -52,6 +52,7 @@ COPY --from=builder /app/bootstrap /app/bootstrap
 COPY --from=builder /app/config /app/config
 COPY --from=builder /app/database /app/database
 COPY --from=builder /app/public /app/public
+COPY --from=builder /app/resources /app/resources
 COPY --from=builder /app/routes /app/routes
 COPY --from=builder /app/artisan /app/artisan
 COPY --from=builder /app/vendor /app/vendor

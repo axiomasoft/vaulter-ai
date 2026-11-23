@@ -13,6 +13,7 @@ use Illuminate\Database\Connection;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Str;
+use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\TransactionRunner;
 
 /**
@@ -135,5 +136,29 @@ final readonly class OfficeDatabase
         } catch (\Throwable) {
             return null;
         }
+    }
+
+    /**
+     * Authoritative UTC instant for expiry checks after acquiring row locks.
+     * Uses PostgreSQL clock_timestamp() when running on SystemClock + pgsql so frozen
+     * transaction timestamps cannot mask expiry during lock contention.
+     */
+    public function clockNow(Clock $clock): DateTimeImmutable
+    {
+        if ($clock instanceof SystemClock && $this->driver() === 'pgsql') {
+            $row = $this->connection()->selectOne(
+                'SELECT to_char(clock_timestamp() AT TIME ZONE \'UTC\', \'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"\') AS clock_now',
+                useReadPdo: false,
+            );
+            $raw = is_object($row) ? ($row->clock_now ?? null) : null;
+            if (is_string($raw) && $raw !== '') {
+                $parsed = $this->parseUtcTimestamp($raw);
+                if ($parsed !== null) {
+                    return $parsed;
+                }
+            }
+        }
+
+        return $clock->now()->setTimezone(new DateTimeZone('UTC'));
     }
 }

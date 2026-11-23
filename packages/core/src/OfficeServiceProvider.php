@@ -13,6 +13,7 @@ use Vaulter\Ai\Core\Contracts\CallContextResolver;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\Office;
+use Vaulter\Ai\Core\Contracts\ProposalApprovalPolicy;
 use Vaulter\Ai\Core\Contracts\TransactionRunner;
 use Vaulter\Ai\Core\Http\NullCallContextResolver;
 use Vaulter\Ai\Core\Operations\Describe;
@@ -22,6 +23,7 @@ use Vaulter\Ai\Core\Operations\RunStateReducer;
 use Vaulter\Ai\Core\Operations\Search;
 use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
 use Vaulter\Ai\Core\Persistence\ConfigHostPolicy;
+use Vaulter\Ai\Core\Persistence\DefaultProposalApprovalPolicy;
 use Vaulter\Ai\Core\Persistence\DefaultTransactionRunner;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\PayloadCipher;
@@ -34,6 +36,8 @@ use Vaulter\Ai\Core\Protocol\WireErrorMapper;
 use Vaulter\Ai\Core\Protocol\WireValidator;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Core\Schema\OfficeCoreSchema;
+use Vaulter\Ai\Core\Workspace\OfficeWorkspaceService;
+use Vaulter\Ai\Core\Workspace\ProposalDiffBuilder;
 
 /**
  * Service provider for axiomasoft/vaulter-ai-core.
@@ -71,6 +75,7 @@ final class OfficeServiceProvider extends ServiceProvider
         $this->app->singleton(Runs::class);
 
         $this->app->singleton(HostPolicy::class, ConfigHostPolicy::class);
+        $this->app->singletonIf(ProposalApprovalPolicy::class, DefaultProposalApprovalPolicy::class);
         $this->app->singleton(CallContextResolver::class, NullCallContextResolver::class);
 
         $this->app->singleton(Search::class);
@@ -79,6 +84,8 @@ final class OfficeServiceProvider extends ServiceProvider
         $this->app->singleton(Office::class, DispatchOfficeOperation::class);
         $this->app->singleton(RunStateReducer::class);
         $this->app->singleton(StepCommitCoordinator::class);
+        $this->app->singleton(ProposalDiffBuilder::class);
+        $this->app->singleton(OfficeWorkspaceService::class);
     }
 
     public function boot(): void
@@ -89,6 +96,7 @@ final class OfficeServiceProvider extends ServiceProvider
 
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
         $this->loadRoutesFrom(__DIR__.'/../routes/api.php');
+        $this->loadRoutesFrom(__DIR__.'/../routes/workspace.php');
 
         $this->app->booted(function (): void {
             $this->app->make(OfficeRegistry::class)->freeze();

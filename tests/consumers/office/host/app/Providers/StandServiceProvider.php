@@ -34,28 +34,51 @@ final class StandServiceProvider extends ServiceProvider
             public function resolve(Request $request): ?CallContext
             {
                 $bearer = $request->bearerToken();
-                if (! is_string($bearer) || $bearer === '') {
+                $cookieToken = $request->cookie('stand_token');
+                $rawToken = is_string($bearer) && $bearer !== ''
+                    ? $bearer
+                    : (is_string($cookieToken) && $cookieToken !== '' ? $cookieToken : null);
+
+                if ($rawToken !== null) {
+                    $row = DB::table('stand_tokens')->where('token_hash', hash('sha256', $rawToken))->first();
+                    if ($row === null) {
+                        return null;
+                    }
+
+                    $actor = StandActor::query()->find($row->user_id);
+                    if ($actor === null) {
+                        return null;
+                    }
+
+                    return new CallContext(
+                        tenantId: (string) $row->tenant_id,
+                        projectScope: (string) $row->project_scope,
+                        effectiveSubject: 'user/'.$actor->getKey(),
+                        profile: (string) $row->profile,
+                        policyRevision: (string) $row->policy_revision,
+                        driveId: (string) $row->drive_id,
+                        actor: $actor,
+                    );
+                }
+
+                $user = $request->user();
+                if (! $user instanceof StandActor) {
                     return null;
                 }
 
-                $row = DB::table('stand_tokens')->where('token_hash', hash('sha256', $bearer))->first();
-                if ($row === null) {
-                    return null;
-                }
-
-                $actor = StandActor::query()->find($row->user_id);
-                if ($actor === null) {
-                    return null;
-                }
+                $tokenRow = DB::table('stand_tokens')
+                    ->where('user_id', $user->getKey())
+                    ->orderByDesc('created_at')
+                    ->first();
 
                 return new CallContext(
-                    tenantId: (string) $row->tenant_id,
-                    projectScope: (string) $row->project_scope,
-                    effectiveSubject: 'user/'.$actor->getKey(),
-                    profile: (string) $row->profile,
-                    policyRevision: (string) $row->policy_revision,
-                    driveId: (string) $row->drive_id,
-                    actor: $actor,
+                    tenantId: $tokenRow !== null ? (string) $tokenRow->tenant_id : '61',
+                    projectScope: $tokenRow !== null ? (string) $tokenRow->project_scope : 'default',
+                    effectiveSubject: 'user/'.$user->getKey(),
+                    profile: $tokenRow !== null ? (string) $tokenRow->profile : 'documents',
+                    policyRevision: $tokenRow !== null ? (string) $tokenRow->policy_revision : 'stand-rev-1',
+                    driveId: $tokenRow !== null ? (string) $tokenRow->drive_id : null,
+                    actor: $user,
                 );
             }
         });
@@ -68,22 +91,52 @@ final class StandServiceProvider extends ServiceProvider
                     ->where('tenant_id', $tenantId)
                     ->where('run_id', $runId)
                     ->first();
-                if ($row === null) {
+                if ($row !== null) {
+                    $actor = StandActor::query()->find($row->user_id);
+                    if ($actor === null) {
+                        return null;
+                    }
+
+                    return new CallContext(
+                        tenantId: (string) $row->tenant_id,
+                        projectScope: (string) $row->project_scope,
+                        effectiveSubject: 'user/'.$actor->getKey(),
+                        profile: (string) $row->profile,
+                        policyRevision: (string) $row->policy_revision,
+                        driveId: (string) $row->drive_id,
+                        actor: $actor,
+                    );
+                }
+
+                $runRow = DB::table('v_ai_runs')
+                    ->where('tenant_id', $tenantId)
+                    ->where('run_id', $runId)
+                    ->first();
+                if ($runRow === null) {
                     return null;
                 }
 
-                $actor = StandActor::query()->find($row->user_id);
+                $subject = (string) $runRow->effective_subject;
+                $actorId = str_starts_with($subject, 'user/') ? (int) substr($subject, 5) : 0;
+                $actor = StandActor::query()->find($actorId);
                 if ($actor === null) {
                     return null;
                 }
 
+                $tokenRow = DB::table('stand_tokens')
+                    ->where('tenant_id', $tenantId)
+                    ->where('project_scope', (string) $runRow->project_scope)
+                    ->where('user_id', $actor->getKey())
+                    ->orderByDesc('created_at')
+                    ->first();
+
                 return new CallContext(
-                    tenantId: (string) $row->tenant_id,
-                    projectScope: (string) $row->project_scope,
-                    effectiveSubject: 'user/'.$actor->getKey(),
-                    profile: (string) $row->profile,
-                    policyRevision: (string) $row->policy_revision,
-                    driveId: (string) $row->drive_id,
+                    tenantId: (string) $runRow->tenant_id,
+                    projectScope: (string) $runRow->project_scope,
+                    effectiveSubject: $subject,
+                    profile: $tokenRow !== null ? (string) $tokenRow->profile : 'documents',
+                    policyRevision: (string) $runRow->profile_revision,
+                    driveId: $tokenRow !== null ? (string) $tokenRow->drive_id : null,
                     actor: $actor,
                 );
             }
@@ -97,24 +150,41 @@ final class StandServiceProvider extends ServiceProvider
                     ->where('tenant_id', $tenantId)
                     ->where('proposal_id', $proposalId)
                     ->first();
-                if ($route === null) {
+
+                $proposalRow = DB::table('v_ai_proposals')
+                    ->where('tenant_id', $tenantId)
+                    ->where('proposal_id', $proposalId)
+                    ->first();
+
+                $source = $route ?? $proposalRow;
+                if ($source === null) {
                     return null;
                 }
 
-                $actorId = str_starts_with((string) $route->effective_subject, 'user/')
-                    ? (int) substr((string) $route->effective_subject, 5)
-                    : 0;
+                $subject = (string) $source->effective_subject;
+                $projectScope = (string) $source->project_scope;
+                $actorId = str_starts_with($subject, 'user/') ? (int) substr($subject, 5) : 0;
                 $actor = StandActor::query()->find($actorId);
                 if ($actor === null) {
                     return null;
                 }
 
+                $command = $proposalRow !== null && is_string($proposalRow->command ?? null) ? $proposalRow->command : '';
+                $profile = str_starts_with($command, 'sheet.') ? 'sheets' : 'documents';
+                $tokenRow = DB::table('stand_tokens')
+                    ->where('tenant_id', $tenantId)
+                    ->where('project_scope', $projectScope)
+                    ->where('user_id', $actor->getKey())
+                    ->orderByDesc('created_at')
+                    ->first();
+
                 return new CallContext(
-                    tenantId: (string) $route->tenant_id,
-                    projectScope: (string) $route->project_scope,
-                    effectiveSubject: (string) $route->effective_subject,
-                    profile: 'documents',
-                    driveId: null,
+                    tenantId: (string) $source->tenant_id,
+                    projectScope: $projectScope,
+                    effectiveSubject: $subject,
+                    profile: $profile,
+                    policyRevision: $tokenRow !== null ? (string) $tokenRow->policy_revision : 'stand-rev-1',
+                    driveId: $tokenRow !== null ? (string) $tokenRow->drive_id : null,
                     actor: $actor,
                 );
             }
@@ -131,11 +201,22 @@ final class StandServiceProvider extends ServiceProvider
         config()->set('vaulter-ai-documents.default_tenant_id', '61');
         config()->set('vaulter-ai-documents.default_project_scope', 'default');
         config()->set('vaulter-ai-documents.read.live_fallback_on_lag', true);
+        $approval = (string) config('stand.approval', 'automatic');
+        if (! in_array($approval, ['automatic', 'human'], true)) {
+            $approval = 'automatic';
+        }
         config()->set('vaulter-ai.profiles.documents', [
             'executor' => $profile === 'ai-agentools' ? 'agentools' : 'laravel-ai',
             'provider_connection' => 'office_model',
             'commands' => ['text.replace_exact@1'],
-            'approval' => 'automatic',
+            'approval' => $approval,
+            'revision' => 'stand-rev-1',
+        ]);
+        config()->set('vaulter-ai.profiles.sheets', [
+            'executor' => $profile === 'ai-agentools' ? 'agentools' : 'laravel-ai',
+            'provider_connection' => 'office_model',
+            'commands' => ['sheet.fill_formula@1'],
+            'approval' => $approval,
             'revision' => 'stand-rev-1',
         ]);
 

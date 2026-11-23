@@ -38,6 +38,14 @@ final readonly class OwnerRoutes
             ->first()), $context->tenantId);
     }
 
+    public function forProposalInScope(CallContext $viewer, string $initiatorSubject, string $proposalId): ?OwnerRoute
+    {
+        return $this->db->transaction(fn (): ?OwnerRoute => $this->record($this->db->query('ai_owner_routes')
+            ->where('tenant_id', $viewer->tenantId)->where('project_scope', $viewer->projectScope)
+            ->where('effective_subject', $initiatorSubject)->where('proposal_id', $proposalId)
+            ->first()), $viewer->tenantId);
+    }
+
     public function bind(CommandScope $scope, PreparedPlan $plan): OwnerRoute
     {
         if ($this->db->connection()->transactionLevel() !== 0) {

@@ -8,6 +8,7 @@ use DateTimeImmutable;
 use LogicException;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
+use Vaulter\Ai\Core\Contracts\ProposalApprovalPolicy;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandOutcome;
@@ -16,6 +17,7 @@ use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeResponse;
 use Vaulter\Ai\Core\Data\OwnerRoute;
 use Vaulter\Ai\Core\Data\StoredProposal;
+use Vaulter\Ai\Core\Enums\ApprovalMode;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
@@ -33,6 +35,7 @@ final readonly class Commit
         private Proposals $proposals,
         private OwnerRoutes $routes,
         private Clock $clock,
+        private ?ProposalApprovalPolicy $approvalPolicy = null,
     ) {}
 
     public function handle(CallContext $context, OfficeRequest $request): OfficeResponse
@@ -91,6 +94,12 @@ final readonly class Commit
         }
         if ($profile->revision !== $proposal->policyRevision || $profile->approval !== $proposal->plan->approval) {
             throw OfficeException::preconditionFailed();
+        }
+        if ($proposal->plan->approval === ApprovalMode::Human
+            && $proposal->decision === 'approved'
+            && $this->approvalPolicy !== null
+            && ! $this->approvalPolicy->isApprovalStillValidForCommit($scope->context, $entry, $proposal)) {
+            throw OfficeException::resourceUnavailable();
         }
     }
 

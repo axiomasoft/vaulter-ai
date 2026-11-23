@@ -19,15 +19,17 @@ use Vaulter\Drive\Access\ValueObjects\Subject;
 use Vaulter\Drive\Data\Access\GrantInput;
 use Vaulter\Drive\Facades\Vaulter;
 
-function assertStandFixtureToken(Request $request): ?JsonResponse
-{
-    $expected = (string) config('stand.fixture_token', '');
-    $supplied = (string) $request->header('X-Fixture-Token', '');
-    if ($expected === '' || ! hash_equals($expected, $supplied)) {
-        return response()->json(['error' => 'forbidden'], 403);
-    }
+if (! function_exists('assertStandFixtureToken')) {
+    function assertStandFixtureToken(Request $request): ?JsonResponse
+    {
+        $expected = (string) config('stand.fixture_token', '');
+        $supplied = (string) $request->header('X-Fixture-Token', '');
+        if ($expected === '' || ! hash_equals($expected, $supplied)) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
 
-    return null;
+        return null;
+    }
 }
 
 Route::post('/_fixture/seed', static function (Request $request): JsonResponse {
@@ -37,12 +39,14 @@ Route::post('/_fixture/seed', static function (Request $request): JsonResponse {
 
     $suffix = bin2hex(random_bytes(4));
     $writer = StandActor::query()->create(['name' => 'Writer', 'email' => "writer-{$suffix}@example.test"]);
+    $reviewer = StandActor::query()->create(['name' => 'Reviewer', 'email' => "reviewer-{$suffix}@example.test"]);
     $reader = StandActor::query()->create(['name' => 'Reader', 'email' => "reader-{$suffix}@example.test"]);
     $foreign = StandActor::query()->create(['name' => 'Foreign', 'email' => "foreign-{$suffix}@example.test"]);
 
     $owner = StandOwner::query()->create(['name' => 'Stand Workspace '.$suffix]);
     $drive = Vaulter::drive($owner)->asSystem('stand-seed');
     $drive->access()->grant($drive->root()->id, new GrantInput(Subject::ofModel($writer), RoleRegistry::WRITER));
+    $drive->access()->grant($drive->root()->id, new GrantInput(Subject::ofModel($reviewer), RoleRegistry::WRITER));
     $drive->access()->grant($drive->root()->id, new GrantInput(Subject::ofModel($reader), RoleRegistry::READER));
 
     $node = Documents::in($drive)->create('Договор поставки', 'vaulter/rich-text', [
@@ -60,13 +64,25 @@ Route::post('/_fixture/seed', static function (Request $request): JsonResponse {
         ],
     ]);
 
+    $secondNode = Documents::in($drive)->create('Приложение 2', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [
+            ['type' => 'heading', 'attrs' => ['blockId' => 'h-app2', 'level' => 1], 'content' => [['type' => 'text', 'text' => 'Приложение 2']]],
+            ['type' => 'paragraph', 'attrs' => ['blockId' => 'p42'], 'content' => [
+                ['type' => 'text', 'text' => 'Penalty 15 percent.'],
+            ]],
+        ],
+    ]);
+
     $driveId = $drive->snapshot()->id;
     $writerToken = 'w-'.bin2hex(random_bytes(16));
+    $reviewerToken = 'v-'.bin2hex(random_bytes(16));
     $readerToken = 'r-'.bin2hex(random_bytes(16));
     $foreignToken = 'f-'.bin2hex(random_bytes(16));
 
     foreach ([
         [$writerToken, '61', 'default', $writer->getKey(), $driveId],
+        [$reviewerToken, '61', 'default', $reviewer->getKey(), $driveId],
         [$readerToken, '61', 'default', $reader->getKey(), $driveId],
         [$foreignToken, '99', 'other', $foreign->getKey(), $driveId],
     ] as [$tok, $tenant, $scope, $uid, $did]) {
@@ -83,11 +99,14 @@ Route::post('/_fixture/seed', static function (Request $request): JsonResponse {
 
     return response()->json([
         'resource_id' => $node->id,
+        'second_resource_id' => $secondNode->id,
         'tenant_id' => '61',
         'project_scope' => 'default',
         'drive_id' => $driveId,
         'writer_user_id' => $writer->getKey(),
+        'reviewer_user_id' => $reviewer->getKey(),
         'writer_token' => $writerToken,
+        'reviewer_token' => $reviewerToken,
         'reader_token' => $readerToken,
         'foreign_token' => $foreignToken,
     ]);

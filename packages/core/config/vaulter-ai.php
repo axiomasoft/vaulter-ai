@@ -9,6 +9,8 @@ return [
     ],
     'route_prefix' => env('VAULTER_AI_ROUTE_PREFIX', 'api/vaulter-ai/v1'),
     'middleware' => ['api'],
+    'workspace_prefix' => env('VAULTER_AI_WORKSPACE_PREFIX', 'office'),
+    'workspace_middleware' => ['web'],
     'default_profile' => env('VAULTER_AI_DEFAULT_PROFILE', 'documents'),
     'profiles' => [
         'documents' => [

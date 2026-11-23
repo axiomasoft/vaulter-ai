@@ -14,6 +14,7 @@ use Vaulter\Ai\Core\Data\OfficeRunStep;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
+use Vaulter\Ai\Core\Operations\RunStateReducer;
 
 /**
  * Durable run and step ledger over v_ai_runs, v_ai_run_inputs, and v_ai_run_steps.
@@ -58,7 +59,7 @@ final readonly class Runs
             }
 
             $runId = $this->db->newUuid();
-            $now = $this->clock->now();
+            $now = $this->db->clockNow($this->clock);
             $stamp = $this->db->utcTimestamp($now);
             $expiresAt = $this->db->utcTimestamp($now->modify('+'.$inputTtlSeconds.' seconds'));
 
@@ -115,6 +116,344 @@ final readonly class Runs
         }, $context->tenantId);
     }
 
+    /**
+     * Find a run within the caller's tenant and project scope regardless of initiator subject.
+     *
+     * @phpstan-impure
+     */
+    public function findInScope(CallContext $viewer, string $runId): ?OfficeRun
+    {
+        if (! $this->isLowerUuid($runId)) {
+            return null;
+        }
+
+        return $this->db->transaction(function () use ($viewer, $runId): ?OfficeRun {
+            $row = $this->db->query('ai_runs')
+                ->where('tenant_id', $viewer->tenantId)
+                ->where('project_scope', $viewer->projectScope)
+                ->where('run_id', $runId)
+                ->first();
+
+            return $row === null ? null : $this->hydrateRunRow($row);
+        }, $viewer->tenantId);
+    }
+
+    /**
+     * List all steps for a run in the caller's tenant and project scope.
+     *
+     * @phpstan-impure
+     *
+     * @return list<OfficeRunStep>
+     */
+    public function listStepsInScope(CallContext $viewer, string $runId): array
+    {
+        if (! $this->isLowerUuid($runId)) {
+            return [];
+        }
+
+        return $this->db->transaction(function () use ($viewer, $runId): array {
+            $exists = $this->db->query('ai_runs')
+                ->where('tenant_id', $viewer->tenantId)
+                ->where('project_scope', $viewer->projectScope)
+                ->where('run_id', $runId)
+                ->exists();
+            if (! $exists) {
+                return [];
+            }
+
+            $rows = $this->db->query('ai_run_steps')
+                ->where('run_id', $runId)
+                ->orderBy('step_id')
+                ->get();
+
+            $steps = [];
+            foreach ($rows as $row) {
+                $steps[] = $this->hydrateStep($row);
+            }
+
+            return $steps;
+        }, $viewer->tenantId);
+    }
+
+    /**
+     * Find the latest run step referencing $proposalId within the caller's tenant and project scope.
+     *
+     * @phpstan-impure
+     */
+    public function findLatestStepForProposalInScope(CallContext $viewer, string $proposalId, ?OfficeOperation $operation = null): ?OfficeRunStep
+    {
+        if (! $this->isLowerUuid($proposalId)) {
+            return null;
+        }
+
+        return $this->db->transaction(function () use ($viewer, $proposalId, $operation): ?OfficeRunStep {
+            $runsTable = $this->db->table('ai_runs');
+            $stepsTable = $this->db->table('ai_run_steps');
+            $query = $this->db->connection()->table($stepsTable)
+                ->join($runsTable, $runsTable.'.run_id', '=', $stepsTable.'.run_id')
+                ->where($runsTable.'.tenant_id', $viewer->tenantId)
+                ->where($runsTable.'.project_scope', $viewer->projectScope)
+                ->where($stepsTable.'.proposal_id', $proposalId)
+                ->select($stepsTable.'.*');
+            if ($operation !== null) {
+                $query->where($stepsTable.'.operation', $operation->value);
+            }
+            $row = $query->orderByDesc($stepsTable.'.step_id')->first();
+
+            return $row === null ? null : $this->hydrateStep($row);
+        }, $viewer->tenantId);
+    }
+
+    /**
+     * Synchronize linked commit run steps and parent run state inside an active CORE transaction.
+     *
+     * @param  'pending'|'dispatched'|'waiting'|'verified'|'failed'|'finished'  $stepState
+     * @param  array<string, mixed>|null  $compactResult
+     */
+    public function syncProposalOutcomeInTransaction(
+        CallContext $context,
+        string $proposalId,
+        string $stepState,
+        ?string $receiptId = null,
+        ?string $safeError = null,
+        ?array $compactResult = null,
+    ): void {
+        if (! $this->isLowerUuid($proposalId)) {
+            return;
+        }
+
+        $runsTable = $this->db->table('ai_runs');
+        $stepsTable = $this->db->table('ai_run_steps');
+        $matching = $this->db->connection()->table($stepsTable)
+            ->join($runsTable, $runsTable.'.run_id', '=', $stepsTable.'.run_id')
+            ->where($runsTable.'.tenant_id', $context->tenantId)
+            ->where($runsTable.'.project_scope', $context->projectScope)
+            ->where($runsTable.'.effective_subject', $context->effectiveSubject)
+            ->where($stepsTable.'.proposal_id', $proposalId)
+            ->where($stepsTable.'.operation', OfficeOperation::Commit->value)
+            ->select($stepsTable.'.*')
+            ->get();
+
+        if ($matching->isEmpty()) {
+            return;
+        }
+
+        $now = $this->db->utcTimestamp($this->db->clockNow($this->clock));
+        /** @var array<string, true> $touchedRuns */
+        $touchedRuns = [];
+
+        foreach ($matching as $row) {
+            $runId = QueryRecord::str($row, 'run_id');
+            $stepId = QueryRecord::int($row, 'step_id');
+            $touchedRuns[$runId] = true;
+
+            $updates = [
+                'state' => $stepState,
+                'updated_at' => $now,
+                'safe_error' => $safeError,
+            ];
+            if ($receiptId !== null) {
+                $updates['receipt_id'] = $receiptId;
+            }
+            if ($compactResult !== null) {
+                $aad = $this->stepAad($runId, $stepId);
+                $enc = $this->cipher->encrypt($compactResult, $aad);
+                $updates['key_id'] = $enc['key_id'];
+                $updates['encrypted_compact_result'] = $this->db->binaryLiteral($enc['ciphertext']);
+                $existingKeyId = QueryRecord::raw($row, 'key_id');
+                $existingResume = QueryRecord::raw($row, 'encrypted_resume_input');
+                if (is_string($existingKeyId) && $existingKeyId !== '' && $existingResume !== null) {
+                    try {
+                        $decodedResume = $this->cipher->decrypt(
+                            $existingKeyId,
+                            $this->db->decodeBinary($existingResume),
+                            $aad,
+                        );
+                        $reEnc = $this->cipher->encrypt($decodedResume, $aad);
+                        $updates['encrypted_resume_input'] = $this->db->binaryLiteral($reEnc['ciphertext']);
+                    } catch (RuntimeException) {
+                        // Ignore unreadable prior resume payload.
+                    }
+                }
+            }
+
+            $this->db->query('ai_run_steps')
+                ->where('run_id', $runId)
+                ->where('step_id', $stepId)
+                ->update($updates);
+        }
+
+        $reducer = new RunStateReducer;
+        foreach (array_keys($touchedRuns) as $runId) {
+            $runRow = $this->db->query('ai_runs')->where('run_id', $runId)->first();
+            if ($runRow === null) {
+                continue;
+            }
+            $hydratedRun = $this->hydrateRunRow($runRow);
+            $expectedResources = $this->extractExpectedResources($hydratedRun->input);
+            $stepRows = $this->db->query('ai_run_steps')->where('run_id', $runId)->orderBy('step_id')->get();
+            $hydratedSteps = [];
+            foreach ($stepRows as $stepRow) {
+                $hydratedSteps[] = $this->hydrateStep($stepRow);
+            }
+            $nextState = $reducer->reduce($hydratedSteps, expectedResources: $expectedResources);
+            if ($nextState === 'completed' && $hydratedRun->channel === 'agentools') {
+                $nextState = 'reconcile';
+            }
+            $this->db->query('ai_runs')
+                ->where('run_id', $runId)
+                ->whereNull('lease_token')
+                ->update([
+                    'state' => $nextState,
+                    'updated_at' => $now,
+                ]);
+        }
+    }
+
+    /**
+     * Synchronize linked commit run steps and parent run state in a fresh CORE transaction.
+     *
+     * @param  'pending'|'dispatched'|'waiting'|'verified'|'failed'|'finished'  $stepState
+     * @param  array<string, mixed>|null  $compactResult
+     */
+    public function syncProposalOutcome(
+        CallContext $context,
+        string $proposalId,
+        string $stepState,
+        ?string $receiptId = null,
+        ?string $safeError = null,
+        ?array $compactResult = null,
+    ): void {
+        $this->db->transaction(function () use ($context, $proposalId, $stepState, $receiptId, $safeError, $compactResult): void {
+            $this->syncProposalOutcomeInTransaction($context, $proposalId, $stepState, $receiptId, $safeError, $compactResult);
+        }, $context->tenantId);
+    }
+
+    /**
+     * Record a verify step for any run linked to $proposalId and reconcile the run state.
+     *
+     * @param  array<string, mixed>  $compactResult
+     */
+    public function recordVerifyForProposalRuns(
+        CallContext $context,
+        string $proposalId,
+        string $resourceId,
+        string $receiptId,
+        bool $passed,
+        array $compactResult,
+        ?string $safeError = null,
+        ?int $responseBytes = null,
+        ?int $latencyMs = null,
+    ): void {
+        if (! $this->isLowerUuid($proposalId)) {
+            return;
+        }
+
+        $this->db->transaction(function () use (
+            $context,
+            $proposalId,
+            $resourceId,
+            $receiptId,
+            $passed,
+            $compactResult,
+            $safeError,
+            $responseBytes,
+            $latencyMs,
+        ): void {
+            $runsTable = $this->db->table('ai_runs');
+            $stepsTable = $this->db->table('ai_run_steps');
+            $runRows = $this->db->connection()->table($stepsTable)
+                ->join($runsTable, $runsTable.'.run_id', '=', $stepsTable.'.run_id')
+                ->where($runsTable.'.tenant_id', $context->tenantId)
+                ->where($runsTable.'.project_scope', $context->projectScope)
+                ->where($runsTable.'.effective_subject', $context->effectiveSubject)
+                ->where($runsTable.'.channel', '!=', 'agentools')
+                ->where($stepsTable.'.proposal_id', $proposalId)
+                ->where($stepsTable.'.operation', OfficeOperation::Commit->value)
+                ->distinct()
+                ->pluck($runsTable.'.run_id');
+
+            $now = $this->db->utcTimestamp($this->db->clockNow($this->clock));
+            $reducer = new RunStateReducer;
+            foreach ($runRows as $rawRunId) {
+                if (! is_string($rawRunId) || ! $this->isLowerUuid($rawRunId)) {
+                    continue;
+                }
+                $alreadyVerified = $this->db->query('ai_run_steps')
+                    ->where('run_id', $rawRunId)
+                    ->where('operation', OfficeOperation::Verify->value)
+                    ->where('receipt_id', $receiptId)
+                    ->where('state', 'verified')
+                    ->exists();
+                if (! $alreadyVerified) {
+                    $stepId = $this->nextStepIdInTransaction($rawRunId);
+                    $enc = $this->cipher->encrypt($compactResult, $this->stepAad($rawRunId, $stepId));
+                    $this->db->query('ai_run_steps')->insert([
+                        'run_id' => $rawRunId,
+                        'step_id' => $stepId,
+                        'operation' => OfficeOperation::Verify->value,
+                        'resource_id' => $resourceId,
+                        'proposal_id' => $proposalId,
+                        'command_id' => null,
+                        'receipt_id' => $receiptId,
+                        'executor_action_key' => null,
+                        'state' => $passed ? 'verified' : 'failed',
+                        'input_tokens' => null,
+                        'output_tokens' => null,
+                        'response_bytes' => $responseBytes,
+                        'latency_ms' => $latencyMs,
+                        'safe_error' => $safeError,
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                        'key_id' => $enc['key_id'],
+                        'encrypted_resume_input' => null,
+                        'encrypted_compact_result' => $this->db->binaryLiteral($enc['ciphertext']),
+                    ]);
+                }
+
+                $runRow = $this->db->query('ai_runs')->where('run_id', $rawRunId)->first();
+                if ($runRow === null) {
+                    continue;
+                }
+                $hydratedRun = $this->hydrateRunRow($runRow);
+                $expectedResources = $this->extractExpectedResources($hydratedRun->input);
+                $stepRows = $this->db->query('ai_run_steps')->where('run_id', $rawRunId)->orderBy('step_id')->get();
+                $hydratedSteps = [];
+                foreach ($stepRows as $stepRow) {
+                    $hydratedSteps[] = $this->hydrateStep($stepRow);
+                }
+                $nextState = $reducer->reduce($hydratedSteps, expectedResources: $expectedResources);
+                $this->db->query('ai_runs')
+                    ->where('run_id', $rawRunId)
+                    ->whereNull('lease_token')
+                    ->update([
+                        'state' => $nextState,
+                        'updated_at' => $now,
+                    ]);
+            }
+        }, $context->tenantId);
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $input
+     * @return list<string>
+     */
+    private function extractExpectedResources(?array $input): array
+    {
+        if ($input === null || ! is_array($input['draft_items'] ?? null)) {
+            return [];
+        }
+
+        $resources = [];
+        foreach ($input['draft_items'] as $item) {
+            if (is_array($item) && is_string($item['resource_id'] ?? null) && $item['resource_id'] !== '') {
+                $resources[] = $item['resource_id'];
+            }
+        }
+
+        return array_values(array_unique($resources));
+    }
+
     public function claimLease(CallContext $context, string $runId, int $leaseSeconds = 90): ?string
     {
         if (! $this->isLowerUuid($runId)) {
@@ -127,7 +466,7 @@ final readonly class Runs
                 return null;
             }
 
-            $now = $this->clock->now();
+            $now = $this->db->clockNow($this->clock);
             $stamp = $this->db->utcTimestamp($now);
             $leaseToken = $this->db->newUuid();
             $leaseUntil = $this->db->utcTimestamp($now->modify('+'.$leaseSeconds.' seconds'));
@@ -165,7 +504,7 @@ final readonly class Runs
                 return false;
             }
 
-            $now = $this->clock->now();
+            $now = $this->db->clockNow($this->clock);
             $stamp = $this->db->utcTimestamp($now);
 
             $updated = $query
@@ -750,7 +1089,15 @@ final readonly class Runs
 
     private function hydrateRun(CallContext $context, object $row): OfficeRun
     {
+        return $this->hydrateRunRow($row, $context);
+    }
+
+    private function hydrateRunRow(object $row, ?CallContext $context = null): OfficeRun
+    {
         $runId = QueryRecord::str($row, 'run_id');
+        $tenantId = QueryRecord::str($row, 'tenant_id');
+        $projectScope = QueryRecord::str($row, 'project_scope');
+        $effectiveSubject = QueryRecord::str($row, 'effective_subject');
         $inputRow = $this->db->query('ai_run_inputs')->where('run_id', $runId)->first();
         $decodedInput = null;
         if ($inputRow !== null) {
@@ -758,7 +1105,9 @@ final readonly class Runs
                 $decodedInput = $this->cipher->decrypt(
                     QueryRecord::str($inputRow, 'key_id'),
                     $this->db->decodeBinary(QueryRecord::raw($inputRow, 'encrypted_request')),
-                    $this->inputAad($context, $runId),
+                    $context !== null
+                        ? $this->inputAad($context, $runId)
+                        : [$this->db->table('ai_run_inputs'), $tenantId, $projectScope, $effectiveSubject, $runId],
                 );
             } catch (RuntimeException) {
                 $decodedInput = null;
@@ -772,9 +1121,9 @@ final readonly class Runs
 
         return new OfficeRun(
             runId: $runId,
-            tenantId: QueryRecord::str($row, 'tenant_id'),
-            projectScope: QueryRecord::str($row, 'project_scope'),
-            effectiveSubject: QueryRecord::str($row, 'effective_subject'),
+            tenantId: $tenantId,
+            projectScope: $projectScope,
+            effectiveSubject: $effectiveSubject,
             channel: QueryRecord::str($row, 'channel'),
             sourceEventId: QueryRecord::str($row, 'source_event_id'),
             profileRevision: QueryRecord::str($row, 'profile_revision'),

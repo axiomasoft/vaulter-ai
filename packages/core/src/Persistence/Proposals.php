@@ -68,6 +68,66 @@ final readonly class Proposals
         return $this->db->transaction(fn (): ?StoredProposal => $this->findInTransaction($context, $resourceId, $proposalId), $context->tenantId);
     }
 
+    /** Look up a proposal by ID across initiators inside the caller's tenant and project scope. */
+    public function findByIdInScope(CallContext $viewer, string $proposalId, bool $lock = false): ?StoredProposal
+    {
+        if (! Str::isUuid($proposalId) || $proposalId !== strtolower($proposalId)) {
+            return null;
+        }
+
+        return $this->db->transaction(function () use ($viewer, $proposalId, $lock): ?StoredProposal {
+            $query = $this->db->query('ai_proposals')
+                ->where('tenant_id', $viewer->tenantId)
+                ->where('project_scope', $viewer->projectScope)
+                ->where('proposal_id', $proposalId);
+            if ($lock && $this->db->driver() === 'pgsql') {
+                $query->lockForUpdate();
+            }
+            $row = $query->first();
+
+            return $row === null ? null : $this->hydrateRow($row);
+        }, $viewer->tenantId);
+    }
+
+    /**
+     * List proposals within the caller's tenant and project scope (caller must still enforce resource ACL).
+     *
+     * @return list<StoredProposal>
+     */
+    public function listInScope(
+        CallContext $viewer,
+        ?string $resourceId = null,
+        ?string $decision = null,
+        int $limit = 50,
+    ): array {
+        $bounded = max(1, min(100, $limit));
+
+        return $this->db->transaction(function () use ($viewer, $resourceId, $decision, $bounded): array {
+            $query = $this->db->query('ai_proposals')
+                ->where('tenant_id', $viewer->tenantId)
+                ->where('project_scope', $viewer->projectScope);
+            if ($resourceId !== null && $resourceId !== '') {
+                $query->where('resource_id', $resourceId);
+            }
+            if ($decision !== null && $decision !== '') {
+                $query->where('decision', $decision);
+            }
+
+            $rows = $query
+                ->orderByDesc('created_at')
+                ->orderByDesc('proposal_id')
+                ->limit($bounded)
+                ->get();
+
+            $result = [];
+            foreach ($rows as $row) {
+                $result[] = $this->hydrateRow($row);
+            }
+
+            return $result;
+        }, $viewer->tenantId);
+    }
+
     /** Use the caller's CORE transaction. Lock only the decision row, not its nullable payload. */
     public function findInTransaction(CallContext $context, string $resourceId, string $proposalId, bool $lock = false): ?StoredProposal
     {
@@ -77,9 +137,47 @@ final readonly class Proposals
         $scope = $this->scope($context, $resourceId);
         $query = $this->db->query('ai_proposals')->where($scope)->where('proposal_id', $proposalId);
         $row = ($lock ? $query->lockForUpdate() : $query)->first();
-        if ($row === null) {
-            return null;
-        }
+
+        return $row === null ? null : $this->hydrateRow($row);
+    }
+
+    public function decide(
+        CallContext $context,
+        string $resourceId,
+        string $proposalId,
+        string $approver,
+        bool $approved,
+        ?DateTimeImmutable $decidedAt = null,
+    ): bool {
+        $now = $decidedAt ?? $this->db->clockNow($this->clock);
+        $stamp = $this->db->utcTimestamp($now);
+
+        return $this->db->query('ai_proposals')
+            ->where($this->scope($context, $resourceId))
+            ->where('proposal_id', $proposalId)
+            ->where('decision', 'pending')
+            ->where('expires_at', '>', $stamp)
+            ->update([
+                'decision' => $approved ? 'approved' : 'rejected',
+                'approver_subject' => $approver,
+                'decided_at' => $stamp,
+            ]) === 1;
+    }
+
+    private function hydrateRow(object $row): StoredProposal
+    {
+        $proposalId = QueryRecord::str($row, 'proposal_id');
+        $tenantId = QueryRecord::str($row, 'tenant_id');
+        $projectScope = QueryRecord::str($row, 'project_scope');
+        $effectiveSubject = QueryRecord::str($row, 'effective_subject');
+        $resourceId = QueryRecord::str($row, 'resource_id');
+        $scope = [
+            'tenant_id' => $tenantId,
+            'project_scope' => $projectScope,
+            'effective_subject' => $effectiveSubject,
+            'resource_id' => $resourceId,
+        ];
+
         $digest = bin2hex($this->db->decodeBinary(QueryRecord::raw($row, 'digest')));
         $payload = $this->db->query('ai_proposal_payloads')->where('proposal_id', $proposalId)->first();
         $decoded = [];
@@ -96,11 +194,14 @@ final readonly class Proposals
         }
         $expires = $this->db->parseUtcTimestamp(QueryRecord::raw($row, 'expires_at'))
             ?? throw new RuntimeException('Invalid proposal expiration.');
+        $created = $this->db->parseUtcTimestamp(QueryRecord::raw($row, 'created_at'));
+        $decided = $this->db->parseUtcTimestamp(QueryRecord::raw($row, 'decided_at'));
+        $approver = QueryRecord::raw($row, 'approver_subject');
         $targets = $decoded['targets'] ?? [];
         $preconditions = $decoded['preconditions'] ?? [];
 
         return new StoredProposal(
-            new PreparedPlan(
+            plan: new PreparedPlan(
                 $proposalId,
                 QueryRecord::str($row, 'command_name'),
                 $resourceId,
@@ -113,24 +214,16 @@ final readonly class Proposals
                 is_string($decoded['owner_key'] ?? null) ? $decoded['owner_key'] : '',
                 is_array($preconditions) ? array_filter($preconditions, is_string(...), ARRAY_FILTER_USE_KEY) : [],
             ),
-            QueryRecord::str($row, 'decision'),
-            QueryRecord::str($row, 'policy_revision'),
-            $decoded !== [],
+            decision: QueryRecord::str($row, 'decision'),
+            policyRevision: QueryRecord::str($row, 'policy_revision'),
+            hasPayload: $decoded !== [],
+            approverSubject: is_string($approver) && $approver !== '' ? $approver : null,
+            decidedAt: $decided,
+            createdAt: $created,
+            effectiveSubject: $effectiveSubject,
+            tenantId: $tenantId,
+            projectScope: $projectScope,
         );
-    }
-
-    public function decide(CallContext $context, string $resourceId, string $proposalId, string $approver, bool $approved): bool
-    {
-        return $this->db->query('ai_proposals')
-            ->where($this->scope($context, $resourceId))
-            ->where('proposal_id', $proposalId)
-            ->where('decision', 'pending')
-            ->where('expires_at', '>', $this->db->utcTimestamp($this->clock->now()))
-            ->update([
-                'decision' => $approved ? 'approved' : 'rejected',
-                'approver_subject' => $approver,
-                'decided_at' => $this->db->utcTimestamp($this->clock->now()),
-            ]) === 1;
     }
 
     /** @return array{tenant_id: string, project_scope: string, effective_subject: string, resource_id: string} */

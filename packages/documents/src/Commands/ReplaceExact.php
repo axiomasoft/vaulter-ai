@@ -19,6 +19,7 @@ use Vaulter\Ai\Core\Enums\ResourceType;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Documents\Host\TextDocumentAccess;
+use Vaulter\Ai\Documents\Projection\RichTextBlockExtractor;
 use Vaulter\Ai\Documents\Writing\DriveDocumentMutation;
 use Vaulter\Ai\Documents\Writing\LiveTextOwner;
 use Vaulter\Ai\Documents\Writing\TextReplacement;
@@ -106,7 +107,9 @@ final readonly class ReplaceExact implements OfficeCommand
         if ($position < $token->marker->position) {
             throw OfficeException::projectionPending();
         }
-        [, $block] = TextReplacement::find($state->content->toArray(), $blockId);
+        $docArray = $state->content->toArray();
+        [, $block] = TextReplacement::find($docArray, $blockId);
+        $sectionPath = $this->sectionPathFor($docArray, $blockId);
         $identity = TextReplacement::identity($block);
         if ($identity !== TextReplacement::identity(TextReplacement::node($token->dependencies['formatted_node'] ?? null))) {
             throw OfficeException::preconditionFailed('The target block changed since the read.');
@@ -132,6 +135,7 @@ final readonly class ReplaceExact implements OfficeCommand
                 'schema' => $state->schemaVersion,
                 'write_mode' => $state->writeMode,
                 'block_id' => $blockId,
+                'section_path' => $sectionPath,
                 'block_identity' => $identity,
                 'expected' => $expected,
                 'replacement' => $replacement,
@@ -139,5 +143,20 @@ final readonly class ReplaceExact implements OfficeCommand
                 'length_utf16' => TextReplacement::length($expected),
             ],
         );
+    }
+
+    /**
+     * @param  array<string, mixed>  $docArray
+     * @return list<string>
+     */
+    private function sectionPathFor(array $docArray, string $blockId): array
+    {
+        foreach ((new RichTextBlockExtractor)->extract($docArray) as $extracted) {
+            if ($extracted->blockId === $blockId) {
+                return $extracted->headingPath;
+            }
+        }
+
+        return [];
     }
 }
