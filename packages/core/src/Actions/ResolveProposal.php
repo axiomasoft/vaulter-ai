@@ -45,7 +45,8 @@ final readonly class ResolveProposal
     public function resolve(CommandScope $scope, string $proposalId, string $digest, CallContext $approver, bool $approved): bool
     {
         $initiator = $scope->context;
-        if ($approver->tenantId !== $initiator->tenantId || $approver->projectScope !== $initiator->projectScope
+        if (($approver->attributes['office_subagent'] ?? null) === true
+            || $approver->tenantId !== $initiator->tenantId || $approver->projectScope !== $initiator->projectScope
             || $this->directory->findAccessible($approver, $scope->resourceId, 'view') === null) {
             throw OfficeException::resourceUnavailable();
         }

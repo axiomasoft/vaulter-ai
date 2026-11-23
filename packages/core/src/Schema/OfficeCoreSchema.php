@@ -57,6 +57,133 @@ final readonly class OfficeCoreSchema
         }
     }
 
+    public function createChatTables(): void
+    {
+        $this->db->transaction(function (): void {
+            $connection = $this->db->connection();
+            $pgsql = $this->db->driver() === 'pgsql';
+            if ($pgsql) {
+                $connection->statement("SET LOCAL lock_timeout = '2s'");
+                $connection->statement("SET LOCAL statement_timeout = '15s'");
+            }
+
+            $sessions = $this->q('ai_chat_sessions');
+            $messages = $this->q('ai_chat_messages');
+            $events = $this->q('ai_chat_events');
+            $calls = $this->q('ai_tool_calls');
+            $runs = $this->q('ai_runs');
+            $steps = $this->q('ai_run_steps');
+            $proposals = $this->q('ai_proposals');
+            $uuid = $pgsql ? 'uuid' : 'text';
+            $uuidDefault = $pgsql ? ' DEFAULT uuidv7()' : '';
+            $stamp = $pgsql ? 'timestamptz' : 'text';
+            $binary = $pgsql ? 'bytea' : 'blob';
+            $opaque = $pgsql ? 'varchar(255) COLLATE "C"' : 'text COLLATE BINARY';
+            $bytes = $pgsql ? 'octet_length' : 'length';
+            $scope = $pgsql
+                ? "jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(resource_scope_json) = 'array')"
+                : "text NOT NULL DEFAULT '[]' CHECK (json_valid(resource_scope_json) AND json_type(resource_scope_json) = 'array')";
+            $opaqueLength = static fn (string $column): string => $pgsql
+                ? "octet_length({$column}) BETWEEN 1 AND 255"
+                : "length(CAST({$column} AS blob)) BETWEEN 1 AND 255";
+
+            $connection->statement(<<<SQL
+                CREATE TABLE {$sessions} (
+                    session_id {$uuid} PRIMARY KEY NOT NULL{$uuidDefault},
+                    tenant_id {$opaque} NOT NULL CHECK ({$opaqueLength('tenant_id')}),
+                    project_scope {$opaque} NOT NULL CHECK ({$opaqueLength('project_scope')}),
+                    owner_subject {$opaque} NOT NULL CHECK ({$opaqueLength('owner_subject')}),
+                    profile_revision varchar(128) NOT NULL CHECK (length(profile_revision) BETWEEN 1 AND 128),
+                    state varchar(16) NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'archived')),
+                    last_seq bigint NOT NULL DEFAULT 0 CHECK (last_seq >= 0),
+                    retention_until {$stamp} NOT NULL,
+                    created_at {$stamp} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at {$stamp} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (retention_until > created_at)
+                )
+                SQL);
+            $connection->statement("CREATE INDEX {$this->idx('ai_chat_sessions_scope')} ON {$sessions} (tenant_id, project_scope, owner_subject, updated_at DESC, session_id)");
+
+            $connection->statement(<<<SQL
+                CREATE TABLE {$messages} (
+                    session_id {$uuid} NOT NULL REFERENCES {$sessions}(session_id) ON DELETE CASCADE,
+                    message_id {$opaque} NOT NULL CHECK ({$opaqueLength('message_id')}),
+                    role varchar(16) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+                    author_subject {$opaque} CHECK ({$opaqueLength('author_subject')}),
+                    content_digest {$binary} NOT NULL CHECK ({$bytes}(content_digest) = 32),
+                    run_id {$uuid} REFERENCES {$runs}(run_id) ON DELETE RESTRICT,
+                    resource_scope_json {$scope},
+                    key_id varchar(128) NOT NULL CHECK (length(key_id) BETWEEN 1 AND 128),
+                    encrypted_body {$binary} NOT NULL CHECK ({$bytes}(encrypted_body) > 0),
+                    created_at {$stamp} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (session_id, message_id)
+                )
+                SQL);
+            $connection->statement("CREATE UNIQUE INDEX {$this->idx('ai_chat_messages_run')} ON {$messages} (run_id) WHERE role = 'user' AND run_id IS NOT NULL");
+            $connection->statement("CREATE INDEX {$this->idx('ai_chat_messages_run_fk_idx')} ON {$messages} (run_id)");
+
+            $connection->statement(<<<SQL
+                CREATE TABLE {$events} (
+                    session_id {$uuid} NOT NULL REFERENCES {$sessions}(session_id) ON DELETE CASCADE,
+                    seq bigint NOT NULL CHECK (seq > 0),
+                    event_id {$uuid} NOT NULL UNIQUE{$uuidDefault},
+                    run_id {$uuid} REFERENCES {$runs}(run_id) ON DELETE SET NULL,
+                    event_type varchar(32) NOT NULL CHECK (event_type IN (
+                        'assistant.delta', 'assistant.interrupted', 'tool.requested',
+                        'approval.required', 'tool.committed', 'tool.verified', 'run.finished'
+                    )),
+                    resource_scope_json {$scope},
+                    key_id varchar(128),
+                    encrypted_payload {$binary},
+                    created_at {$stamp} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (session_id, seq),
+                    CHECK ((key_id IS NULL) = (encrypted_payload IS NULL))
+                )
+                SQL);
+            $connection->statement("CREATE INDEX {$this->idx('ai_chat_events_run')} ON {$events} (run_id, seq)");
+
+            $connection->statement(<<<SQL
+                CREATE TABLE {$calls} (
+                    run_id {$uuid} NOT NULL REFERENCES {$runs}(run_id) ON DELETE CASCADE,
+                    call_id {$opaque} NOT NULL CHECK ({$opaqueLength('call_id')}),
+                    step_id integer NOT NULL CHECK (step_id > 0),
+                    tool_name varchar(128) NOT NULL CHECK (length(tool_name) BETWEEN 1 AND 128),
+                    tool_version varchar(32) NOT NULL CHECK (length(tool_version) BETWEEN 1 AND 32),
+                    input_digest {$binary} NOT NULL CHECK ({$bytes}(input_digest) = 32),
+                    state varchar(20) NOT NULL DEFAULT 'requested' CHECK (state IN (
+                        'requested', 'awaiting_approval', 'dispatched', 'committed', 'verified', 'rejected', 'failed'
+                    )),
+                    proposal_id {$uuid} REFERENCES {$proposals}(proposal_id) ON DELETE RESTRICT,
+                    command_id {$opaque} CHECK ({$opaqueLength('command_id')}),
+                    receipt_id {$opaque} CHECK ({$opaqueLength('receipt_id')}),
+                    lease_token {$uuid},
+                    lease_until {$stamp},
+                    created_at {$stamp} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at {$stamp} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (run_id, call_id),
+                    FOREIGN KEY (run_id, step_id) REFERENCES {$steps}(run_id, step_id) ON DELETE CASCADE,
+                    CHECK ((lease_token IS NULL) = (lease_until IS NULL))
+                )
+                SQL);
+            $connection->statement("CREATE INDEX {$this->idx('ai_tool_calls_lease')} ON {$calls} (lease_until, run_id, call_id) WHERE lease_until IS NOT NULL");
+            $connection->statement("CREATE INDEX {$this->idx('ai_tool_calls_proposal_fk_idx')} ON {$calls} (proposal_id)");
+            $connection->statement("CREATE INDEX {$this->idx('ai_tool_calls_step_fk_idx')} ON {$calls} (run_id, step_id)");
+        });
+    }
+
+    public function dropChatTables(): void
+    {
+        $this->db->transaction(function (): void {
+            if ($this->db->driver() === 'pgsql') {
+                $this->db->connection()->statement("SET LOCAL lock_timeout = '2s'");
+                $this->db->connection()->statement("SET LOCAL statement_timeout = '15s'");
+            }
+            foreach (['ai_tool_calls', 'ai_chat_events', 'ai_chat_messages', 'ai_chat_sessions'] as $entity) {
+                $this->db->connection()->statement("DROP TABLE IF EXISTS {$this->q($entity)}");
+            }
+        });
+    }
+
     /** @return list<string> */
     private function pgsqlStatements(): array
     {

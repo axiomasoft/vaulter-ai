@@ -11,6 +11,7 @@ use Vaulter\Ai\Core\Contracts\CallContextResolver;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Data\OfficeResponse;
 use Vaulter\Ai\Core\Enums\ErrorCode;
+use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
 use Vaulter\Ai\Core\Protocol\WireValidator;
 
@@ -65,10 +66,15 @@ final readonly class OfficeController
 
         $office = $this->container->make(Office::class);
         $response = $office->handle($context, $officeRequest);
+        $status = $this->errorMapper->httpStatus($response);
+        if ($officeRequest->operation === OfficeOperation::Commit && $response->errorCode === ErrorCode::ApprovalRequired
+            && ($context->attributes['office_subagent'] ?? null) === true) {
+            $status = 403;
+        }
 
         return JsonResponse::fromJsonString(
             data: $response->toJson(),
-            status: $this->errorMapper->httpStatus($response),
+            status: $status,
         );
     }
 }

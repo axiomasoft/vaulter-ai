@@ -461,6 +461,8 @@ if (class_exists(\Vaulter\Ai\AgenTools\OfficeToolDescriptorRegistry::class)) {
 
 echo json_encode([
     'has_ai_runs' => Schema::hasTable('v_ai_runs'),
+    'has_ai_chat' => Schema::hasTable('v_ai_chat_sessions') && Schema::hasTable('v_ai_chat_messages')
+        && Schema::hasTable('v_ai_chat_events') && Schema::hasTable('v_ai_tool_calls'),
     'has_text_commands' => Schema::hasTable('v_ai_text_commands'),
     'has_sheets_commands' => Schema::hasTable('v_sheets_commands'),
     'has_reader_text' => $registry->reader(ResourceType::Text) !== null,
@@ -484,6 +486,7 @@ PHP);
             $out = json_decode(trim($probe->getOutput()), true, 512, JSON_THROW_ON_ERROR);
 
             expect($out['has_ai_runs'])->toBeTrue("v_ai_runs missing in {$name}")
+                ->and($out['has_ai_chat'])->toBeTrue("chat tables missing in {$name}")
                 ->and($out['has_text_commands'])->toBe($spec['has_text'])
                 ->and($out['has_sheets_commands'])->toBe($spec['has_sheets'])
                 ->and($out['executors'])->toBe($spec['expected_executors'])

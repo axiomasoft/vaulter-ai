@@ -1,0 +1,148 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Vaulter\Ai\Core\Http;
+
+use Generator;
+use Illuminate\Contracts\Container\Container;
+use Illuminate\Contracts\Routing\ResponseFactory;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use JsonException;
+use stdClass;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+use Vaulter\Ai\Core\Contracts\CallContextResolver;
+use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Enums\ErrorCode;
+use Vaulter\Ai\Core\Exceptions\OfficeException;
+use Vaulter\Ai\Core\Protocol\WireErrorMapper;
+use Vaulter\Ai\Core\Workspace\ChatWorkspace;
+
+final readonly class ChatWorkspaceController
+{
+    public function __construct(
+        private Container $container,
+        private WireErrorMapper $errors,
+        private ResponseFactory $responses,
+    ) {}
+
+    public function show(Request $request, string $id): JsonResponse
+    {
+        try {
+            return new JsonResponse(['data' => $this->workspace()->show($this->context($request), $id)]);
+        } catch (OfficeException $exception) {
+            return $this->error($exception);
+        }
+    }
+
+    public function post(Request $request, string $id): JsonResponse
+    {
+        try {
+            $context = $this->context($request);
+            // Workspace middleware normalizes the parsed copy of the request body.
+            $body = $request->isJson()
+                ? json_decode($request->getContent(), false, 512, JSON_THROW_ON_ERROR)
+                : (object) $request->request->all();
+            if (! $body instanceof stdClass) {
+                throw OfficeException::invalidInput();
+            }
+            $message = $body->message_id ?? null;
+            $content = $body->content ?? null;
+            $resources = property_exists($body, 'resource_ids') ? $body->resource_ids : [];
+            if (! is_string($message) || ! is_string($content) || ! is_array($resources) || ! array_is_list($resources)
+                || array_filter($resources, is_string(...)) !== $resources) {
+                throw OfficeException::invalidInput();
+            }
+
+            $runId = $this->workspace()->post($context, $id, $message, $content, $resources);
+
+            return new JsonResponse(['data' => ['message_id' => $message, 'run_id' => $runId]], 202);
+        } catch (JsonException) {
+            return $this->error(OfficeException::invalidInput());
+        } catch (OfficeException $exception) {
+            return $this->error($exception);
+        }
+    }
+
+    public function events(Request $request, string $id): StreamedResponse|JsonResponse
+    {
+        try {
+            $context = $this->context($request);
+            $raw = $request->headers->get('Last-Event-ID') ?? $request->query('cursor', '0');
+            $cursor = is_string($raw) && preg_match('/\A(?:0|[1-9][0-9]*)\z/', $raw) === 1
+                ? filter_var($raw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]) : false;
+            if (! is_int($cursor)) {
+                throw OfficeException::invalidInput();
+            }
+            $chat = $this->workspace();
+            $chat->events($context, $id, $cursor);
+        } catch (OfficeException $exception) {
+            return $this->error($exception);
+        }
+
+        /** @return Generator<int, string> */
+        $frames = function () use ($request, $chat, $id, $cursor): Generator {
+            $start = hrtime(true);
+            $deadline = $start + 25_000_000_000;
+            $keepAlive = $start + 12_000_000_000;
+            yield ": connected\n\n";
+            while (hrtime(true) < $deadline && connection_aborted() === 0) {
+                try {
+                    $batch = $chat->events($this->context($request), $id, $cursor);
+                } catch (OfficeException $exception) {
+                    if ($exception->errorCode === ErrorCode::CursorExpired) {
+                        yield "event: reset\ndata: {}\n\n";
+                    }
+
+                    return;
+                }
+                foreach ($batch as $event) {
+                    if (hrtime(true) >= $deadline || connection_aborted() !== 0) {
+                        return;
+                    }
+                    $cursor = $event['seq'];
+                    $data = json_encode((object) $event['data'], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+                    yield "id: {$cursor}\nevent: {$event['type']}\ndata: {$data}\n\n";
+                }
+                if (hrtime(true) >= $keepAlive) {
+                    yield ": keep-alive\n\n";
+                    $keepAlive += 12_000_000_000;
+                }
+                if ($batch === []) {
+                    usleep(200_000);
+                }
+            }
+        };
+
+        return $this->responses->stream($frames, 200, [
+            'Content-Type' => 'text/event-stream',
+            'Cache-Control' => 'private, no-cache, no-store, no-transform',
+            'X-Accel-Buffering' => 'no',
+            'Content-Encoding' => 'identity',
+        ]);
+    }
+
+    private function context(Request $request): CallContext
+    {
+        return $this->container->make(CallContextResolver::class)->resolve($request)
+            ?? throw new OfficeException(ErrorCode::AuthenticationRequired);
+    }
+
+    private function workspace(): ChatWorkspace
+    {
+        return $this->container->make(ChatWorkspace::class);
+    }
+
+    private function error(OfficeException $exception): JsonResponse
+    {
+        $code = $exception->errorCode;
+        $spec = $this->errors->describe($code);
+
+        return new JsonResponse(['error' => [
+            'code' => $code->value,
+            'retryable' => $spec['retryable'],
+            'next_action' => $spec['next_action']->value,
+        ]], $spec['status']);
+    }
+}

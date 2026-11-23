@@ -71,6 +71,66 @@ final class WireValidator
             && $this->isValidMessage($envelope);
     }
 
+    public function toolInputSchema(OfficeOperation $operation): stdClass
+    {
+        $name = substr($operation->value, strlen('office.')).'Input';
+        $definitions = $this->schema->{'$defs'} ?? null;
+        if (! $definitions instanceof stdClass) {
+            throw new RuntimeException('Office schema definitions are missing.');
+        }
+        $input = $definitions->{$name} ?? null;
+        if (! $input instanceof stdClass) {
+            throw new RuntimeException('Office tool input schema is missing.');
+        }
+
+        $used = $this->inputDefinitions($definitions, [$name => true], $input);
+        $subset = array_intersect_key(get_object_vars($definitions), $used);
+        if ($operation === OfficeOperation::Commit) {
+            $commit = clone $input;
+            $required = $commit->required ?? null;
+            if (is_array($required)) {
+                $commit->required = array_values(array_filter($required, static fn (mixed $field): bool => $field !== 'command_id'));
+            }
+            $subset[$name] = $commit;
+        }
+        $schema = json_decode(json_encode((object) [
+            '$ref' => '#/$defs/'.$name,
+            '$defs' => $subset,
+        ], JSON_THROW_ON_ERROR), false, 512, JSON_THROW_ON_ERROR);
+
+        return $schema instanceof stdClass ? $schema : throw new RuntimeException('Malformed Office tool input schema.');
+    }
+
+    public function isValidToolArguments(stdClass $arguments, stdClass $schema): bool
+    {
+        return $this->validator->validate($arguments, $schema)->isValid();
+    }
+
+    /** @param array<string,true> $used
+     * @return array<string,true>
+     */
+    private function inputDefinitions(stdClass $definitions, array $used, mixed $node): array
+    {
+        if ($node instanceof stdClass) {
+            $ref = $node->{'$ref'} ?? null;
+            if (is_string($ref) && str_starts_with($ref, '#/$defs/')) {
+                $name = substr($ref, strlen('#/$defs/'));
+                if (! isset($used[$name])) {
+                    $used[$name] = true;
+                    $used = $this->inputDefinitions($definitions, $used, $definitions->{$name} ?? null);
+                }
+            }
+            $node = get_object_vars($node);
+        }
+        if (is_array($node)) {
+            foreach ($node as $child) {
+                $used = $this->inputDefinitions($definitions, $used, $child);
+            }
+        }
+
+        return $used;
+    }
+
     /**
      * Parse raw HTTP JSON body following the three transport boundaries from agent-sdk.md:
      *  1. Malformed JSON, non-object, missing string operation, or unknown operation => transport 400 {"error":"invalid_request"}
