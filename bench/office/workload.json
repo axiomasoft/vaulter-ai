@@ -1,0 +1,47 @@
+{
+    "schema": "vaulter-ai-office-bench/v1",
+    "task": "5.2",
+    "access_profile": {
+        "name": "first",
+        "search_page_max": 5,
+        "read_max_rows": 20,
+        "read_max_bytes": 16384,
+        "prepare_max_targets": 20
+    },
+    "model": {
+        "id": "fake-office-scripted",
+        "mode": "fake",
+        "tokenizer": null
+    },
+    "engine": {
+        "calculator": "vaulter-sheets",
+        "univer": "1.5.2"
+    },
+    "assignment": {
+        "command": "sheet.fill_formula@1",
+        "scope": "fixed_members",
+        "sheet_id": "expenses",
+        "table_id": "costs",
+        "destination_column_id": "delta",
+        "expression": {
+            "op": "subtract",
+            "left_column_id": "actual",
+            "right_column_id": "plan"
+        },
+        "target_row_ids": ["r-telecom", "r-travel"],
+        "clause_block_id": "p-payment",
+        "clause_text": "Оплата в течение 30 дней.",
+        "contract_title": "Договор поставки",
+        "sheet_title": "Бюджет",
+        "truth": {
+            "r-telecom": {"plan": 100, "actual": 120, "delta": 20},
+            "r-travel": {"plan": 200, "actual": 180, "delta": -20},
+            "r-fees": {"plan": 10, "actual": 20, "delta": 77, "untouched": true}
+        }
+    },
+    "scales": [
+        {"id": "1x", "multiplier": 1, "contract_blocks": 11, "sheet_rows": 3},
+        {"id": "10x", "multiplier": 10, "contract_blocks": 110, "sheet_rows": 30}
+    ],
+    "iterations": {"warmup": 1, "measured": 5}
+}

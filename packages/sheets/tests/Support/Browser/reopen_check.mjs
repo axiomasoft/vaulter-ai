@@ -10,6 +10,19 @@ if (!workbookPath || !sheetsRepo || !nodeId) {
     process.exit(2);
 }
 
+// Chrome's singleton socket lives under TMPDIR and must fit in sockaddr_un (108 bytes
+// including NUL). The orchestrator TMPDIR is deeper than that, so Chrome aborts or
+// sits in launch until the PHP process timeout. Keep the profile on a short path.
+const chromeSocketSuffix = '/com.google.Chrome.XXXXXX/SingletonSocket';
+const inheritedTmp = process.env.TMPDIR || process.env.TEMP || '/tmp';
+const browserEnv = { ...process.env };
+if (Buffer.byteLength(inheritedTmp + chromeSocketSuffix) > 107) {
+    browserEnv.TMPDIR = '/tmp';
+    browserEnv.TEMP = '/tmp';
+    browserEnv.TMP = '/tmp';
+}
+const viteCacheDir = '/tmp/vaulter-ai-sheets-reopen-vite';
+
 const require = createRequire(path.join(sheetsRepo, 'package.json'));
 const playwrightDir = path.dirname(require.resolve('@playwright/test/package.json'));
 const viteDir = path.dirname(require.resolve('vite/package.json'));
@@ -65,9 +78,19 @@ const apiPort = apiServer.address().port;
 const vite = await createViteServer({
     root: sheetsRepo,
     logLevel: 'silent',
+    // Do not reuse or delete the sibling repo's node_modules/.vite cache, and do not
+    // crawl its bench/e2e HTML (those pull Univer in and blow the PHP process timeout).
+    cacheDir: viteCacheDir,
+    optimizeDeps: {
+        entries: [],
+        noDiscovery: true,
+        include: ['vue'],
+        holdUntilCrawlEnd: false,
+    },
     server: {
         port: 0,
         host: '127.0.0.1',
+        watch: null,
         fs: { allow: [sheetsRepo] },
         proxy: {
             '/api': `http://127.0.0.1:${apiPort}`,
@@ -116,11 +139,17 @@ try {
     const errors = [];
     browser = await chromium.launch({
         headless: true,
+        timeout: 20_000,
+        env: browserEnv,
+        // Snap Chromium and a restricted orchestrator sandbox do not come up under the
+        // default sandbox; without this, launch waits until the PHP timeout kills it.
+        args: ['--no-sandbox', '--disable-dev-shm-usage'],
         ...(process.env.SHEETS_CHROMIUM_EXECUTABLE
             ? { executablePath: process.env.SHEETS_CHROMIUM_EXECUTABLE }
             : { channel: 'chromium' }),
     });
     const page = await browser.newPage();
+    page.setDefaultTimeout(15_000);
     page.on('pageerror', err => errors.push(`pageerror: ${err.message}`));
     page.on('response', res => {
         if (res.status() >= 400) errors.push(`http ${res.status()}: ${res.url()}`);
@@ -131,6 +160,7 @@ try {
 
     const loadedPromise = page.waitForResponse(
         res => res.url().includes(`/api/vaulter-sheets/v1/workbooks/${encodeURIComponent(nodeId)}`) && res.status() === 200,
+        { timeout: 15_000 },
     );
     await page.goto(`${baseUrl}/?node=${encodeURIComponent(nodeId)}`, { waitUntil: 'domcontentloaded' });
     const loadedResp = await loadedPromise;
@@ -158,6 +188,7 @@ try {
     await page.locator('canvas[id^=univer-sheet-main-canvas_]').waitFor({ state: 'detached', timeout: 10_000 });
     const reopenedPromise = page.waitForResponse(
         res => res.url().includes(`/api/vaulter-sheets/v1/workbooks/${encodeURIComponent(nodeId)}`) && res.status() === 200,
+        { timeout: 15_000 },
     );
     await page.click('#toggle-wb');
     await reopenedPromise;
