@@ -71,7 +71,7 @@ function packZipFromDirectory(string $sourceDir, string $zipPath, string $versio
     $zip->close();
 }
 
-test('isolated Composer artifact installs verify core+documents, laravel-ai without AgenTools, and agentools', function (): void {
+test('isolated Composer artifact installs verify core+documents, documents+collaboration, laravel-ai without AgenTools, and agentools', function (): void {
     $root = dirname(__DIR__, 3);
     $parentDir = dirname($root);
     $tmp = sys_get_temp_dir().'/vaulter-ai-matrix-'.bin2hex(random_bytes(5));
@@ -87,6 +87,12 @@ test('isolated Composer artifact installs verify core+documents, laravel-ai with
                 'axiomasoft/vaulter-core' => '^1.0',
                 'axiomasoft/vaulter-documents' => '^1.0',
                 'axiomasoft/vaulter-drive' => '^1.0',
+            ]],
+            [$root.'/packages/collaboration', 'axiomasoft-vaulter-ai-collaboration-1.0.0.zip', '1.0.0', [
+                'axiomasoft/vaulter-ai-core' => '^1.0',
+                'axiomasoft/vaulter-ai-documents' => '^1.0',
+                'axiomasoft/vaulter-collaboration' => '^1.0',
+                'axiomasoft/vaulter-core' => '^1.0',
             ]],
             [$root.'/packages/sheets', 'axiomasoft-vaulter-ai-sheets-1.0.0.zip', '1.0.0', [
                 'axiomasoft/vaulter-ai-core' => '^1.0',
@@ -137,6 +143,14 @@ test('isolated Composer artifact installs verify core+documents, laravel-ai with
                 'axiomasoft/packman-plugins' => '0.1.1',
                 'axiomasoft/packman-schema' => '0.1.1',
             ]],
+            [$parentDir.'/vaulter-collaboration/packages/collaboration', 'axiomasoft-vaulter-collaboration-1.0.0.zip', '1.0.0', [
+                'axiomasoft/vaulter-core' => '1.0.0',
+                'axiomasoft/vaulter-documents' => '1.0.0',
+                'axiomasoft/vaulter-drive' => '1.0.0',
+                'axiomasoft/packman' => '0.1.1',
+                'axiomasoft/packman-plugins' => '0.1.1',
+                'axiomasoft/packman-schema' => '0.1.1',
+            ]],
             [$parentDir.'/packman/packages/core', 'axiomasoft-packman-0.1.1.zip', '0.1.1', []],
             [$parentDir.'/packman/packages/plugins', 'axiomasoft-packman-plugins-0.1.1.zip', '0.1.1', ['axiomasoft/packman' => '0.1.1']],
             [$parentDir.'/packman/packages/schema', 'axiomasoft-packman-schema-0.1.1.zip', '0.1.1', ['axiomasoft/packman' => '0.1.1']],
@@ -181,7 +195,7 @@ test('isolated Composer artifact installs verify core+documents, laravel-ai with
                     'axiomasoft/vaulter-ai-core' => '1.0.0',
                 ],
                 'must_exist' => ['axiomasoft/vaulter-ai-core'],
-                'must_be_absent' => ['axiomasoft/vaulter-ai-documents', 'axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-ai-laravel-ai', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
+                'must_be_absent' => ['axiomasoft/vaulter-ai-documents', 'axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-ai-collaboration', 'axiomasoft/vaulter-ai-laravel-ai', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
                 'expected_executors' => [],
                 'has_text' => false,
                 'has_sheets' => false,
@@ -195,7 +209,7 @@ test('isolated Composer artifact installs verify core+documents, laravel-ai with
                     'axiomasoft/vaulter-ai-documents' => '1.0.0',
                 ],
                 'must_exist' => ['axiomasoft/vaulter-ai-core', 'axiomasoft/vaulter-ai-documents'],
-                'must_be_absent' => ['axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-ai-laravel-ai', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
+                'must_be_absent' => ['axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-ai-collaboration', 'axiomasoft/vaulter-ai-laravel-ai', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
                 'expected_executors' => [],
                 'has_text' => true,
                 'has_sheets' => false,
@@ -209,7 +223,7 @@ test('isolated Composer artifact installs verify core+documents, laravel-ai with
                     'axiomasoft/vaulter-ai-sheets' => '1.0.0',
                 ],
                 'must_exist' => ['axiomasoft/vaulter-ai-core', 'axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-sheets'],
-                'must_be_absent' => ['axiomasoft/vaulter-ai-documents', 'axiomasoft/vaulter-ai-laravel-ai', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
+                'must_be_absent' => ['axiomasoft/vaulter-ai-documents', 'axiomasoft/vaulter-ai-collaboration', 'axiomasoft/vaulter-ai-laravel-ai', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
                 'expected_executors' => [],
                 'has_text' => false,
                 'has_sheets' => true,
@@ -224,7 +238,7 @@ test('isolated Composer artifact installs verify core+documents, laravel-ai with
                     'axiomasoft/vaulter-ai-sheets' => '1.0.0',
                 ],
                 'must_exist' => ['axiomasoft/vaulter-ai-core', 'axiomasoft/vaulter-ai-documents', 'axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-sheets'],
-                'must_be_absent' => ['axiomasoft/vaulter-ai-laravel-ai', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
+                'must_be_absent' => ['axiomasoft/vaulter-ai-collaboration', 'axiomasoft/vaulter-ai-laravel-ai', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
                 'expected_executors' => [],
                 'has_text' => true,
                 'has_sheets' => true,
@@ -239,7 +253,7 @@ test('isolated Composer artifact installs verify core+documents, laravel-ai with
                     'axiomasoft/vaulter-ai-laravel-ai' => '1.0.0',
                 ],
                 'must_exist' => ['axiomasoft/vaulter-ai-core', 'axiomasoft/vaulter-ai-documents', 'axiomasoft/vaulter-ai-laravel-ai', 'laravel/ai'],
-                'must_be_absent' => ['axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
+                'must_be_absent' => ['axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-ai-collaboration', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
                 'expected_executors' => ['laravel-ai'],
                 'has_text' => true,
                 'has_sheets' => false,
@@ -254,10 +268,31 @@ test('isolated Composer artifact installs verify core+documents, laravel-ai with
                     'axiomasoft/vaulter-ai-agentools' => '1.0.0',
                 ],
                 'must_exist' => ['axiomasoft/vaulter-ai-core', 'axiomasoft/vaulter-ai-documents', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
-                'must_be_absent' => ['axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-ai-laravel-ai'],
+                'must_be_absent' => ['axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-ai-collaboration', 'axiomasoft/vaulter-ai-laravel-ai'],
                 'expected_executors' => ['agentools'],
                 'has_text' => true,
                 'has_sheets' => false,
+                'run_agent_smoke' => false,
+            ],
+            'documents_collaboration' => [
+                'require' => [
+                    'php' => '^8.4',
+                    'laravel/framework' => '^13.0',
+                    'axiomasoft/vaulter-ai-core' => '1.0.0',
+                    'axiomasoft/vaulter-ai-documents' => '1.0.0',
+                    'axiomasoft/vaulter-ai-collaboration' => '1.0.0',
+                ],
+                'must_exist' => [
+                    'axiomasoft/vaulter-ai-core',
+                    'axiomasoft/vaulter-ai-documents',
+                    'axiomasoft/vaulter-ai-collaboration',
+                    'axiomasoft/vaulter-collaboration',
+                ],
+                'must_be_absent' => ['axiomasoft/vaulter-ai-sheets', 'axiomasoft/vaulter-ai-laravel-ai', 'axiomasoft/vaulter-ai-agentools', 'agentools/sdk'],
+                'expected_executors' => [],
+                'has_text' => true,
+                'has_sheets' => false,
+                'has_journal_owner' => true,
                 'run_agent_smoke' => false,
             ],
         ];
@@ -398,10 +433,26 @@ if (class_exists(\Vaulter\Ai\LaravelAi\LaravelAiServiceProvider::class)) {
 if (class_exists(\Vaulter\Ai\AgenTools\AgenToolsServiceProvider::class)) {
     $providers[] = \Vaulter\Ai\AgenTools\AgenToolsServiceProvider::class;
 }
+if (class_exists(\Vaulter\Collaboration\VaulterCollaborationServiceProvider::class)) {
+    $providers[] = \Illuminate\Broadcasting\BroadcastServiceProvider::class;
+    $providers[] = \Vaulter\Collaboration\VaulterCollaborationServiceProvider::class;
+}
+if (class_exists(\Vaulter\Ai\Collaboration\CollaborationAiServiceProvider::class)) {
+    $providers[] = \Vaulter\Ai\Collaboration\CollaborationAiServiceProvider::class;
+}
 
 foreach ($providers as $provider) {
     $app->register($provider);
 }
+if (class_exists(\Vaulter\Collaboration\VaulterCollaborationServiceProvider::class)) {
+    $app['config']->set('vaulter.modules.collaboration', true);
+    $app['config']->set('vaulter-collaboration.hub.jwt_keys', ['k1' => 'test-collab-jwt-secret-key-at-least-32-bytes']);
+    $app['config']->set('vaulter-collaboration.hub.jwt_active_kid', 'k1');
+    $app['config']->set('vaulter-collaboration.hub.webhook_secret', 'test-webhook-secret-different-value');
+    $app['config']->set('broadcasting.default', 'null');
+    $app['config']->set('broadcasting.connections.null', ['driver' => 'null']);
+}
+$app->instance('env', 'testing');
 $app->boot();
 
 $migrationPaths = [];
@@ -469,6 +520,7 @@ echo json_encode([
     'has_replace_cmd' => $registry->command('text.replace_exact@1') !== null,
     'has_reader_sheet' => $registry->reader(ResourceType::Sheet) !== null,
     'has_fill_formula_cmd' => $registry->command('sheet.fill_formula@1') !== null,
+    'has_journal_owner' => $registry->ownerFor('text.replace_exact@1', 'journal') !== null,
     'executors' => $executors,
     'laravel_tools' => $toolNames,
     'agentools_descriptors' => $descriptorNames,
@@ -493,7 +545,8 @@ PHP);
                 ->and($out['has_reader_text'])->toBe($spec['has_text'])
                 ->and($out['has_replace_cmd'])->toBe($spec['has_text'])
                 ->and($out['has_reader_sheet'])->toBe($spec['has_sheets'])
-                ->and($out['has_fill_formula_cmd'])->toBe($spec['has_sheets']);
+                ->and($out['has_fill_formula_cmd'])->toBe($spec['has_sheets'])
+                ->and($out['has_journal_owner'])->toBe($spec['has_journal_owner'] ?? false);
 
             if ($spec['run_agent_smoke']) {
                 expect($out['agent_smoke_ok'])->toBeTrue("Agent smoke failed in {$name}")

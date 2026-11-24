@@ -2,7 +2,7 @@
   "name": "@vaulter/ai-vue",
   "version": "1.0.0",
   "description": "Vue 3 proposal review (P/Q), digest-bound decision, and partial run recovery UI for Vaulter AI.",
-  "license": "UNLICENSED",
+  "license": "proprietary",
   "engines": {
     "node": ">=26.13.1"
   },

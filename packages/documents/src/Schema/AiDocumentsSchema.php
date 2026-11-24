@@ -6,6 +6,7 @@ namespace Vaulter\Ai\Documents\Schema;
 
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Arr;
+use RuntimeException;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Configuration\DatabaseOptions;
 use Vaulter\Database\VaulterDatabase;
@@ -25,13 +26,24 @@ final readonly class AiDocumentsSchema
         private OfficeDatabase $officeDb,
     ) {}
 
+    /**
+     * Refuse writer activation unless the documents schema connection and OfficeDatabase
+     * resolve to the same name. There is no DocumentsDatabase type: this schema's
+     * VaulterDatabase connection is the owner connection DocumentStateWriter uses.
+     */
     public function assertSameConnectionAsCore(): void
     {
-        $coreConn = $this->officeDb->connection()->getName();
-        $ownerConn = $this->database->connection()->getName();
-        if ($coreConn !== null && $ownerConn !== null && $coreConn !== $ownerConn) {
-            // Standalone core connections are permitted only if separate; owner tables live on OWNER connection.
+        $documents = $this->database->connection()->getName();
+        $office = $this->officeDb->connection()->getName();
+        if ($documents === $office) {
+            return;
         }
+
+        throw new RuntimeException(sprintf(
+            'DocumentsDatabase connection [%s] differs from OfficeDatabase connection [%s]; writer activation refused.',
+            $documents ?? 'default',
+            $office ?? 'default',
+        ));
     }
 
     public function createAll(): void

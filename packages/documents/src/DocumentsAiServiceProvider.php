@@ -87,6 +87,8 @@ final class DocumentsAiServiceProvider extends ServiceProvider
             $this->commands([RebuildTextIndex::class]);
         }
 
+        $this->app->make(AiDocumentsSchema::class)->assertSameConnectionAsCore();
+
         $registry = $this->app->make(OfficeRegistry::class);
         if (! $registry->isFrozen()) {
             $registry->registerReader($this->app->make(TextReader::class));

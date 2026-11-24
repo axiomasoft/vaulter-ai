@@ -98,5 +98,17 @@
             }
         }
     ],
+    "python": [
+        {
+            "name": "vaulter-office-client",
+            "path": "clients/python",
+            "channel": "private",
+            "release_line": "python-office-client",
+            "tag_prefix": "office-client-v",
+            "license": "Proprietary",
+            "access": "restricted",
+            "version": "1.0.0"
+        }
+    ],
     "images": []
 }

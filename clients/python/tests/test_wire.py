@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
+
+# `unittest discover -s clients/python/tests` puts the tests directory on
+# sys.path, not the sibling package, and the pre-gate does not install it.
+_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+if str(_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PACKAGE_ROOT))
 
 from vaulter_office import OfficeClient, OfficeProtocolError
 
