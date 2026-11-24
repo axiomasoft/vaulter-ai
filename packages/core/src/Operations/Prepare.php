@@ -8,6 +8,7 @@ use Closure;
 use stdClass;
 use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
+use Vaulter\Ai\Core\Contracts\ProposalSuggestionPort;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\OfficeRequest;
@@ -29,6 +30,7 @@ final readonly class Prepare
         private ReadTokens $tokens,
         private Proposals $proposals,
         private ?CommandWriteCapability $writeCapability = null,
+        private ?ProposalSuggestionPort $suggestions = null,
     ) {}
 
     public function handle(CallContext $context, OfficeRequest $request): OfficeResponse
@@ -88,8 +90,9 @@ final readonly class Prepare
         );
         $revision = $this->policy->profile($context)->revision;
 
-        return function () use ($context, $token, $plan, $revision, $result): OfficeResponse {
+        return function () use ($context, $resource, $token, $plan, $revision, $result): OfficeResponse {
             $this->proposals->store($context, $token, $plan, $revision);
+            $this->suggestions?->onProposalPrepared($context, $resource, $plan);
 
             return OfficeResponse::success(OfficeOperation::Prepare, $result);
         };

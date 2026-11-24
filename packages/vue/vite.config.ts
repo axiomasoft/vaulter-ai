@@ -18,6 +18,7 @@ export default defineConfig({
       entry: fileURLToPath(new URL('./src/index.ts', import.meta.url)),
       name: 'VaulterAiVue',
       fileName: 'vaulter-ai-vue',
+      cssFileName: 'style',
     },
     rollupOptions: {
       external: ['vue'],

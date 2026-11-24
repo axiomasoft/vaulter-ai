@@ -25,7 +25,7 @@
       "import": "./dist/vaulter-ai-vue.js",
       "require": "./dist/vaulter-ai-vue.umd.cjs"
     },
-    "./style.css": "./dist/vaulter-ai-vue.css"
+    "./style.css": "./dist/style.css"
   },
   "scripts": {
     "build": "vue-tsc --noEmit && vite build",

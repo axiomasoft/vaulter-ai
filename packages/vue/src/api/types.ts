@@ -326,3 +326,144 @@ export interface ChatSseEvent {
   type: ChatSseEventType
   data: Record<string, unknown>
 }
+
+export interface ChatSessionSummary {
+  session_id: string
+  state: string
+  last_seq: number
+}
+
+export interface ChatSessionListResult {
+  sessions: ChatSessionSummary[]
+  next_cursor: string | null
+}
+
+export interface ArchiveChatSessionResult {
+  session_id: string
+  state: string
+}
+
+export interface CancelChatRunResult {
+  run_id: string
+  state: string
+}
+
+export interface RetryChatRunResult {
+  run_id: string
+}
+
+export interface ProposalCardMessages {
+  statusDraft: string
+  statusPending: string
+  statusApprovedByHuman: string
+  statusAutomatic: string
+  statusApprovedPendingExecution: string
+  statusApprovedCommitted: string
+  statusOwnerRunning: string
+  statusApprovedFailed: string
+  statusRejectedByHuman: string
+  statusRejectedByOwner: string
+  statusOwnerNotStarted: string
+  statusVerifyPassed: string
+  statusVerifyFailed: string
+  statusVerifyUnverified: string
+  decisionWon: string
+  receiptLabel: string
+  errorLabel: string
+  ownerRejectionLabel: string
+  detailsShow: string
+  detailsHide: string
+  acceptButton: string
+  rejectButton: string
+  approvingButton: string
+  rejectingButton: string
+  initiatorLabel: string
+  reviewerLabel: string
+  resourceLabel: string
+  proposalIdLabel: string
+  commandIdLabel: string
+  digestLabel: string
+  expiresLabel: string
+  expiredNote: string
+  readonlyNote: string
+}
+
+export interface ProposalReviewPanelMessages {
+  title: string
+  emptyState: string
+  refreshButton: string
+  refreshingButton: string
+  refreshRunButton: string
+  resumeRunButton: string
+  filterAll: string
+  filterOpen: string
+  filterResolved: string
+  errorPrefix: string
+  lostRaceNotice: string
+  runTitle: string
+  runStateLabel: string
+  runInitiatorLabel: string
+  runChannelLabel: string
+  confirmedStepsTitle: string
+  remainingStepsTitle: string
+  stepStatusLabel: string
+  receiptInlineLabel: string
+  verifiedInlineLabel: string
+  requiresRereadBadge: string
+  card?: Partial<ProposalCardMessages>
+}
+
+export interface ChatPanelMessages {
+  title: string
+  sessionLabel: string
+  newSessionFallback: string
+  newSessionButton: string
+  sessionsLoading: string
+  sessionsEmpty: string
+  sessionSwitchLabel: string
+  archiveSessionButton: string
+  resetHistoryNotice: string
+  hiddenNotice: string
+  inputPlaceholder: string
+  sendButton: string
+  sendingButton: string
+  refreshButton: string
+  cancelRunButton: string
+  cancellingRunButton: string
+  retryRunButton: string
+  retryingRunButton: string
+  selectionLabel: string
+  toolCallsTitle: string
+  proposalsTitle: string
+  errorPrefix: string
+  streamConnectedLabel: string
+  streamDisconnectedLabel: string
+  providerLabel: string
+  providerConfigured: string
+  providerOffline: string
+  runIdLabel: string
+  runStateLabel: string
+  cursorLabel: string
+  userRoleLabel: string
+  assistantRoleLabel: string
+  runLabel: string
+  hiddenMessageNotice: string
+  hiddenFragmentNotice: string
+  hiddenToolCallPrefix: string
+  hiddenToolCallSuffix: string
+  receiptInlineLabel: string
+  documentLabel: string
+  blockLabel: string
+  sheetLabel: string
+  tableLabel: string
+  tabLabel: string
+  statusRunning: string
+  statusWaitingApproval: string
+  statusOwnerCommitted: string
+  statusVerified: string
+  statusVerificationFailed: string
+  statusInterrupted: string
+  statusCancelled: string
+  statusFailed: string
+  proposalCard?: Partial<ProposalCardMessages>
+}

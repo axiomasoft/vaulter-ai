@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vaulter\Ai\Documents\Projection;
 
 use JsonException;
+use Vaulter\Ai\Core\Data\ContentProtectionPolicy;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 
 /**
@@ -305,5 +306,216 @@ final readonly class RichTextBlockExtractor
         ksort($value, SORT_STRING);
 
         return array_map(self::sortRecursive(...), $value);
+    }
+
+    /**
+     * Find an addressable block by blockId along with its ancestor node chain.
+     *
+     * @param  array<string, mixed>  $document
+     * @return array{path: list<int>, rawBlock: array<string, mixed>, ancestors: list<array<string, mixed>>}|null
+     */
+    public static function findBlockWithAncestors(array $document, string $blockId): ?array
+    {
+        return self::searchBlockWithAncestors($document, $blockId, [], []);
+    }
+
+    /**
+     * Evaluate ContentProtectionPolicy across all addressable blocks in a document AST.
+     *
+     * @param  array<string, mixed>  $document
+     * @return array<string, 'read_only'|'hidden'>
+     */
+    public static function protectedBlockModes(array $document, ContentProtectionPolicy $policy): array
+    {
+        if ($policy->isEmpty()) {
+            return [];
+        }
+
+        $modes = [];
+        self::collectProtectedModes($document, $policy, [], $modes);
+
+        return $modes;
+    }
+
+    /**
+     * Enforce that the target block (including all ancestor containers) is editable under ContentProtectionPolicy.
+     *
+     * @param  array<string, mixed>  $document
+     */
+    public static function assertBlockEditable(array $document, string $blockId, ContentProtectionPolicy $policy): void
+    {
+        if ($policy->isEmpty()) {
+            return;
+        }
+
+        $found = self::findBlockWithAncestors($document, $blockId);
+        if ($found === null) {
+            return;
+        }
+
+        $mode = $policy->modeForPath([...$found['ancestors'], $found['rawBlock']]);
+        if ($mode === 'hidden') {
+            throw OfficeException::resourceUnavailable();
+        }
+        if ($mode === 'read_only') {
+            throw OfficeException::unsupportedContent('content_protected');
+        }
+    }
+
+    /**
+     * Extract sanitized JSON items for EditorContextSchema, omitting hidden subtrees.
+     *
+     * @param  array<string, mixed>  $document
+     * @return list<array<string, mixed>>
+     */
+    public static function sanitizedItemsForContext(array $document, ContentProtectionPolicy $policy): array
+    {
+        $items = [];
+        self::collectContextItems($document, $policy, [], $items);
+
+        return $items;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @param  list<int>  $path
+     * @param  list<array<string, mixed>>  $ancestors
+     * @return array{path: list<int>, rawBlock: array<string, mixed>, ancestors: list<array<string, mixed>>}|null
+     */
+    private static function searchBlockWithAncestors(array $node, string $blockId, array $path, array $ancestors): ?array
+    {
+        $content = $node['content'] ?? null;
+        if (! is_array($content)) {
+            return null;
+        }
+
+        $nextAncestors = [...$ancestors, self::lightweightNode($node)];
+        foreach (array_values($content) as $index => $child) {
+            if (! is_array($child)) {
+                continue;
+            }
+            $childPath = [...$path, $index];
+            $attrs = $child['attrs'] ?? null;
+            if (is_array($attrs) && ($attrs['blockId'] ?? null) === $blockId) {
+                return [
+                    'path' => $childPath,
+                    'rawBlock' => self::stringKeyed($child),
+                    'ancestors' => $nextAncestors,
+                ];
+            }
+            $nested = self::searchBlockWithAncestors($child, $blockId, $childPath, $nextAncestors);
+            if ($nested !== null) {
+                return $nested;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @param  list<array<string, mixed>>  $ancestors
+     * @param  array<string, 'read_only'|'hidden'>  $modes
+     */
+    private static function collectProtectedModes(array $node, ContentProtectionPolicy $policy, array $ancestors, array &$modes): void
+    {
+        $content = $node['content'] ?? null;
+        if (! is_array($content)) {
+            return;
+        }
+
+        $nextAncestors = [...$ancestors, self::lightweightNode($node)];
+        foreach ($content as $child) {
+            if (! is_array($child)) {
+                continue;
+            }
+            $typedChild = self::stringKeyed($child);
+            $type = is_string($typedChild['type'] ?? null) ? $typedChild['type'] : '';
+            $attrs = is_array($typedChild['attrs'] ?? null) ? $typedChild['attrs'] : [];
+            $blockId = $attrs['blockId'] ?? null;
+            if (is_string($blockId) && $blockId !== '' && in_array($type, ['paragraph', 'heading'], true)) {
+                $mode = $policy->modeForPath([...$nextAncestors, $typedChild]);
+                if ($mode !== 'editable') {
+                    $modes[$blockId] = $mode;
+                }
+            }
+            self::collectProtectedModes($typedChild, $policy, $nextAncestors, $modes);
+        }
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @param  list<array<string, mixed>>  $ancestors
+     * @param  list<array<string, mixed>>  $items
+     */
+    private static function collectContextItems(array $node, ContentProtectionPolicy $policy, array $ancestors, array &$items): void
+    {
+        $content = $node['content'] ?? null;
+        if (! is_array($content)) {
+            return;
+        }
+
+        $nextAncestors = [...$ancestors, self::lightweightNode($node)];
+        foreach ($content as $child) {
+            if (! is_array($child)) {
+                continue;
+            }
+            $typedChild = self::stringKeyed($child);
+            $mode = $policy->modeForPath([...$nextAncestors, $typedChild]);
+            if ($mode === 'hidden') {
+                continue;
+            }
+            $type = is_string($typedChild['type'] ?? null) ? $typedChild['type'] : '';
+            $attrs = is_array($typedChild['attrs'] ?? null) ? $typedChild['attrs'] : [];
+            $blockId = $attrs['blockId'] ?? null;
+            if (is_string($blockId) && $blockId !== '' && in_array($type, ['paragraph', 'heading'], true)) {
+                $normalized = self::normalizeBlock($typedChild);
+                $text = '';
+                $inlineNodes = $normalized['content'] ?? null;
+                if (is_array($inlineNodes)) {
+                    foreach ($inlineNodes as $inline) {
+                        if (is_array($inline) && is_string($inline['text'] ?? null)) {
+                            $text .= $inline['text'];
+                        }
+                    }
+                }
+                $item = [
+                    'block_id' => $blockId,
+                    'type' => $type,
+                    'text' => $text,
+                ];
+                if ($mode === 'read_only') {
+                    $item['protection'] = 'read_only';
+                }
+                $items[] = $item;
+            }
+            self::collectContextItems($typedChild, $policy, $nextAncestors, $items);
+        }
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @return array<string, mixed>
+     */
+    private static function lightweightNode(array $node): array
+    {
+        $light = [];
+        if (is_string($node['type'] ?? null)) {
+            $light['type'] = $node['type'];
+        }
+        if (is_array($node['attrs'] ?? null)) {
+            $light['attrs'] = $node['attrs'];
+        }
+
+        return $light;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @return array<string, mixed>
+     */
+    private static function stringKeyed(array $node): array
+    {
+        return array_filter($node, is_string(...), ARRAY_FILTER_USE_KEY);
     }
 }

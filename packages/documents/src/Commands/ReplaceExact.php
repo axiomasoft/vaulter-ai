@@ -12,6 +12,7 @@ use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\OfficeCommand;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandDescriptor;
+use Vaulter\Ai\Core\Data\ContentProtectionPolicy;
 use Vaulter\Ai\Core\Data\PreparedPlan;
 use Vaulter\Ai\Core\Data\ReadTokenRecord;
 use Vaulter\Ai\Core\Data\ResourceEntry;
@@ -26,6 +27,7 @@ use Vaulter\Ai\Documents\Writing\TextReplacement;
 use Vaulter\Documents\Content\TipTap\TipTapContent;
 use Vaulter\Documents\Contracts\LockedDocumentMutation;
 use Vaulter\Drive\Exceptions\Nodes\NodeNotFoundException;
+use Vaulter\Support\Identity;
 
 final readonly class ReplaceExact implements OfficeCommand
 {
@@ -108,6 +110,8 @@ final readonly class ReplaceExact implements OfficeCommand
             throw OfficeException::projectionPending();
         }
         $docArray = $state->content->toArray();
+        $protection = ContentProtectionPolicy::resolve($context, $resource);
+        RichTextBlockExtractor::assertBlockEditable($docArray, $blockId, $protection);
         [, $block] = TextReplacement::find($docArray, $blockId);
         $sectionPath = $this->sectionPathFor($docArray, $blockId);
         $identity = TextReplacement::identity($block);
@@ -131,6 +135,7 @@ final readonly class ReplaceExact implements OfficeCommand
             digest: '',
             ownerKey: $owner->key(),
             preconditions: [
+                'document_id' => Identity::key($state->documentId) ?? $state->documentId,
                 'type' => $state->type,
                 'schema' => $state->schemaVersion,
                 'write_mode' => $state->writeMode,

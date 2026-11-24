@@ -6,6 +6,7 @@ namespace Vaulter\Ai\LaravelAi;
 
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\JsonSchema\Types\Type;
+use Vaulter\Ai\Core\Data\ContentProtectionPolicy;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 
 /**
@@ -16,9 +17,13 @@ final class OfficeToolSchema
     /**
      * @return array<string, Type>
      */
-    public static function forOperation(OfficeOperation $operation, JsonSchema $schema): array
-    {
-        return match ($operation) {
+    public static function forOperation(
+        OfficeOperation $operation,
+        JsonSchema $schema,
+        ?ContentProtectionPolicy $protection = null,
+    ): array {
+        $policy = $protection ?? ContentProtectionPolicy::resolve();
+        $fields = match ($operation) {
             OfficeOperation::Search => [
                 'query' => $schema->string()->description('Search query string.')->required(),
                 'resource_type' => $schema->string()->enum(['text', 'sheet'])->description('Optional resource type filter.'),
@@ -78,11 +83,21 @@ final class OfficeToolSchema
                 'mode' => $schema->string()->enum(['at_commit', 'current'])->description('Verification mode.')->required(),
             ],
         };
+
+        if (! $policy->isEmpty() && in_array($operation, [OfficeOperation::Read, OfficeOperation::Prepare, OfficeOperation::Commit], true)) {
+            $fields['content_protection_note'] = $schema->string()
+                ->description('Server-enforced content protection policy: '.$policy->describe()['summary']);
+        }
+
+        return $fields;
     }
 
-    public static function descriptionFor(OfficeOperation $operation, string $commandsSummary): string
-    {
-        return match ($operation) {
+    public static function descriptionFor(
+        OfficeOperation $operation,
+        string $commandsSummary,
+        ?ContentProtectionPolicy $protection = null,
+    ): string {
+        $base = match ($operation) {
             OfficeOperation::Search => 'Search authorized Office resources by query, optional resource_type, limit, and cursor.',
             OfficeOperation::Read => 'Read an authorized Office resource outline, text block, sheet catalog, or sheet table slice.',
             OfficeOperation::Describe => "Describe input schema and verification profile for an allowed command ({$commandsSummary}).",
@@ -91,5 +106,12 @@ final class OfficeToolSchema
             OfficeOperation::Status => 'Inspect the authoritative status of a submitted Office command by resource_id and command_id.',
             OfficeOperation::Verify => 'Verify a committed Office receipt in at_commit or current mode.',
         };
+
+        $policy = $protection ?? ContentProtectionPolicy::resolve();
+        if (! $policy->isEmpty() && in_array($operation, [OfficeOperation::Read, OfficeOperation::Prepare, OfficeOperation::Commit, OfficeOperation::Describe], true)) {
+            return $base.' Content protection: '.$policy->describe()['summary'];
+        }
+
+        return $base;
     }
 }

@@ -13,6 +13,7 @@ use Vaulter\Ai\Core\Contracts\TextVerificationEvidence;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandOutcome;
 use Vaulter\Ai\Core\Data\CommandScope;
+use Vaulter\Ai\Core\Data\ContentProtectionPolicy;
 use Vaulter\Ai\Core\Data\Marker;
 use Vaulter\Ai\Core\Data\PreparedPlan;
 use Vaulter\Ai\Core\Enums\ErrorCode;
@@ -21,6 +22,7 @@ use Vaulter\Ai\Core\Protocol\RequestFingerprint;
 use Vaulter\Ai\Documents\Commands\ReplaceExact;
 use Vaulter\Ai\Documents\Host\TextDocumentAccess;
 use Vaulter\Ai\Documents\Persistence\TextCommands;
+use Vaulter\Ai\Documents\Projection\RichTextBlockExtractor;
 use Vaulter\Documents\Content\TipTap\TipTapContent;
 use Vaulter\Documents\Contracts\LockedDocumentMutation;
 use Vaulter\Documents\Exceptions\DocumentContentDegradedException;
@@ -112,6 +114,8 @@ final readonly class SingleTextOwner implements CommandOwner, TextVerificationEv
             }
 
             $document = $state->content->toArray();
+            $protection = ContentProtectionPolicy::resolve($scope->context);
+            RichTextBlockExtractor::assertBlockEditable($document, $blockId, $protection);
             [$path, $block] = TextReplacement::find($document, $blockId);
             if (TextReplacement::identity($block) !== ($conditions['block_identity'] ?? null)) {
                 throw OfficeException::preconditionFailed('target_changed');

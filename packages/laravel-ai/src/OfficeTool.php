@@ -14,6 +14,7 @@ use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Data\ContentProtectionPolicy;
 use Vaulter\Ai\Core\Data\HostProfile;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeResponse;
@@ -69,7 +70,7 @@ final readonly class OfficeTool implements Tool
     {
         $commands = $this->profile->commands === [] ? 'none' : implode(', ', $this->profile->commands);
 
-        return OfficeToolSchema::descriptionFor($this->operation, $commands);
+        return OfficeToolSchema::descriptionFor($this->operation, $commands, ContentProtectionPolicy::resolve($this->context));
     }
 
     /**
@@ -77,7 +78,7 @@ final readonly class OfficeTool implements Tool
      */
     public function schema(JsonSchema $schema): array
     {
-        return OfficeToolSchema::forOperation($this->operation, $schema);
+        return OfficeToolSchema::forOperation($this->operation, $schema, ContentProtectionPolicy::resolve($this->context));
     }
 
     public function handle(Request $request): string

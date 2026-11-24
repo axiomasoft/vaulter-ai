@@ -12,6 +12,7 @@ use Vaulter\Ai\Core\Contracts\TextVerificationEvidence;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandOutcome;
 use Vaulter\Ai\Core\Data\CommandScope;
+use Vaulter\Ai\Core\Data\ContentProtectionPolicy;
 use Vaulter\Ai\Core\Data\Marker;
 use Vaulter\Ai\Core\Data\PreparedPlan;
 use Vaulter\Ai\Core\Data\ResourceEntry;
@@ -20,6 +21,7 @@ use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Documents\Commands\ReplaceExact;
 use Vaulter\Ai\Documents\Contracts\LiveTextJournal;
 use Vaulter\Ai\Documents\Host\TextDocumentAccess;
+use Vaulter\Ai\Documents\Projection\RichTextBlockExtractor;
 use Vaulter\Ai\Documents\Writing\TextReplacement;
 use Vaulter\Collaboration\Persistence\CommandJournal;
 use Vaulter\Exceptions\Contracts\ProblemException;
@@ -62,6 +64,14 @@ final readonly class LiveTextCommandOwner implements CommandOwner, LiveTextJourn
     public function commit(CommandScope $scope, PreparedPlan $plan): CommandOutcome
     {
         $resource = $this->access->resource($scope->context, $scope->resourceId);
+        $protection = ContentProtectionPolicy::resolve($scope->context, $resource);
+        if (! $protection->isEmpty()) {
+            $blockId = $plan->preconditions['block_id'] ?? null;
+            if (is_string($blockId) && $blockId !== '') {
+                $snapshot = $this->access->content($scope->context, $resource);
+                RichTextBlockExtractor::assertBlockEditable($snapshot->content->toArray(), $blockId, $protection);
+            }
+        }
         $actor = $this->journalAccess->actor($scope->context, $resource);
         $condition = $plan->preconditions;
         $schema = $this->requireInt($condition, 'schema');

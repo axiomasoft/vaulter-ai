@@ -8,6 +8,7 @@ use DateTimeImmutable;
 use Illuminate\Contracts\Bus\Dispatcher;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\ProposalApprovalPolicy;
+use Vaulter\Ai\Core\Contracts\ProposalSuggestionPort;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandScope;
@@ -41,6 +42,7 @@ final readonly class ResolveProposal
         ?ProposalApprovalPolicy $approvalPolicy = null,
         private ?Runs $runs = null,
         private ?ChannelChatBridge $channelBridge = null,
+        private ?ProposalSuggestionPort $suggestions = null,
     ) {
         $this->approvalPolicy = $approvalPolicy ?? new DefaultProposalApprovalPolicy($this->directory);
     }
@@ -90,6 +92,7 @@ final readonly class ResolveProposal
             if (! $this->proposals->decide($initiator, $scope->resourceId, $proposalId, $approver->effectiveSubject, $approved, $now)) {
                 throw new OfficeException(ErrorCode::ProposalExpired);
             }
+            $this->suggestions?->onProposalDecided($approver, $proposal, $approved ? 'approved' : 'rejected');
             if ($approved) {
                 $this->routes->bindInTransaction($scope, $plan);
                 $this->db->query('ai_dispatches')->insert([

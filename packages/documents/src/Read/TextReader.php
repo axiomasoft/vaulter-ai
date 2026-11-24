@@ -10,6 +10,7 @@ use stdClass;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\ResourceReader;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Data\ContentProtectionPolicy;
 use Vaulter\Ai\Core\Data\Marker;
 use Vaulter\Ai\Core\Data\ReadPage;
 use Vaulter\Ai\Core\Data\ResourceEntry;
@@ -17,6 +18,7 @@ use Vaulter\Ai\Core\Enums\ResourceType;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Persistence\PayloadCipher;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
+use Vaulter\Ai\Core\Schema\EditorContextSchema;
 use Vaulter\Ai\Documents\Commands\ReplaceExact;
 use Vaulter\Ai\Documents\Contracts\DocumentScopeResolver;
 use Vaulter\Ai\Documents\Contracts\LiveTextJournal;
@@ -25,6 +27,7 @@ use Vaulter\Ai\Documents\Projection\ExtractedTextBlock;
 use Vaulter\Ai\Documents\Projection\RichTextBlockExtractor;
 use Vaulter\Ai\Documents\Projection\TextProjectionReader;
 use Vaulter\Documents\Content\TipTap\TipTapContent;
+use Vaulter\Documents\Content\TipTap\TipTapSchema;
 use Vaulter\Documents\Data\Snapshots\DocumentSnapshot;
 use Vaulter\Documents\DocumentsManager;
 use Vaulter\Documents\Exceptions\DocumentContentDegradedException;
@@ -204,21 +207,49 @@ final readonly class TextReader implements ResourceReader
         if ($kind === 'text_outline') {
             $query = property_exists($selector, 'query') && is_string($selector->query) ? $selector->query : null;
             $effectiveLimit = $limit ?? $this->defaultOutlineLimit();
-            $outline = $this->projection->readOutline(
-                context: $context,
-                tenantKey: $tenantKey,
-                projectScope: $projectScope,
-                documentId: $documentKey,
-                resourceId: $resource->resourceId,
-                query: $query,
-                limit: $effectiveLimit,
-                cursor: $cursor,
-            );
-            if ($outline === null) {
-                throw OfficeException::projectionPending();
-            }
+            $protection = ContentProtectionPolicy::resolve($context, $resource);
+            $hiddenIds = $protection->isEmpty() ? [] : $this->hiddenBlockIdsForResource($context, $resource, $protection);
 
-            $this->assertMarkerSatisfiesReceipt($requiredMarker, $outline['marker']);
+            $visibleBlocks = [];
+            $pageCursor = $cursor;
+            $latestMarker = null;
+            $truncated = false;
+            $nextCursor = null;
+            $iterations = 0;
+
+            do {
+                $outline = $this->projection->readOutline(
+                    context: $context,
+                    tenantKey: $tenantKey,
+                    projectScope: $projectScope,
+                    documentId: $documentKey,
+                    resourceId: $resource->resourceId,
+                    query: $query,
+                    limit: $effectiveLimit,
+                    cursor: $pageCursor,
+                );
+                if ($outline === null) {
+                    throw OfficeException::projectionPending();
+                }
+
+                $this->assertMarkerSatisfiesReceipt($requiredMarker, $outline['marker']);
+                $latestMarker = $outline['marker'];
+                $truncated = $outline['truncated'];
+                $nextCursor = $outline['next_cursor'];
+
+                foreach ($outline['blocks'] as $block) {
+                    if ($hiddenIds !== [] && isset($hiddenIds[$block['block_id']])) {
+                        continue;
+                    }
+                    $visibleBlocks[] = $block;
+                    if (count($visibleBlocks) >= $effectiveLimit) {
+                        break;
+                    }
+                }
+
+                $pageCursor = $nextCursor;
+                $iterations++;
+            } while ($hiddenIds !== [] && count($visibleBlocks) < $effectiveLimit && $truncated && $nextCursor !== null && $iterations < 20);
 
             $blocksData = array_map(
                 static fn (array $b): stdClass => (object) [
@@ -226,20 +257,20 @@ final readonly class TextReader implements ResourceReader
                     'path' => $b['path'],
                     'snippet' => $b['snippet'],
                 ],
-                $outline['blocks'],
+                $visibleBlocks,
             );
 
             return new ReadPage(
-                marker: $outline['marker'],
+                marker: $latestMarker,
                 data: (object) [
                     'kind' => 'text_outline',
                     'blocks' => $blocksData,
                 ],
-                truncated: $outline['truncated'],
-                nextCursor: $outline['next_cursor'],
+                truncated: $truncated,
+                nextCursor: $nextCursor,
                 selectorKind: 'text_outline',
                 schemaRevision: $schemaRevision,
-                completeScope: ! $outline['truncated'] && $cursor === null,
+                completeScope: ! $truncated && $cursor === null,
                 selectorDependencies: ['query' => $query],
             );
         }
@@ -261,6 +292,19 @@ final readonly class TextReader implements ResourceReader
         }
 
         $this->assertMarkerSatisfiesReceipt($requiredMarker, $found['marker']);
+
+        $protection = ContentProtectionPolicy::resolve($context, $resource);
+        if (! $protection->isEmpty()) {
+            if ($protection->modeForNode($found['block']) === 'hidden') {
+                throw OfficeException::resourceUnavailable();
+            }
+            if ($protection->mayMatchContainers()) {
+                $hiddenIds = $this->hiddenBlockIdsForResource($context, $resource, $protection);
+                if (isset($hiddenIds[$blockId])) {
+                    throw OfficeException::resourceUnavailable();
+                }
+            }
+        }
 
         $segmentObjects = array_map(
             static fn (array $seg): stdClass => (object) [
@@ -309,6 +353,13 @@ final readonly class TextReader implements ResourceReader
         $marker = $position ?? new Marker($snapshot->epoch, $snapshot->stateVersion);
         $this->assertMarkerSatisfiesReceipt($requiredMarker, $marker);
         $schemaRevision = (string) $snapshot->schemaVersion;
+        $protection = ContentProtectionPolicy::resolve($context);
+        $hiddenModes = $protection->isEmpty()
+            ? []
+            : array_filter(
+                RichTextBlockExtractor::protectedBlockModes($snapshot->content->toArray(), $protection),
+                static fn (string $mode): bool => $mode === 'hidden',
+            );
 
         if ($kind === 'text_outline') {
             $query = property_exists($selector, 'query') && is_string($selector->query) ? trim($selector->query) : '';
@@ -317,6 +368,9 @@ final readonly class TextReader implements ResourceReader
 
             $matched = [];
             foreach ($blocks as $block) {
+                if (isset($hiddenModes[$block->blockId])) {
+                    continue;
+                }
                 if ($query !== '') {
                     if ($terms === []) {
                         continue;
@@ -389,6 +443,9 @@ final readonly class TextReader implements ResourceReader
         $blockId = property_exists($selector, 'block_id') && is_string($selector->block_id) ? $selector->block_id : '';
         if ($blockId === '') {
             throw OfficeException::invalidInput('text_block.block_id is required.');
+        }
+        if (isset($hiddenModes[$blockId])) {
+            throw OfficeException::resourceUnavailable();
         }
 
         $target = null;
@@ -520,5 +577,76 @@ final readonly class TextReader implements ResourceReader
         }
 
         return $data['o'];
+    }
+
+    /**
+     * Build a versioned EditorContextSchema (getEditorContext contract) for a rich-text resource,
+     * stripping DOM hooks and filtering hidden nodes.
+     */
+    public function editorContext(
+        CallContext $context,
+        ResourceEntry $resource,
+        ?ContentProtectionPolicy $override = null,
+    ): EditorContextSchema {
+        $protection = ContentProtectionPolicy::resolve($context, $resource, $override);
+        $schema = TipTapSchema::richText();
+
+        $nodeSpecs = [];
+        foreach ($schema->nodeTypes() as $nodeType) {
+            $attrs = [];
+            foreach ($schema->attributes($nodeType) as $attrName) {
+                $attrs[$attrName] = ['type' => 'string', 'nullable' => true];
+            }
+            $nodeSpecs[$nodeType] = [
+                'attrs' => $attrs,
+            ];
+        }
+
+        $markSpecs = [];
+        foreach ($schema->markTypes() as $markType) {
+            $attrs = [];
+            foreach ($schema->attributes($markType) as $attrName) {
+                $attrs[$attrName] = ['type' => 'string', 'nullable' => true];
+            }
+            $markSpecs[$markType] = [
+                'attrs' => $attrs,
+            ];
+        }
+
+        $snapshot = $this->snapshotForResource($context, $resource);
+        $items = RichTextBlockExtractor::sanitizedItemsForContext($snapshot->content->toArray(), $protection);
+
+        return EditorContextSchema::fromSpecs($nodeSpecs, $markSpecs, $protection, $items);
+    }
+
+    /**
+     * @return array<string, true>
+     */
+    private function hiddenBlockIdsForResource(
+        CallContext $context,
+        ResourceEntry $resource,
+        ContentProtectionPolicy $protection,
+    ): array {
+        $snapshot = $this->snapshotForResource($context, $resource);
+        $modes = RichTextBlockExtractor::protectedBlockModes($snapshot->content->toArray(), $protection);
+        $hidden = [];
+        foreach ($modes as $id => $mode) {
+            if ($mode === 'hidden') {
+                $hidden[$id] = true;
+            }
+        }
+
+        return $hidden;
+    }
+
+    private function snapshotForResource(CallContext $context, ResourceEntry $resource): DocumentSnapshot
+    {
+        $driveId = $resource->driveId ?? $context->driveId;
+        $drive = $driveId !== null ? $this->vaulter->findDriveById($driveId) : null;
+        if (! $context->actor instanceof Authorizable || $drive === null) {
+            throw OfficeException::resourceUnavailable();
+        }
+
+        return $this->documents->in($drive->actingAs($context->actor))->content($resource->resourceId);
     }
 }

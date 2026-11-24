@@ -1,14 +1,58 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ProposalDetails } from '../api/types'
+import '../style.css'
+import type { ProposalCardMessages, ProposalDetails } from '../api/types'
 import ProposalDiffView from './ProposalDiffView.vue'
+
+const DEFAULT_MESSAGES: ProposalCardMessages = {
+  statusDraft: 'Черновик',
+  statusPending: 'Ожидает решения человека',
+  statusApprovedByHuman: 'Принято человеком',
+  statusAutomatic: 'Автоматически',
+  statusApprovedPendingExecution: 'Ожидает отправки владельцу',
+  statusApprovedCommitted: 'Сохранено владельцем',
+  statusOwnerRunning: 'Сохраняется владельцем',
+  statusApprovedFailed: 'Ошибка выполнения',
+  statusRejectedByHuman: 'Отклонено человеком',
+  statusRejectedByOwner: 'Отклонено владельцем',
+  statusOwnerNotStarted: 'Не отправлено владельцу',
+  statusVerifyPassed: 'Проверено',
+  statusVerifyFailed: 'Проверка не пройдена',
+  statusVerifyUnverified: 'Не проверено',
+  decisionWon: 'Решение принято',
+  receiptLabel: 'Квитанция:',
+  errorLabel: 'Ошибка:',
+  ownerRejectionLabel: 'Причина отказа владельца:',
+  detailsShow: 'Показать детали',
+  detailsHide: 'Скрыть детали',
+  acceptButton: 'Принять предложение',
+  rejectButton: 'Отклонить',
+  approvingButton: 'Отправка…',
+  rejectingButton: 'Отклонение…',
+  initiatorLabel: 'Инициатор:',
+  reviewerLabel: 'Рецензент:',
+  resourceLabel: 'Ресурс:',
+  proposalIdLabel: 'Предложение:',
+  commandIdLabel: 'command_id:',
+  digestLabel: 'Digest:',
+  expiresLabel: 'Истекает:',
+  expiredNote: 'Срок предложения истёк.',
+  readonlyNote: 'Нет права согласования для текущего пользователя.',
+}
 
 const props = withDefaults(defineProps<{
   proposal: ProposalDetails
   submitting?: boolean
+  messages?: Partial<ProposalCardMessages>
 }>(), {
   submitting: false,
+  messages: () => ({}),
 })
+
+const m = computed<ProposalCardMessages>(() => ({
+  ...DEFAULT_MESSAGES,
+  ...props.messages,
+}))
 
 const emit = defineEmits<{
   decide: [payload: { proposalId: string; digest: string; approved: boolean }]
@@ -17,39 +61,39 @@ const emit = defineEmits<{
 const humanStatusLabel = computed(() => {
   switch (props.proposal.approval.human_status) {
     case 'approved':
-      return 'Принято человеком'
+      return m.value.statusApprovedByHuman
     case 'rejected':
-      return 'Отклонено человеком'
+      return m.value.statusRejectedByHuman
     case 'automatic':
-      return 'Автоматически'
+      return m.value.statusAutomatic
     default:
-      return 'Ожидает решения человека'
+      return m.value.statusPending
   }
 })
 
 const ownerStatusLabel = computed(() => {
   switch (props.proposal.execution.owner_status) {
     case 'committed':
-      return 'Сохранено владельцем'
+      return m.value.statusApprovedCommitted
     case 'pending_dispatch':
-      return 'Ожидает отправки владельцу'
+      return m.value.statusApprovedPendingExecution
     case 'running':
-      return 'Сохраняется владельцем'
+      return m.value.statusOwnerRunning
     case 'rejected':
-      return 'Отклонено владельцем'
+      return m.value.statusRejectedByOwner
     default:
-      return 'Не отправлено владельцу'
+      return m.value.statusOwnerNotStarted
   }
 })
 
 const verificationStatusLabel = computed(() => {
   switch (props.proposal.verification.status) {
     case 'passed':
-      return 'Проверено'
+      return m.value.statusVerifyPassed
     case 'failed':
-      return 'Проверка не пройдена'
+      return m.value.statusVerifyFailed
     default:
-      return 'Не проверено'
+      return m.value.statusVerifyUnverified
   }
 })
 
@@ -71,94 +115,104 @@ function submitDecision(approved: boolean): void {
 
 <template>
   <article
-    class="vai-proposal-card"
+    class="vai-proposal-card vaulter-ai-proposal-card"
     :data-proposal-id="proposal.proposal_id"
     :data-digest="proposal.digest"
     :data-decision="proposal.approval.decision"
   >
-    <header class="vai-proposal-card__header">
-      <div>
-        <h3 class="vai-proposal-card__title" data-testid="proposal-resource-title">
-          {{ proposal.resource.title || proposal.resource.resource_id }}
-        </h3>
-        <div class="vai-proposal-card__meta">
-          <span data-testid="proposal-resource-id">Ресурс: {{ proposal.resource.resource_id }}</span>
-          <span data-testid="proposal-initiator">Инициатор: {{ proposal.initiator }}</span>
-          <span v-if="proposal.approval.reviewer" data-testid="proposal-reviewer">
-            Рецензент: {{ proposal.approval.reviewer }}
-          </span>
+    <slot name="header" :proposal="proposal" :messages="m">
+      <header class="vai-proposal-card__header">
+        <div>
+          <h3 class="vai-proposal-card__title" data-testid="proposal-resource-title">
+            {{ proposal.resource.title || proposal.resource.resource_id }}
+          </h3>
+          <div class="vai-proposal-card__meta">
+            <span data-testid="proposal-resource-id">{{ m.resourceLabel }} {{ proposal.resource.resource_id }}</span>
+            <span data-testid="proposal-initiator">{{ m.initiatorLabel }} {{ proposal.initiator }}</span>
+            <span v-if="proposal.approval.reviewer" data-testid="proposal-reviewer">
+              {{ m.reviewerLabel }} {{ proposal.approval.reviewer }}
+            </span>
+          </div>
         </div>
-      </div>
 
-      <div class="vai-proposal-card__badges">
-        <span
-          class="vai-badge vai-badge--human"
-          data-testid="status-human"
-          :data-human-status="proposal.approval.human_status"
-        >
-          {{ humanStatusLabel }}
+        <slot name="status" :proposal="proposal" :human-status-label="humanStatusLabel" :owner-status-label="ownerStatusLabel" :verification-status-label="verificationStatusLabel">
+          <div class="vai-proposal-card__badges">
+            <span
+              class="vai-badge vai-badge--human"
+              data-testid="status-human"
+              :data-human-status="proposal.approval.human_status"
+            >
+              {{ humanStatusLabel }}
+            </span>
+            <span
+              class="vai-badge vai-badge--owner"
+              data-testid="status-owner"
+              :data-owner-status="proposal.execution.owner_status"
+            >
+              {{ ownerStatusLabel }}
+            </span>
+            <span
+              class="vai-badge vai-badge--verify"
+              data-testid="status-verification"
+              :data-verification-status="proposal.verification.status"
+            >
+              {{ verificationStatusLabel }}
+            </span>
+          </div>
+        </slot>
+      </header>
+    </slot>
+
+    <slot name="meta" :proposal="proposal" :messages="m">
+      <div class="vai-proposal-card__identity">
+        <span data-testid="proposal-id">{{ m.proposalIdLabel }} <code>{{ proposal.proposal_id }}</code></span>
+        <span data-testid="proposal-digest">{{ m.digestLabel }} <code>{{ proposal.digest }}</code></span>
+        <span v-if="proposal.execution.command_id" data-testid="proposal-command-id">
+          {{ m.commandIdLabel }} <code>{{ proposal.execution.command_id }}</code>
         </span>
-        <span
-          class="vai-badge vai-badge--owner"
-          data-testid="status-owner"
-          :data-owner-status="proposal.execution.owner_status"
-        >
-          {{ ownerStatusLabel }}
-        </span>
-        <span
-          class="vai-badge vai-badge--verify"
-          data-testid="status-verification"
-          :data-verification-status="proposal.verification.status"
-        >
-          {{ verificationStatusLabel }}
+        <span v-if="proposal.execution.receipt_id" data-testid="proposal-receipt-id">
+          {{ m.receiptLabel }} <code>{{ proposal.execution.receipt_id }}</code>
         </span>
       </div>
-    </header>
+    </slot>
 
-    <div class="vai-proposal-card__identity">
-      <span data-testid="proposal-id">Предложение: <code>{{ proposal.proposal_id }}</code></span>
-      <span data-testid="proposal-digest">Digest: <code>{{ proposal.digest }}</code></span>
-      <span v-if="proposal.execution.command_id" data-testid="proposal-command-id">
-        command_id: <code>{{ proposal.execution.command_id }}</code>
-      </span>
-      <span v-if="proposal.execution.receipt_id" data-testid="proposal-receipt-id">
-        Квитанция: <code>{{ proposal.execution.receipt_id }}</code>
-      </span>
+    <slot name="diff" :proposal="proposal">
+      <ProposalDiffView :diff="proposal.diff" :summary="proposal.summary" />
+    </slot>
+
+    <div v-if="proposal.execution.rejection_reason" class="vai-proposal-card__error vaulter-ai-banner vaulter-ai-banner--error" data-testid="proposal-owner-error">
+      {{ m.ownerRejectionLabel }} <code>{{ proposal.execution.rejection_reason }}</code>
     </div>
 
-    <ProposalDiffView :diff="proposal.diff" :summary="proposal.summary" />
-
-    <div v-if="proposal.execution.rejection_reason" class="vai-proposal-card__error" data-testid="proposal-owner-error">
-      Причина отказа владельца: <code>{{ proposal.execution.rejection_reason }}</code>
-    </div>
-
-    <footer class="vai-proposal-card__actions">
-      <template v-if="canDecide">
-        <button
-          type="button"
-          class="vai-btn vai-btn--approve"
-          data-action="approve"
-          :disabled="submitting"
-          @click="submitDecision(true)"
-        >
-          Принять предложение
-        </button>
-        <button
-          type="button"
-          class="vai-btn vai-btn--reject"
-          data-action="reject"
-          :disabled="submitting"
-          @click="submitDecision(false)"
-        >
-          Отклонить
-        </button>
-      </template>
-      <span v-else-if="proposal.approval.decision === 'pending' && proposal.approval.expired" data-testid="proposal-expired-note">
-        Срок предложения истёк.
-      </span>
-      <span v-else-if="proposal.approval.decision === 'pending'" data-testid="proposal-readonly-note">
-        Нет права согласования для текущего пользователя.
-      </span>
+    <footer class="vai-proposal-card__actions vaulter-ai-proposal-card__actions">
+      <slot name="actions" :proposal="proposal" :can-decide="canDecide" :submitting="submitting" :decide="submitDecision" :messages="m">
+        <template v-if="canDecide">
+          <button
+            type="button"
+            class="vai-btn vai-btn--approve vaulter-ai-btn vaulter-ai-btn--primary"
+            data-action="approve"
+            :disabled="submitting"
+            @click="submitDecision(true)"
+          >
+            {{ submitting ? m.approvingButton : m.acceptButton }}
+          </button>
+          <button
+            type="button"
+            class="vai-btn vai-btn--reject vaulter-ai-btn vaulter-ai-btn--danger"
+            data-action="reject"
+            :disabled="submitting"
+            @click="submitDecision(false)"
+          >
+            {{ submitting ? m.rejectingButton : m.rejectButton }}
+          </button>
+        </template>
+        <span v-else-if="proposal.approval.decision === 'pending' && proposal.approval.expired" data-testid="proposal-expired-note">
+          {{ m.expiredNote }}
+        </span>
+        <span v-else-if="proposal.approval.decision === 'pending'" data-testid="proposal-readonly-note">
+          {{ m.readonlyNote }}
+        </span>
+      </slot>
     </footer>
   </article>
 </template>

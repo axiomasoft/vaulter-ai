@@ -11,6 +11,7 @@ use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandDescriptor;
+use Vaulter\Ai\Core\Data\ContentProtectionPolicy;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeResponse;
 use Vaulter\Ai\Core\Data\ResourceEntry;
@@ -27,6 +28,7 @@ use Vaulter\Ai\Core\Persistence\ToolCallLedger;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
 use Vaulter\Ai\Core\Protocol\WireValidator;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
+use Vaulter\Ai\Core\Schema\EditorContextSchema;
 
 final readonly class ChatTools
 {
@@ -63,6 +65,7 @@ final readonly class ChatTools
         }
         $commands = [];
         $commandMetadata = [];
+        $protection = ContentProtectionPolicy::resolve($context);
         foreach ($readable as $entry) {
             $descriptors = $this->allowedDescriptors($context, $entry);
             if ($descriptors !== []) {
@@ -94,6 +97,11 @@ final readonly class ChatTools
                 'resource_ids' => $needsCommand ? array_values(array_intersect($targets, array_keys($commands))) : $targets,
                 'commands' => $needsCommand ? $commands : [],
                 'command_metadata' => $needsCommand ? $commandMetadata : [],
+                'content_protection' => $protection->describe(),
+                'editor_context_contract' => [
+                    'version' => EditorContextSchema::VERSION,
+                    'schema_version' => EditorContextSchema::SCHEMA_VERSION,
+                ],
             ];
         }
 

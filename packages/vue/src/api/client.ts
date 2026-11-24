@@ -1,6 +1,9 @@
 import type {
+  ArchiveChatSessionResult,
+  CancelChatRunResult,
   ChatEditorSelection,
   ChatSessionDetails,
+  ChatSessionListResult,
   ChatSseEvent,
   CreateChatSessionInput,
   DecideProposalInput,
@@ -9,6 +12,7 @@ import type {
   ProposalDecisionResult,
   ProposalDetails,
   ResumeRunOptions,
+  RetryChatRunResult,
   RunDetails,
 } from './types'
 
@@ -79,6 +83,10 @@ export interface OfficeChatClient {
   getChatSession(sessionId: string): Promise<ChatSessionDetails>
   postChatMessage(sessionId: string, input: PostChatMessageInput): Promise<PostChatMessageResult>
   connectChatEvents(sessionId: string, options: ConnectChatEventsOptions): ChatEventSubscription
+  listChatSessions?(options?: { cursor?: string | null; limit?: number }): Promise<ChatSessionListResult>
+  archiveChatSession?(sessionId: string): Promise<ArchiveChatSessionResult>
+  cancelChatRun?(sessionId: string, runId: string): Promise<CancelChatRunResult>
+  retryChatRun?(sessionId: string, runId: string): Promise<RetryChatRunResult>
 }
 
 export type OfficeWorkspaceChatClient = OfficeWorkspaceClient & OfficeChatClient
@@ -307,6 +315,38 @@ export function createOfficeWorkspaceClient(options: OfficeWorkspaceClientOption
 
     async getChatSession(sessionId: string): Promise<ChatSessionDetails> {
       return requestJson<ChatSessionDetails>(`/chat/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' })
+    },
+
+    async listChatSessions(options?: { cursor?: string | null; limit?: number }): Promise<ChatSessionListResult> {
+      const params = new URLSearchParams()
+      if (options?.cursor) {
+        params.set('cursor', options.cursor)
+      }
+      if (typeof options?.limit === 'number' && options.limit > 0) {
+        params.set('limit', String(options.limit))
+      }
+      const query = params.toString()
+      return requestJson<ChatSessionListResult>(`/chat/sessions${query ? `?${query}` : ''}`, { method: 'GET' })
+    },
+
+    async archiveChatSession(sessionId: string): Promise<ArchiveChatSessionResult> {
+      return requestJson<ArchiveChatSessionResult>(`/chat/sessions/${encodeURIComponent(sessionId)}/archive`, {
+        method: 'POST',
+      })
+    },
+
+    async cancelChatRun(sessionId: string, runId: string): Promise<CancelChatRunResult> {
+      return requestJson<CancelChatRunResult>(
+        `/chat/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/cancel`,
+        { method: 'POST' },
+      )
+    },
+
+    async retryChatRun(sessionId: string, runId: string): Promise<RetryChatRunResult> {
+      return requestJson<RetryChatRunResult>(
+        `/chat/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/retry`,
+        { method: 'POST' },
+      )
     },
 
     async postChatMessage(sessionId: string, input: PostChatMessageInput): Promise<PostChatMessageResult> {

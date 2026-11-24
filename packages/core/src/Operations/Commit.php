@@ -9,6 +9,7 @@ use LogicException;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\ProposalApprovalPolicy;
+use Vaulter\Ai\Core\Contracts\ProposalSuggestionPort;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandOutcome;
@@ -36,6 +37,7 @@ final readonly class Commit
         private OwnerRoutes $routes,
         private Clock $clock,
         private ?ProposalApprovalPolicy $approvalPolicy = null,
+        private ?ProposalSuggestionPort $suggestions = null,
     ) {}
 
     public function handle(CallContext $context, OfficeRequest $request): OfficeResponse
@@ -120,6 +122,7 @@ final readonly class Commit
         if ($outcome->commandId !== $scope->commandId) {
             throw OfficeException::temporarilyUnavailable();
         }
+        $this->suggestions?->onProposalCommitted($scope, $proposal, $outcome);
 
         return $outcome;
     }

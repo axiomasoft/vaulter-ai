@@ -1,0 +1,181 @@
+:root {
+  --vaulter-ai-bg: #ffffff;
+  --vaulter-ai-surface: #f8fafc;
+  --vaulter-ai-border: #e2e8f0;
+  --vaulter-ai-text: #0f172a;
+  --vaulter-ai-muted: #64748b;
+  --vaulter-ai-primary: #2563eb;
+  --vaulter-ai-primary-text: #ffffff;
+  --vaulter-ai-danger: #dc2626;
+  --vaulter-ai-danger-bg: #fef2f2;
+  --vaulter-ai-success: #16a34a;
+  --vaulter-ai-success-bg: #f0fdf4;
+  --vaulter-ai-warning: #d97706;
+  --vaulter-ai-warning-bg: #fffbeb;
+  --vaulter-ai-radius: 8px;
+  --vaulter-ai-font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.vaulter-ai-chat,
+.vaulter-ai-review-panel,
+.vaulter-ai-proposal-card {
+  font-family: var(--vaulter-ai-font);
+  color: var(--vaulter-ai-text);
+  box-sizing: border-box;
+}
+
+.vaulter-ai-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--vaulter-ai-bg);
+  border: 1px solid var(--vaulter-ai-border);
+  border-radius: var(--vaulter-ai-radius);
+  padding: 16px;
+}
+
+.vaulter-ai-chat__header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--vaulter-ai-border);
+  padding-bottom: 10px;
+}
+
+.vaulter-ai-chat__sessions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.vaulter-ai-chat__select,
+.vaulter-ai-chat__textarea {
+  font: inherit;
+  color: var(--vaulter-ai-text);
+  background: var(--vaulter-ai-bg);
+  border: 1px solid var(--vaulter-ai-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.vaulter-ai-chat__textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+}
+
+.vaulter-ai-chat__messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.vaulter-ai-chat__message {
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--vaulter-ai-surface);
+  border: 1px solid var(--vaulter-ai-border);
+}
+
+.vaulter-ai-chat__message--user {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.vaulter-ai-chat__composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vaulter-ai-chat__actions,
+.vaulter-ai-proposal-card__actions,
+.vaulter-ai-review-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.vaulter-ai-btn {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--vaulter-ai-border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  background: var(--vaulter-ai-surface);
+  color: var(--vaulter-ai-text);
+}
+
+.vaulter-ai-btn--primary {
+  background: var(--vaulter-ai-primary);
+  border-color: var(--vaulter-ai-primary);
+  color: var(--vaulter-ai-primary-text);
+}
+
+.vaulter-ai-btn--danger {
+  background: var(--vaulter-ai-danger-bg);
+  border-color: #fecaca;
+  color: var(--vaulter-ai-danger);
+}
+
+.vaulter-ai-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.vaulter-ai-banner {
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  border: 1px solid var(--vaulter-ai-border);
+  background: var(--vaulter-ai-surface);
+}
+
+.vaulter-ai-banner--error {
+  background: var(--vaulter-ai-danger-bg);
+  border-color: #fecaca;
+  color: var(--vaulter-ai-danger);
+}
+
+.vaulter-ai-banner--success {
+  background: var(--vaulter-ai-success-bg);
+  border-color: #bbf7d0;
+  color: var(--vaulter-ai-success);
+}
+
+.vaulter-ai-banner--warning {
+  background: var(--vaulter-ai-warning-bg);
+  border-color: #fde68a;
+  color: var(--vaulter-ai-warning);
+}
+
+.vaulter-ai-proposal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--vaulter-ai-border);
+  border-radius: var(--vaulter-ai-radius);
+  background: var(--vaulter-ai-surface);
+}
+
+.vaulter-ai-review-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vaulter-ai-diff {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--vaulter-ai-bg);
+  border: 1px solid var(--vaulter-ai-border);
+}

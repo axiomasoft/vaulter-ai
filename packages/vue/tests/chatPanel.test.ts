@@ -416,4 +416,182 @@ describe('@vaulter/ai-vue ChatPanel & useOfficeChat', () => {
     expect(wrapper.find('[data-testid="chat-error"]').exists()).toBe(resetRepeats)
     wrapper.unmount()
   })
+
+  it('supports run cancel, run retry, session switching, custom i18n messages, and named slots', async () => {
+    const { default: ProposalCard } = await import('../src/components/ProposalCard.vue')
+    const { default: ProposalReviewPanel } = await import('../src/components/ProposalReviewPanel.vue')
+
+    const s1 = '019a0000-0000-7000-8000-000000000001'
+    const s2 = '019a0000-0000-7000-8000-000000000002'
+    const run1 = '019a0000-0000-7000-8000-000000000011'
+    const run2 = '019a0000-0000-7000-8000-000000000012'
+    let activeRunState = 'running'
+    const calls: string[] = []
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      calls.push(`${init?.method ?? 'GET'} ${url}`)
+      if (url.endsWith('/office/chat/sessions')) {
+        return new Response(JSON.stringify({
+          data: {
+            sessions: [
+              { session_id: s1, state: 'active', last_seq: 1 },
+              { session_id: s2, state: 'active', last_seq: 0 },
+            ],
+            next_cursor: null,
+          },
+        }))
+      }
+      if (url.endsWith(`/office/chat/sessions/${s1}/runs/${run1}/cancel`)) {
+        activeRunState = 'cancelled'
+        return new Response(JSON.stringify({ data: { run_id: run1, state: 'cancelled' } }))
+      }
+      if (url.endsWith(`/office/chat/sessions/${s1}/runs/${run1}/retry`)) {
+        activeRunState = 'running'
+        return new Response(JSON.stringify({ data: { run_id: run2 } }), { status: 202 })
+      }
+      if (url.includes(`/office/chat/sessions/${s2}`) && !url.includes('/events')) {
+        return new Response(JSON.stringify({
+          data: {
+            session_id: s2,
+            state: 'active',
+            profile_revision: '1',
+            last_seq: 0,
+            provider: { connection: 'office_model', driver: 'openai', model: 'gpt-4o-mini', configured: true, hint: null },
+            runs: [],
+            tool_calls: [],
+            messages: [],
+          },
+        }))
+      }
+      if (url.includes(`/office/chat/sessions/${s1}`) && !url.includes('/events')) {
+        return new Response(JSON.stringify({
+          data: {
+            session_id: s1,
+            state: 'active',
+            profile_revision: '1',
+            last_seq: 1,
+            provider: { connection: 'office_model', driver: 'openai', model: 'gpt-4o-mini', configured: true, hint: null },
+            runs: [{ run_id: run1, state: activeRunState, channel: 'chat', created_at: '2026-11-24T12:00:00Z', updated_at: '2026-11-24T12:00:01Z' }],
+            tool_calls: [],
+            messages: [],
+          },
+        }))
+      }
+      return new Response(encodeSse([': idle\n\n']))
+    })
+
+    const client = createOfficeWorkspaceClient({ baseUrl: 'https://host.example', fetchImpl: fetchMock as typeof fetch })
+    const wrapper = mount(ChatPanel, {
+      props: {
+        client,
+        autoLoadSessions: true,
+        initialSession: {
+          session_id: s1,
+          state: 'active',
+          profile_revision: '1',
+          last_seq: 1,
+          provider: { connection: 'office_model', driver: 'openai', model: 'gpt-4o-mini', configured: true, hint: null },
+          runs: [{ run_id: run1, state: 'running', channel: 'chat', created_at: '2026-11-24T12:00:00Z', updated_at: '2026-11-24T12:00:01Z' }],
+          tool_calls: [],
+          messages: [],
+        },
+        messages: {
+          sessionLabel: 'Session:',
+          cancelRunButton: 'Cancel run',
+          retryRunButton: 'Retry run',
+          sendButton: 'Send',
+          newSessionButton: 'New session',
+          statusCancelled: 'Cancelled',
+        },
+      },
+    })
+
+    await flushPromises()
+    expect(wrapper.text()).toContain('Session:')
+    expect(wrapper.text()).toContain('Cancel run')
+    expect(wrapper.find('[data-testid="chat-session-select"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="chat-cancel-run"]').trigger('click')
+    await flushPromises()
+    expect(calls.some((c) => c.includes(`/runs/${run1}/cancel`))).toBe(true)
+    expect(wrapper.find('[data-testid="chat-retry-run"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="chat-retry-run"]').trigger('click')
+    await flushPromises()
+    expect(calls.some((c) => c.includes(`/runs/${run1}/retry`))).toBe(true)
+
+    await wrapper.get('[data-testid="chat-session-select"]').setValue(s2)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="chat-session-id"]').text()).toContain(s2)
+    wrapper.unmount()
+
+    const card = mount(ProposalCard, {
+      props: {
+        proposal: {
+          tenant_id: 't1',
+          project_scope: 'default',
+          proposal_id: 'p-1',
+          command: 'text.replace_exact@1',
+          digest: 'a'.repeat(64),
+          summary: 'Replace 15 with 30',
+          initiator: 'user/1',
+          base: { generation: 0, position: 1 },
+          targets: ['b1'],
+          resource: { resource_id: 'doc-1', title: 'Doc', resource_type: 'text' },
+          approval: {
+            mode: 'human',
+            decision: 'pending',
+            human_status: 'pending',
+            can_approve: true,
+            can_reject: true,
+            reviewer: null,
+            decided_at: null,
+            expires_at: '2026-11-25T00:00:00Z',
+            expired: false,
+          },
+          execution: {
+            owner_key: 'documents.single_text@1',
+            owner_status: 'not_started',
+            dispatch_state: null,
+            command_id: null,
+            receipt_id: null,
+            marker: null,
+            rejection_reason: null,
+          },
+          verification: { status: 'unverified', mode: null, outcome: null, marker: null, checks: null },
+          diff: null,
+          run: null,
+        },
+        messages: {
+          acceptButton: 'Approve',
+          rejectButton: 'Reject',
+          resourceLabel: 'Resource:',
+          initiatorLabel: 'Initiator:',
+          statusPending: 'Awaiting approval',
+        },
+      },
+      slots: {
+        actions: '<button data-testid="custom-card-action">Custom</button>',
+      },
+    })
+    expect(card.text()).toContain('Resource: doc-1')
+    expect(card.text()).toContain('Awaiting approval')
+    expect(card.find('[data-testid="custom-card-action"]').exists()).toBe(true)
+    card.unmount()
+
+    const review = mount(ProposalReviewPanel, {
+      props: {
+        client,
+        autoLoad: false,
+        messages: { emptyState: 'No pending proposals.' },
+      },
+      slots: {
+        header: '<div data-testid="custom-review-header">Review Header</div>',
+      },
+    })
+    expect(review.find('[data-testid="custom-review-header"]').exists()).toBe(true)
+    expect(review.get('[data-testid="proposals-empty"]').text()).toBe('No pending proposals.')
+    review.unmount()
+  })
 })

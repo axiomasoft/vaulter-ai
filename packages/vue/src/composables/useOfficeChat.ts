@@ -7,15 +7,19 @@ import {
   type OfficeWorkspaceClient,
 } from '../api/client'
 import type {
+  CancelChatRunResult,
   ChatEditorSelection,
   ChatMessage,
   ChatProviderStatus,
   ChatRunSummary,
   ChatSessionDetails,
+  ChatSessionListResult,
+  ChatSessionSummary,
   ChatSseEvent,
   ChatToolCallSummary,
   ProposalDecisionResult,
   ProposalDetails,
+  RetryChatRunResult,
 } from '../api/types'
 
 export interface ChatLiveFragment {
@@ -798,9 +802,165 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
     })
   }
 
+  const sessions = ref<ChatSessionSummary[]>([])
+  const sessionsNextCursor = ref<string | null>(null)
+  const loadingSessions = ref(false)
+  const cancellingRunIds = ref<Record<string, boolean>>({})
+  const retryingRunIds = ref<Record<string, boolean>>({})
+
+  const cancelling = computed(() => Object.values(cancellingRunIds.value).some(Boolean))
+  const retrying = computed(() => Object.values(retryingRunIds.value).some(Boolean))
+
+  const canCancelActiveRun = computed(() => {
+    const run = activeRun.value
+    if (!run) {
+      return false
+    }
+    return !['completed', 'rejected', 'cancelled', 'failed', 'cancelling'].includes(run.state)
+  })
+
+  const canRetryLatestRun = computed(() => {
+    const run = activeRun.value
+    if (!run) {
+      return false
+    }
+    return ['rejected', 'failed', 'cancelled'].includes(run.state)
+  })
+
+  async function loadSessions(loadOptions?: { cursor?: string | null; limit?: number; append?: boolean }): Promise<ChatSessionListResult> {
+    if (!client.listChatSessions) {
+      return { sessions: sessions.value, next_cursor: sessionsNextCursor.value }
+    }
+    loadingSessions.value = true
+    error.value = null
+    try {
+      const result = await client.listChatSessions({
+        cursor: loadOptions?.cursor ?? null,
+        limit: loadOptions?.limit,
+      })
+      sessions.value = loadOptions?.append ? [...sessions.value, ...result.sessions] : result.sessions
+      sessionsNextCursor.value = result.next_cursor
+      return result
+    } catch (caught) {
+      error.value = caught instanceof OfficeWorkspaceApiError
+        ? caught
+        : new OfficeWorkspaceApiError(caught instanceof Error ? caught.message : String(caught), 500, 'unknown', false, 'stop')
+      throw caught
+    } finally {
+      loadingSessions.value = false
+    }
+  }
+
+  async function switchSession(targetSessionId: string): Promise<ChatSessionDetails> {
+    if (!targetSessionId) {
+      throw new Error('Target session ID is required.')
+    }
+    disconnectStream()
+    activeRunId.value = null
+    messages.value = []
+    liveFragments.value = []
+    runs.value = []
+    toolCalls.value = []
+    proposalsById.value = {}
+    lastSeq.value = 0
+    error.value = null
+    sessionId.value = targetSessionId
+    const details = await refreshSession(targetSessionId)
+    connectStream(targetSessionId)
+    return details
+  }
+
+  async function openNewSession(): Promise<ChatSessionDetails> {
+    disconnectStream()
+    activeRunId.value = null
+    messages.value = []
+    liveFragments.value = []
+    runs.value = []
+    toolCalls.value = []
+    proposalsById.value = {}
+    lastSeq.value = 0
+    error.value = null
+    const created = await client.createChatSession()
+    applySessionSnapshot(created)
+    if (!sessions.value.some((s) => s.session_id === created.session_id)) {
+      sessions.value = [{ session_id: created.session_id, state: created.state, last_seq: created.last_seq }, ...sessions.value]
+    }
+    connectStream(created.session_id)
+    return created
+  }
+
+  async function archiveSession(targetSessionId?: string): Promise<void> {
+    const sid = targetSessionId ?? sessionId.value
+    if (!sid || !client.archiveChatSession) {
+      return
+    }
+    error.value = null
+    try {
+      await client.archiveChatSession(sid)
+      sessions.value = sessions.value.map((s) => (s.session_id === sid ? { ...s, state: 'archived' } : s))
+      if (session.value?.session_id === sid) {
+        session.value = { ...session.value, state: 'archived' }
+      }
+    } catch (caught) {
+      error.value = caught instanceof OfficeWorkspaceApiError
+        ? caught
+        : new OfficeWorkspaceApiError(caught instanceof Error ? caught.message : String(caught), 500, 'unknown', false, 'stop')
+      throw caught
+    }
+  }
+
+  async function cancelRun(targetRunId?: string): Promise<CancelChatRunResult | null> {
+    const sid = sessionId.value
+    const rid = targetRunId ?? activeRunId.value
+    if (!sid || !rid || !client.cancelChatRun) {
+      return null
+    }
+    cancellingRunIds.value = { ...cancellingRunIds.value, [rid]: true }
+    error.value = null
+    try {
+      const result = await client.cancelChatRun(sid, rid)
+      runs.value = runs.value.map((r) => (r.run_id === rid ? { ...r, state: result.state } : r))
+      return result
+    } catch (caught) {
+      error.value = caught instanceof OfficeWorkspaceApiError
+        ? caught
+        : new OfficeWorkspaceApiError(caught instanceof Error ? caught.message : String(caught), 500, 'unknown', false, 'stop')
+      throw caught
+    } finally {
+      cancellingRunIds.value = { ...cancellingRunIds.value, [rid]: false }
+    }
+  }
+
+  async function retryRun(targetRunId?: string): Promise<RetryChatRunResult | null> {
+    const sid = sessionId.value
+    const rid = targetRunId ?? activeRunId.value
+    if (!sid || !rid || !client.retryChatRun) {
+      return null
+    }
+    retryingRunIds.value = { ...retryingRunIds.value, [rid]: true }
+    error.value = null
+    try {
+      const result = await client.retryChatRun(sid, rid)
+      activeRunId.value = result.run_id
+      await refreshSession(sid)
+      connectStream(sid)
+      return result
+    } catch (caught) {
+      error.value = caught instanceof OfficeWorkspaceApiError
+        ? caught
+        : new OfficeWorkspaceApiError(caught instanceof Error ? caught.message : String(caught), 500, 'unknown', false, 'stop')
+      throw caught
+    } finally {
+      retryingRunIds.value = { ...retryingRunIds.value, [rid]: false }
+    }
+  }
+
   return {
     session,
     sessionId,
+    sessions,
+    sessionsNextCursor,
+    loadingSessions,
     activeRunId,
     activeRun,
     messages,
@@ -820,8 +980,12 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
     currentOwnerCommitted,
     currentVerified,
     currentVerificationFailed,
+    canCancelActiveRun,
+    canRetryLatestRun,
     loading,
     sending,
+    cancelling,
+    retrying,
     streamConnected,
     submittingProposalIds,
     error,
@@ -830,6 +994,12 @@ export function useOfficeChat(client: OfficeChatCompatibleClient, options: UseOf
     setResourceIds,
     ensureSession,
     refreshSession,
+    loadSessions,
+    switchSession,
+    openNewSession,
+    archiveSession,
+    cancelRun,
+    retryRun,
     connectStream,
     disconnectStream,
     sendMessage,

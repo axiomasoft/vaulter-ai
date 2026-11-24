@@ -10,6 +10,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Support\ServiceProvider;
 use Override;
 use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
+use Vaulter\Ai\Core\Contracts\ProposalSuggestionPort;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Contracts\TransactionRunner;
 use Vaulter\Ai\Core\Persistence\RegistryCommandWriteCapability;
@@ -29,6 +30,7 @@ use Vaulter\Ai\Documents\Projection\TextProjectionOutboxConsumer;
 use Vaulter\Ai\Documents\Projection\TextProjectionReader;
 use Vaulter\Ai\Documents\Read\TextReader;
 use Vaulter\Ai\Documents\Schema\AiDocumentsSchema;
+use Vaulter\Ai\Documents\Suggestions\ProposalSuggestionBridge;
 use Vaulter\Ai\Documents\Writing\SingleTextOwner;
 use Vaulter\Documents\Events\Documents\DocumentContentUpdated;
 use Vaulter\Documents\Events\Documents\DocumentCreated;
@@ -49,6 +51,8 @@ final class DocumentsAiServiceProvider extends ServiceProvider
 
         $this->app->singleton(RichTextBlockExtractor::class);
         $this->app->singleton(DefaultDocumentScopeResolver::class);
+        $this->app->singleton(ProposalSuggestionBridge::class);
+        $this->app->singleton(ProposalSuggestionPort::class, ProposalSuggestionBridge::class);
         $this->app->singleton(DocumentScopeResolver::class, DefaultDocumentScopeResolver::class);
 
         $this->app->singleton(AiDocumentsSchema::class);
