@@ -476,6 +476,7 @@ test('CHAT recovers one receipt and replays a continuous SSE tail after a worker
     $db->connection()->beforeExecuting(static function (string $sql) use ($pg, $routesTable, &$armed): void {
         if ($armed && str_starts_with($sql, 'update "'.$routesTable.'" set "receipt_id"')) {
             $armed = false;
+            Config::set('vaulter-ai.chat.delta_batch_bytes', 1);
             if ($pg) {
                 posix_kill(getmypid(), SIGKILL);
             }
@@ -489,6 +490,7 @@ test('CHAT recovers one receipt and replays a continuous SSE tail after a worker
         $first = $pg ? chatTestDisconnectAfterFirstFrame($response) : chatTestFrames($response);
         expect($first)->toContain("id: 1\nevent: assistant.delta", 'draft delta')->not->toContain('id: 2');
     };
+    Config::set('vaulter-ai.chat.delta_batch_bytes', 1);
     if ($pg) {
         chatTestDisconnectDatabase();
         [$parent, $child] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);

@@ -103,6 +103,7 @@ final readonly class OfficeCoreSchema
                 )
                 SQL);
             $connection->statement("CREATE INDEX {$this->idx('ai_chat_sessions_scope')} ON {$sessions} (tenant_id, project_scope, owner_subject, updated_at DESC, session_id)");
+            $connection->statement("CREATE INDEX {$this->idx('ai_chat_sessions_retention')} ON {$sessions} (retention_until)");
 
             $connection->statement(<<<SQL
                 CREATE TABLE {$messages} (
@@ -135,12 +136,14 @@ final readonly class OfficeCoreSchema
                     resource_scope_json {$scope},
                     key_id varchar(128),
                     encrypted_payload {$binary},
+                    dedupe_key varchar(64),
                     created_at {$stamp} NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (session_id, seq),
                     CHECK ((key_id IS NULL) = (encrypted_payload IS NULL))
                 )
                 SQL);
             $connection->statement("CREATE INDEX {$this->idx('ai_chat_events_run')} ON {$events} (run_id, seq)");
+            $connection->statement("CREATE UNIQUE INDEX {$this->idx('ai_chat_events_dedupe')} ON {$events} (session_id, run_id, event_type, dedupe_key) WHERE run_id IS NOT NULL AND dedupe_key IS NOT NULL");
 
             $connection->statement(<<<SQL
                 CREATE TABLE {$calls} (
@@ -415,6 +418,7 @@ final readonly class OfficeCoreSchema
             )
             SQL,
             "CREATE UNIQUE INDEX {$this->idx('ai_steps_action_key')} ON {$runSteps} (run_id, executor_action_key) WHERE executor_action_key IS NOT NULL",
+            "CREATE INDEX {$this->idx('ai_run_steps_proposal')} ON {$runSteps} (proposal_id)",
         ];
     }
 
@@ -602,6 +606,7 @@ final readonly class OfficeCoreSchema
             )
             SQL,
             "CREATE UNIQUE INDEX {$this->idx('ai_steps_action_key')} ON {$runSteps} (run_id, executor_action_key) WHERE executor_action_key IS NOT NULL",
+            "CREATE INDEX {$this->idx('ai_run_steps_proposal')} ON {$runSteps} (proposal_id)",
         ];
     }
 
@@ -616,5 +621,38 @@ final readonly class OfficeCoreSchema
         $raw = $prefix.$suffix;
 
         return $this->db->connection()->getQueryGrammar()->wrap($raw);
+    }
+
+    public function ensurePerformanceIndexes(): void
+    {
+        $connection = $this->db->connection();
+        $schema = $connection->getSchemaBuilder();
+
+        if ($schema->hasTable($this->db->table('ai_run_steps'))) {
+            $runSteps = $this->q('ai_run_steps');
+            $connection->statement("CREATE INDEX IF NOT EXISTS {$this->idx('ai_run_steps_proposal')} ON {$runSteps} (proposal_id)");
+        }
+
+        if ($schema->hasTable($this->db->table('ai_chat_sessions'))) {
+            $sessions = $this->q('ai_chat_sessions');
+            $connection->statement("CREATE INDEX IF NOT EXISTS {$this->idx('ai_chat_sessions_retention')} ON {$sessions} (retention_until)");
+        }
+
+        $eventsTable = $this->db->table('ai_chat_events');
+        if ($schema->hasTable($eventsTable)) {
+            $events = $this->q('ai_chat_events');
+            if (! $schema->hasColumn($eventsTable, 'dedupe_key')) {
+                $connection->statement("ALTER TABLE {$events} ADD COLUMN dedupe_key varchar(64)");
+            }
+            $connection->statement("CREATE UNIQUE INDEX IF NOT EXISTS {$this->idx('ai_chat_events_dedupe')} ON {$events} (session_id, run_id, event_type, dedupe_key) WHERE run_id IS NOT NULL AND dedupe_key IS NOT NULL");
+        }
+    }
+
+    public function dropPerformanceIndexes(): void
+    {
+        $connection = $this->db->connection();
+        $connection->statement("DROP INDEX IF EXISTS {$this->idx('ai_run_steps_proposal')}");
+        $connection->statement("DROP INDEX IF EXISTS {$this->idx('ai_chat_sessions_retention')}");
+        $connection->statement("DROP INDEX IF EXISTS {$this->idx('ai_chat_events_dedupe')}");
     }
 }

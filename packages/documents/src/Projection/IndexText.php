@@ -7,6 +7,7 @@ namespace Vaulter\Ai\Documents\Projection;
 use DateTimeImmutable;
 use DateTimeZone;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
+use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Str;
 use JsonException;
@@ -279,32 +280,35 @@ final readonly class IndexText
                 }
             }
 
-            if ($blocks !== []) {
+            $incremental = $head !== null
+                && QueryRecord::int($head, 'source_generation') === $snapshot->epoch
+                && ! $forceRebuild;
+
+            if ($incremental) {
+                $buildId = QueryRecord::str($head, 'build_id');
+                $this->syncBlocksIncremental(
+                    conn: $conn,
+                    blocksTable: $blocksTable,
+                    tenantKey: $tenantKey,
+                    projectScope: $projectScope,
+                    documentKey: $documentKey,
+                    generation: $snapshot->epoch,
+                    buildId: $buildId,
+                    blocks: $blocks,
+                    now: $now,
+                );
+            } elseif ($blocks !== []) {
                 $rows = [];
                 foreach ($blocks as $block) {
-                    try {
-                        $headingJson = json_encode($block->headingPath, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                        $nodeJson = json_encode($block->formattedNode, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                    } catch (JsonException $e) {
-                        throw new \RuntimeException('Failed to encode projected text block JSON.', 0, $e);
-                    }
-
-                    $rows[] = [
-                        'tenant_id' => $tenantKey,
-                        'project_scope' => $projectScope,
-                        'document_id' => $documentKey,
-                        'source_generation' => $snapshot->epoch,
-                        'build_id' => $buildId,
-                        'block_id' => $block->blockId,
-                        'parent_id' => $block->parentId,
-                        'ordinal' => $block->ordinal,
-                        'node_kind' => $block->nodeKind,
-                        'heading_path' => $headingJson,
-                        'search_text' => $block->searchText,
-                        'formatted_node' => $nodeJson,
-                        'source_hash' => $this->officeDb->binaryLiteral($block->sourceHashBinary),
-                        'created_at' => $now,
-                    ];
+                    $rows[] = $this->encodeBlockRow(
+                        $tenantKey,
+                        $projectScope,
+                        $documentKey,
+                        $snapshot->epoch,
+                        $buildId,
+                        $block,
+                        $now,
+                    );
                 }
 
                 foreach (array_chunk($rows, 200) as $chunk) {
@@ -343,6 +347,140 @@ final readonly class IndexText
 
             return $buildId;
         });
+    }
+
+    /**
+     * @param  list<ExtractedTextBlock>  $blocks
+     */
+    private function syncBlocksIncremental(
+        ConnectionInterface $conn,
+        string $blocksTable,
+        int|string $tenantKey,
+        string $projectScope,
+        int|string $documentKey,
+        int $generation,
+        string $buildId,
+        array $blocks,
+        string $now,
+    ): void {
+        $baseScope = [
+            'tenant_id' => $tenantKey,
+            'project_scope' => $projectScope,
+            'document_id' => $documentKey,
+            'source_generation' => $generation,
+            'build_id' => $buildId,
+        ];
+
+        $existingRows = $conn->table($blocksTable)
+            ->where($baseScope)
+            ->get(['block_id', 'parent_id', 'ordinal', 'node_kind', 'heading_path', 'source_hash']);
+
+        $existingById = [];
+        foreach ($existingRows as $row) {
+            $existingById[QueryRecord::str($row, 'block_id')] = $row;
+        }
+
+        $incomingById = [];
+        foreach ($blocks as $block) {
+            $incomingById[$block->blockId] = $block;
+        }
+
+        $deleteIds = [];
+        foreach (array_keys($existingById) as $existingId) {
+            if (! isset($incomingById[$existingId])) {
+                $deleteIds[] = $existingId;
+            }
+        }
+
+        $inPlaceUpdates = [];
+        $toInsert = [];
+        foreach ($blocks as $block) {
+            $row = $this->encodeBlockRow($tenantKey, $projectScope, $documentKey, $generation, $buildId, $block, $now);
+            $existing = $existingById[$block->blockId] ?? null;
+            if ($existing === null) {
+                $toInsert[] = $row;
+
+                continue;
+            }
+
+            $sameOrdinal = QueryRecord::int($existing, 'ordinal') === $block->ordinal;
+            $sameParent = QueryRecord::raw($existing, 'parent_id') === $block->parentId;
+            $sameKind = QueryRecord::str($existing, 'node_kind') === $block->nodeKind;
+            $sameHeading = QueryRecord::str($existing, 'heading_path') === $row['heading_path'];
+            $sameHash = $this->officeDb->decodeBinary(QueryRecord::raw($existing, 'source_hash')) === $block->sourceHashBinary;
+
+            if ($sameOrdinal && $sameParent && $sameKind && $sameHeading && $sameHash) {
+                continue;
+            }
+
+            if ($sameOrdinal) {
+                $inPlaceUpdates[$block->blockId] = [
+                    'parent_id' => $row['parent_id'],
+                    'node_kind' => $row['node_kind'],
+                    'heading_path' => $row['heading_path'],
+                    'search_text' => $row['search_text'],
+                    'formatted_node' => $row['formatted_node'],
+                    'source_hash' => $row['source_hash'],
+                    'created_at' => $row['created_at'],
+                ];
+            } else {
+                // Delete and re-insert ordinal-shifted rows to avoid UNIQUE(..., ordinal) collisions.
+                $deleteIds[] = $block->blockId;
+                $toInsert[] = $row;
+            }
+        }
+
+        foreach (array_chunk($deleteIds, 200) as $chunk) {
+            $conn->table($blocksTable)->where($baseScope)->whereIn('block_id', $chunk)->delete();
+        }
+
+        foreach ($inPlaceUpdates as $blockId => $values) {
+            $conn->table($blocksTable)
+                ->where($baseScope)
+                ->where('block_id', $blockId)
+                ->update($values);
+        }
+
+        foreach (array_chunk($toInsert, 200) as $chunk) {
+            $conn->table($blocksTable)->insert($chunk);
+        }
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function encodeBlockRow(
+        int|string $tenantKey,
+        string $projectScope,
+        int|string $documentKey,
+        int $generation,
+        string $buildId,
+        ExtractedTextBlock $block,
+        string $now,
+    ): array {
+        try {
+            $headingJson = json_encode($block->headingPath, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            $nodeJson = json_encode($block->formattedNode, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        } catch (JsonException $e) {
+            throw new \RuntimeException('Failed to encode projected text block JSON.', 0, $e);
+        }
+
+        return [
+            'tenant_id' => $tenantKey,
+            'project_scope' => $projectScope,
+            'document_id' => $documentKey,
+            'source_generation' => $generation,
+            'build_id' => $buildId,
+            'block_id' => $block->blockId,
+            'parent_id' => $block->parentId,
+            'ordinal' => $block->ordinal,
+            'node_kind' => $block->nodeKind,
+            'heading_path' => $headingJson,
+            'search_text' => $block->searchText,
+            'formatted_node' => $nodeJson,
+            'source_hash' => $this->officeDb->binaryLiteral($block->sourceHashBinary),
+            'created_at' => $now,
+        ];
     }
 
     /**

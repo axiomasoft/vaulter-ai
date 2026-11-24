@@ -23,6 +23,10 @@ final readonly class ChatTurn
 
     private const int MAX_OUTPUT_BYTES = 65536;
 
+    private const int DEFAULT_DELTA_BATCH_BYTES = 512;
+
+    private const int DEFAULT_DELTA_BATCH_MS = 100;
+
     public function __construct(
         private OfficeDatabase $db,
         private Runs $runs,
@@ -125,10 +129,14 @@ final readonly class ChatTurn
         $deliveries = 0;
         $maxToolCalls = $this->limitInt('vaulter-ai.chat.max_tool_calls', self::MAX_TOOL_CALLS, 1, self::MAX_TOOL_CALLS);
         $maxOutputBytes = $this->limitInt('vaulter-ai.chat.max_output_bytes', self::MAX_OUTPUT_BYTES, 1024, self::MAX_OUTPUT_BYTES);
+        $deltaBatchBytes = $this->limitInt('vaulter-ai.chat.delta_batch_bytes', self::DEFAULT_DELTA_BATCH_BYTES, 1, self::MAX_OUTPUT_BYTES);
+        $deltaBatchNs = $this->limitInt('vaulter-ai.chat.delta_batch_ms', self::DEFAULT_DELTA_BATCH_MS, 1, 10_000) * 1_000_000;
+        $deltaBuffer = '';
+        $deltaBufferStartedNs = null;
+
         $deadline = hrtime(true) + 70_000_000_000;
         $cancelled = static fn (): bool => hrtime(true) >= $deadline;
         while (! $cancelled()) {
-            $this->chat->turnInput($context, $session, $runId);
             $stream = $llm->stream($messages, $this->tools->catalog($context, $scope), $profile, $cancelled);
             foreach ($stream as $event) {
                 if ($cancelled()) {
@@ -140,9 +148,10 @@ final readonly class ChatTurn
                         if (strlen($text) + strlen($tail) > $maxOutputBytes) {
                             throw new OfficeException(ErrorCode::LimitExceeded);
                         }
-                        $this->delta($context, $session, $runId, $lease, 'assistant.delta', ['text' => $tail], $scope);
                         $text .= $tail;
+                        $deltaBuffer .= $tail;
                     }
+                    $this->flushDeltaBuffer($context, $session, $runId, $lease, $scope, $deltaBuffer, $deltaBufferStartedNs);
                     $this->finish($context, $session, $runId, $lease, $text, $scope);
 
                     return null;
@@ -158,7 +167,11 @@ final readonly class ChatTurn
                             throw new OfficeException(ErrorCode::LimitExceeded);
                         }
                         $text .= $safe;
-                        $this->delta($context, $session, $runId, $lease, 'assistant.delta', ['text' => $safe], $scope);
+                        $deltaBuffer .= $safe;
+                        $deltaBufferStartedNs ??= hrtime(true);
+                        if (strlen($deltaBuffer) >= $deltaBatchBytes || (hrtime(true) - $deltaBufferStartedNs) >= $deltaBatchNs) {
+                            $this->flushDeltaBuffer($context, $session, $runId, $lease, $scope, $deltaBuffer, $deltaBufferStartedNs);
+                        }
                     }
 
                     continue;
@@ -171,7 +184,7 @@ final readonly class ChatTurn
                 if ($index === false) {
                     throw OfficeException::invalidInput();
                 }
-                $this->chat->turnInput($context, $session, $runId);
+                $this->flushDeltaBuffer($context, $session, $runId, $lease, $scope, $deltaBuffer, $deltaBufferStartedNs);
                 $this->tools->request($context, $session, $runId, $lease, $index + 1, $event['tool'], $event['input'], $scope);
                 $calls = $this->ledger->calls($context, $runId, $lease);
                 $call = $calls[$index];
@@ -187,10 +200,29 @@ final readonly class ChatTurn
             }
 
             // A provider disconnect must leave the turn resumable.
+            $this->flushDeltaBuffer($context, $session, $runId, $lease, $scope, $deltaBuffer, $deltaBufferStartedNs);
             break;
         }
 
         throw OfficeException::temporarilyUnavailable();
+    }
+
+    /** @param list<string> $scope */
+    private function flushDeltaBuffer(
+        CallContext $context,
+        string $session,
+        string $runId,
+        string $lease,
+        array $scope,
+        string &$deltaBuffer,
+        int|float|null &$startedNs,
+    ): void {
+        if ($deltaBuffer === '') {
+            return;
+        }
+        $this->delta($context, $session, $runId, $lease, 'assistant.delta', ['text' => $deltaBuffer], $scope);
+        $deltaBuffer = '';
+        $startedNs = null;
     }
 
     private function waitForTool(CallContext $context, string $runId, string $lease, string $state): ?int

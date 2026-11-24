@@ -46,6 +46,34 @@ final readonly class OwnerRoutes
             ->first()), $viewer->tenantId);
     }
 
+    /**
+     * @param  list<string>  $proposalIds
+     * @return array<string, OwnerRoute>
+     */
+    public function forProposalsInTransaction(CallContext $viewer, array $proposalIds): array
+    {
+        if ($proposalIds === []) {
+            return [];
+        }
+
+        $out = [];
+        foreach (array_chunk(array_values(array_unique($proposalIds)), 500) as $chunk) {
+            $rows = $this->db->query('ai_owner_routes')
+                ->where('tenant_id', $viewer->tenantId)
+                ->where('project_scope', $viewer->projectScope)
+                ->whereIn('proposal_id', $chunk)
+                ->get();
+            foreach ($rows as $row) {
+                $route = $this->record($row);
+                if ($route !== null) {
+                    $out[$route->proposalId] = $route;
+                }
+            }
+        }
+
+        return $out;
+    }
+
     public function bind(CommandScope $scope, PreparedPlan $plan): OwnerRoute
     {
         if ($this->db->connection()->transactionLevel() !== 0) {

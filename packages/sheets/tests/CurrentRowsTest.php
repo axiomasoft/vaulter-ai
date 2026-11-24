@@ -17,6 +17,9 @@ use Vaulter\Ai\Core\Protocol\WireValidator;
 use Vaulter\Ai\Sheets\Tests\Support\SheetCommandFixture;
 use Vaulter\Ai\Tests\Support\OfficeTestCase;
 use Vaulter\Documents\Facades\Documents;
+use Vaulter\Drive\Operations\DriveContext;
+use Vaulter\Sheets\Contracts\WorkbookOperations;
+use Vaulter\Sheets\Data\WorkbookCommand;
 
 uses(OfficeTestCase::class);
 
@@ -217,4 +220,68 @@ test('filtered read_token is refused for current_rows with invalid_input, and af
         'after_receipt' => $receiptId,
     ]);
     expect($afterRestoreRead->ok)->toBeFalse()->and($afterRestoreRead->errorCode)->toBe(ErrorCode::GenerationChanged);
+});
+
+test('SheetReader::readTableSlice loads workbook once when row_ids are specified', function (): void {
+    $fixture = new SheetCommandFixture($this->app, automatic: true);
+
+    $realOps = $this->app->make(WorkbookOperations::class);
+    $catalogCalls = 0;
+    $readTableCalls = 0;
+    $this->app->instance(WorkbookOperations::class, new class($realOps, $catalogCalls, $readTableCalls) implements WorkbookOperations
+    {
+        public function __construct(
+            private readonly WorkbookOperations $inner,
+            private int &$catalogCalls,
+            private int &$readTableCalls,
+        ) {}
+
+        public function catalog(DriveContext $context, string $node): array
+        {
+            $this->catalogCalls++;
+
+            return $this->inner->catalog($context, $node);
+        }
+
+        public function readTable(DriveContext $context, string $node, string $table, ?array $columns = null, ?array $rowIds = null): array
+        {
+            $this->readTableCalls++;
+
+            return $this->inner->readTable($context, $node, $table, $columns, $rowIds);
+        }
+
+        public function prepareFormula(DriveContext $context, string $node, string $table, string $destination, string $left, string $right, string $scope): array
+        {
+            return $this->inner->prepareFormula($context, $node, $table, $destination, $left, $right, $scope);
+        }
+
+        public function commit(DriveContext $context, string $node, WorkbookCommand $command): array
+        {
+            return $this->inner->commit($context, $node, $command);
+        }
+
+        public function status(DriveContext $context, string $node, string $command): array
+        {
+            return $this->inner->status($context, $node, $command);
+        }
+
+        public function verify(DriveContext $context, string $node, string $command): array
+        {
+            return $this->inner->verify($context, $node, $command);
+        }
+    });
+
+    $res = $fixture->call(OfficeOperation::Read, [
+        'selector' => (object) [
+            'kind' => 'sheet_table',
+            'sheet_id' => 'expenses',
+            'table_id' => 'costs',
+            'columns' => ['plan', 'actual'],
+            'row_ids' => ['r-telecom', 'r-travel'],
+        ],
+    ]);
+
+    expect($res->ok)->toBeTrue()
+        ->and($catalogCalls)->toBe(0)
+        ->and($readTableCalls)->toBe(1);
 });

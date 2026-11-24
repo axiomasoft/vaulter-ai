@@ -210,32 +210,26 @@ final readonly class ChatWorkspace
      */
     public function appendOnceForRun(CallContext $context, string $sessionId, string $runId, string $type, array $payload, array $scope): ?int
     {
-        return $this->db->transaction(function () use ($context, $sessionId, $runId, $type, $payload, $scope): ?int {
+        $dedupeKey = hash('sha256', json_encode([
+            $payload['call_id'] ?? null,
+            $payload['proposal_id'] ?? null,
+            $payload['state'] ?? null,
+        ], JSON_THROW_ON_ERROR));
+
+        return $this->db->transaction(function () use ($context, $sessionId, $runId, $type, $payload, $scope, $dedupeKey): ?int {
             $session = $this->session($context, $sessionId, lock: true);
             if ($this->runMessage($sessionId, $runId) === null) {
                 throw OfficeException::resourceUnavailable();
             }
 
-            $existing = $this->db->query('ai_chat_events')
+            $duplicate = $this->db->query('ai_chat_events')
                 ->where('session_id', $sessionId)
                 ->where('run_id', $runId)
                 ->where('event_type', $type)
-                ->get();
-            foreach ($existing as $row) {
-                $seq = QueryRecord::int($row, 'seq');
-                $key = QueryRecord::raw($row, 'key_id');
-                $rowScope = $this->storedScope($row);
-                $decoded = is_string($key) ? $this->cipher->decrypt(
-                    $key,
-                    $this->db->decodeBinary(QueryRecord::raw($row, 'encrypted_payload')),
-                    $this->aad($context, 'ai_chat_events', $sessionId, (string) $seq, $type, $rowScope),
-                ) : [];
-                $sameCall = ($payload['call_id'] ?? null) === ($decoded['call_id'] ?? null);
-                $sameProposal = ($payload['proposal_id'] ?? null) === ($decoded['proposal_id'] ?? null);
-                $sameState = ($payload['state'] ?? null) === ($decoded['state'] ?? null);
-                if ($sameCall && $sameProposal && $sameState) {
-                    return null;
-                }
+                ->where('dedupe_key', $dedupeKey)
+                ->exists();
+            if ($duplicate) {
+                return null;
             }
 
             $seq = QueryRecord::int($session, 'last_seq') + 1;
@@ -251,6 +245,7 @@ final readonly class ChatWorkspace
                 'resource_scope_json' => json_encode($scope, JSON_THROW_ON_ERROR),
                 'key_id' => $encrypted['key_id'],
                 'encrypted_payload' => $this->db->binaryLiteral($encrypted['ciphertext']),
+                'dedupe_key' => $dedupeKey,
                 'created_at' => $stamp,
             ];
             if ($this->db->driver() !== 'pgsql') {
@@ -334,8 +329,8 @@ final readonly class ChatWorkspace
                     ->get()
                     ->all();
             $steps = [];
-            foreach ($runIds as $rid) {
-                foreach ($this->runs->listSteps($context, $rid) as $step) {
+            foreach ($this->runs->listStepsByRunIdsInTransaction($context, array_values($runIds)) as $rid => $runSteps) {
+                foreach ($runSteps as $step) {
                     $steps[$rid.':'.$step->stepId] = $step;
                     if ($step->resourceId !== null && $step->resourceId !== '') {
                         $allScopeIds[] = $step->resourceId;
@@ -371,8 +366,9 @@ final readonly class ChatWorkspace
                 $messages[] = $item;
             }
 
+            $runsById = $this->runs->findByIdsInTransaction($context, array_values($runIds));
             foreach (array_values($runIds) as $rid) {
-                $run = $this->runs->find($context, $rid);
+                $run = $runsById[$rid] ?? null;
                 if ($run !== null) {
                     if ($run->channel !== 'chat') {
                         $externalRuns[$rid] = $run->state;

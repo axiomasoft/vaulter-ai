@@ -22,6 +22,7 @@ use Vaulter\Ai\Core\Data\CommandScope;
 use Vaulter\Ai\Core\Data\OfficeRequest;
 use Vaulter\Ai\Core\Data\OfficeRun;
 use Vaulter\Ai\Core\Data\OfficeRunStep;
+use Vaulter\Ai\Core\Data\OwnerRoute;
 use Vaulter\Ai\Core\Data\ResourceEntry;
 use Vaulter\Ai\Core\Data\StoredProposal;
 use Vaulter\Ai\Core\Enums\ApprovalMode;
@@ -30,6 +31,7 @@ use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Operations\RunStateReducer;
 use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
+use Vaulter\Ai\Core\Persistence\DefaultProposalApprovalPolicy;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\OwnerRoutes;
 use Vaulter\Ai\Core\Persistence\Proposals;
@@ -77,27 +79,108 @@ final readonly class OfficeWorkspaceService
      */
     public function listProposals(CallContext $viewer, ?string $resourceId = null, ?string $decision = null, int $limit = 50): array
     {
-        $rows = $this->proposals->listInScope($viewer, $resourceId, $decision, $limit);
-        if ($rows === []) {
-            return [];
-        }
-
-        $resourceIds = [];
-        foreach ($rows as $proposal) {
-            $resourceIds[] = $proposal->plan->resourceId;
-        }
-        $accessible = $this->directory->filterAccessible($viewer, array_values(array_unique($resourceIds)), 'view');
-
-        $out = [];
-        foreach ($rows as $proposal) {
-            $entry = $accessible[$proposal->plan->resourceId] ?? null;
-            if ($entry === null || ! $this->approvalPolicy->canView($viewer, $entry, $proposal)) {
-                continue;
+        return $this->db->transaction(function () use ($viewer, $resourceId, $decision, $limit): array {
+            $headers = $this->proposals->listHeadersInScopeInTransaction($viewer, $resourceId, $decision, $limit);
+            if ($headers === []) {
+                return [];
             }
-            $out[] = $this->formatProposal($viewer, $entry, $proposal);
-        }
 
-        return $out;
+            $resourceIds = [];
+            foreach ($headers as $header) {
+                $resourceIds[] = QueryRecord::str($header, 'resource_id');
+            }
+            $accessible = $this->directory->filterAccessible($viewer, array_values(array_unique($resourceIds)), 'view');
+            if ($accessible === []) {
+                return [];
+            }
+
+            $viewableHeaders = [];
+            foreach ($headers as $header) {
+                if (isset($accessible[QueryRecord::str($header, 'resource_id')])) {
+                    $viewableHeaders[] = $header;
+                }
+            }
+            if ($viewableHeaders === []) {
+                return [];
+            }
+
+            $hydrated = $this->proposals->hydrateFromHeadersInTransaction($viewableHeaders);
+            $isDefaultPolicy = $this->approvalPolicy instanceof DefaultProposalApprovalPolicy;
+
+            $visible = [];
+            $visibleIds = [];
+            $visibleResourceIds = [];
+            foreach ($hydrated as $proposal) {
+                $entry = $accessible[$proposal->plan->resourceId] ?? null;
+                if ($entry === null) {
+                    continue;
+                }
+                if (! $isDefaultPolicy && ! $this->approvalPolicy->canView($viewer, $entry, $proposal)) {
+                    continue;
+                }
+                $visible[] = $proposal;
+                $visibleIds[] = $proposal->plan->proposalId;
+                $visibleResourceIds[] = $entry->resourceId;
+            }
+            if ($visible === []) {
+                return [];
+            }
+
+            $editable = $isDefaultPolicy
+                ? $this->directory->filterAccessible($viewer, array_values(array_unique($visibleResourceIds)), 'edit')
+                : null;
+
+            $routesByProposal = $this->routes->forProposalsInTransaction($viewer, $visibleIds);
+            $dispatchesByProposal = $this->findDispatchRowsInTransaction($visibleIds);
+            $stepBundle = $this->runs->findLatestStepsForProposalsInTransaction($viewer, $visibleIds);
+
+            $verifyRunIds = [];
+            foreach ($visible as $proposal) {
+                $pid = $proposal->plan->proposalId;
+                $route = $routesByProposal[$pid] ?? null;
+                $linkedCommit = $stepBundle['commit'][$pid] ?? null;
+                $linkedPrep = $stepBundle['prepare'][$pid] ?? null;
+                $receiptId = ($route !== null ? $route->receiptId : null) ?? ($linkedCommit !== null ? $linkedCommit->receiptId : null);
+                $stepRef = $linkedCommit ?? $linkedPrep;
+                if ($receiptId !== null && $stepRef !== null) {
+                    $verifyRunIds[] = $stepRef->runId;
+                }
+            }
+            $verifyStepsByRun = $verifyRunIds !== []
+                ? $this->runs->findVerifyStepsForRunsInTransaction($viewer, $verifyRunIds)
+                : [];
+            $now = $this->db->clockNow($this->clock);
+
+            $out = [];
+            foreach ($visible as $proposal) {
+                $pid = $proposal->plan->proposalId;
+                $entry = $accessible[$proposal->plan->resourceId];
+                $linkedCommit = $stepBundle['commit'][$pid] ?? null;
+                $linkedPrep = $stepBundle['prepare'][$pid] ?? null;
+                $stepRef = $linkedCommit ?? $linkedPrep;
+                $runId = $stepRef?->runId;
+                $canApprove = $editable !== null
+                    ? isset($editable[$entry->resourceId])
+                    : null;
+
+                $out[] = $this->formatProposalWithContext(
+                    viewer: $viewer,
+                    resource: $entry,
+                    proposal: $proposal,
+                    route: $routesByProposal[$pid] ?? null,
+                    linkedCommit: $linkedCommit,
+                    linkedPrep: $linkedPrep,
+                    latestStep: $stepBundle['latest'][$pid] ?? null,
+                    dispatch: $dispatchesByProposal[$pid] ?? null,
+                    runState: $runId !== null ? ($stepBundle['run_states'][$runId] ?? null) : null,
+                    verifySteps: $runId !== null ? ($verifyStepsByRun[$runId] ?? []) : [],
+                    now: $now,
+                    canApproveOverride: $canApprove,
+                );
+            }
+
+            return $out;
+        }, $viewer->tenantId);
     }
 
     /**
@@ -652,13 +735,63 @@ final readonly class OfficeWorkspaceService
     {
         $plan = $proposal->plan;
         $initiatorSubject = $proposal->effectiveSubject ?? $viewer->effectiveSubject;
-        $initiator = $this->resolveInitiatorForProposal($viewer, $plan->proposalId, $initiatorSubject);
         $route = $this->routes->forProposalInScope($viewer, $initiatorSubject, $plan->proposalId);
         $linkedCommit = $this->runs->findLatestStepForProposalInScope($viewer, $plan->proposalId, OfficeOperation::Commit);
         $linkedPrep = $this->runs->findLatestStepForProposalInScope($viewer, $plan->proposalId, OfficeOperation::Prepare);
+        $dispatch = $this->findDispatchRow($viewer->tenantId, $plan->proposalId);
+
+        $stepRef = $linkedCommit ?? $linkedPrep;
+        $runState = null;
+        $verifySteps = [];
+        if ($stepRef !== null) {
+            $linkedRun = $this->runs->findInScope($viewer, $stepRef->runId);
+            if ($linkedRun !== null) {
+                $runState = $linkedRun->state;
+                if ((($route !== null ? $route->receiptId : null) ?? ($linkedCommit !== null ? $linkedCommit->receiptId : null)) !== null) {
+                    $verifySteps = $this->runs->listStepsInScope($viewer, $linkedRun->runId);
+                }
+            }
+        }
+
+        return $this->formatProposalWithContext(
+            viewer: $viewer,
+            resource: $resource,
+            proposal: $proposal,
+            route: $route,
+            linkedCommit: $linkedCommit,
+            linkedPrep: $linkedPrep,
+            latestStep: $stepRef,
+            dispatch: $dispatch,
+            runState: $runState,
+            verifySteps: $verifySteps,
+            now: $this->db->clockNow($this->clock),
+            canApproveOverride: null,
+        );
+    }
+
+    /**
+     * @param  list<OfficeRunStep>  $verifySteps
+     * @return array<string, mixed>
+     */
+    private function formatProposalWithContext(
+        CallContext $viewer,
+        ResourceEntry $resource,
+        StoredProposal $proposal,
+        ?OwnerRoute $route,
+        ?OfficeRunStep $linkedCommit,
+        ?OfficeRunStep $linkedPrep,
+        ?OfficeRunStep $latestStep,
+        ?object $dispatch,
+        ?string $runState,
+        array $verifySteps,
+        DateTimeImmutable $now,
+        ?bool $canApproveOverride,
+    ): array {
+        $plan = $proposal->plan;
+        $initiatorSubject = $proposal->effectiveSubject ?? $viewer->effectiveSubject;
+        $initiator = $this->resolveInitiatorForProposal($viewer, $plan->proposalId, $initiatorSubject, $latestStep);
         $linkedVerify = null;
 
-        $dispatch = $this->findDispatchRow($viewer->tenantId, $plan->proposalId);
         $dispatchState = $dispatch !== null ? QueryRecord::str($dispatch, 'state') : null;
 
         $commandId = null;
@@ -683,9 +816,14 @@ final readonly class OfficeWorkspaceService
         }
 
         $marker = null;
+        if ($linkedCommit !== null) {
+            $commitResult = $this->stepResultMap($linkedCommit);
+            $marker = $this->extractMarker($commitResult['marker'] ?? null);
+        }
+
         $rejectionReason = null;
 
-        if ($route !== null && $initiator !== null) {
+        if ($route !== null && $initiator !== null && ($receiptId === null || $marker === null)) {
             $owner = $this->registry->owner($route->ownerKey);
             if ($owner !== null) {
                 try {
@@ -736,20 +874,16 @@ final readonly class OfficeWorkspaceService
 
         $runInfo = null;
         $stepRef = $linkedCommit ?? $linkedPrep;
-        if ($stepRef !== null) {
-            $linkedRun = $this->runs->findInScope($viewer, $stepRef->runId);
-            if ($linkedRun !== null) {
-                $runInfo = [
-                    'run_id' => $linkedRun->runId,
-                    'state' => $linkedRun->state,
-                    'step_id' => $stepRef->stepId,
-                ];
-                $runSteps = $this->runs->listStepsInScope($viewer, $linkedRun->runId);
-                if ($receiptId !== null) {
-                    foreach ($runSteps as $rs) {
-                        if ($rs->operation === OfficeOperation::Verify && $rs->receiptId === $receiptId) {
-                            $linkedVerify = $rs;
-                        }
+        if ($stepRef !== null && $runState !== null) {
+            $runInfo = [
+                'run_id' => $stepRef->runId,
+                'state' => $runState,
+                'step_id' => $stepRef->stepId,
+            ];
+            if ($receiptId !== null) {
+                foreach ($verifySteps as $rs) {
+                    if ($rs->operation === OfficeOperation::Verify && $rs->receiptId === $receiptId) {
+                        $linkedVerify = $rs;
                     }
                 }
             }
@@ -757,13 +891,12 @@ final readonly class OfficeWorkspaceService
 
         $verification = $this->buildVerificationView($initiator, $plan->resourceId, $receiptId, $ownerKey, $linkedVerify);
 
-        $now = $this->db->clockNow($this->clock);
         $expired = new DateTimeImmutable($plan->expiresAt) <= $now;
         $canDecide = $plan->approval === ApprovalMode::Human
             && $proposal->decision === 'pending'
             && $proposal->hasPayload
             && ! $expired
-            && $this->approvalPolicy->canApprove($viewer, $resource, $proposal);
+            && ($canApproveOverride ?? $this->approvalPolicy->canApprove($viewer, $resource, $proposal));
 
         return [
             'proposal_id' => $plan->proposalId,
@@ -1202,6 +1335,7 @@ final readonly class OfficeWorkspaceService
         CallContext $viewer,
         string $proposalId,
         string $initiatorSubject,
+        ?OfficeRunStep $preloadedStep = null,
     ): ?CallContext {
         if ($initiatorSubject === '' || hash_equals($viewer->effectiveSubject, $initiatorSubject)) {
             return $viewer;
@@ -1217,7 +1351,7 @@ final readonly class OfficeWorkspaceService
             }
         }
 
-        $step = $this->runs->findLatestStepForProposalInScope($viewer, $proposalId);
+        $step = $preloadedStep ?? $this->runs->findLatestStepForProposalInScope($viewer, $proposalId);
         if ($step !== null && $this->container->bound(RunContextResolver::class)) {
             $resolved = $this->container->make(RunContextResolver::class)->resolve($viewer->tenantId, $step->runId);
             if ($resolved !== null
@@ -1260,6 +1394,31 @@ final readonly class OfficeWorkspaceService
             fn (): ?object => $this->db->query('ai_dispatches')->where('proposal_id', $proposalId)->first(),
             $tenantId,
         );
+    }
+
+    /**
+     * @param  list<string>  $proposalIds
+     * @return array<string, object>
+     */
+    private function findDispatchRowsInTransaction(array $proposalIds): array
+    {
+        $valid = array_values(array_unique(array_filter(
+            $proposalIds,
+            fn (string $id): bool => $this->isLowerUuid($id),
+        )));
+        if ($valid === []) {
+            return [];
+        }
+
+        $out = [];
+        foreach (array_chunk($valid, 500) as $chunk) {
+            $rows = $this->db->query('ai_dispatches')->whereIn('proposal_id', $chunk)->get();
+            foreach ($rows as $row) {
+                $out[QueryRecord::str($row, 'proposal_id')] = $row;
+            }
+        }
+
+        return $out;
     }
 
     /** @param array<mixed> $data */

@@ -42,6 +42,41 @@ final readonly class SearchPages
         int $ttlSeconds,
         ResourceDirectory $directory,
     ): array {
+        $items = [];
+        $hasMore = false;
+        $nextOffset = 0;
+        $batchSize = max($limit * 2, 20);
+        $total = count($sortedCandidates);
+
+        for ($offset = 0; $offset < $total; $offset += $batchSize) {
+            $batch = array_slice($sortedCandidates, $offset, $batchSize);
+            $ids = [];
+            foreach ($batch as $entry) {
+                $ids[] = $entry->resourceId;
+            }
+            $accessible = $directory->filterAccessible($context, $ids, 'view');
+
+            foreach ($batch as $idx => $entry) {
+                if (! isset($accessible[$entry->resourceId])) {
+                    continue;
+                }
+                if (count($items) >= $limit) {
+                    $hasMore = true;
+                    break 2;
+                }
+                $items[] = $entry;
+                $nextOffset = $offset + $idx;
+            }
+        }
+
+        if (! $hasMore) {
+            return [
+                'items' => $items,
+                'truncated' => false,
+                'next_cursor' => null,
+            ];
+        }
+
         $now = $this->clock->now();
         $expiresAt = $now->modify('+'.$ttlSeconds.' seconds');
         $snapshotId = $this->db->newUuid();
@@ -58,32 +93,26 @@ final readonly class SearchPages
                 'expires_at' => $this->db->utcTimestamp($expiresAt),
             ]);
 
-            if ($sortedCandidates !== []) {
-                $rows = [];
-                foreach ($sortedCandidates as $ordinal => $entry) {
-                    $rows[] = [
-                        'snapshot_id' => $snapshotId,
-                        'ordinal' => $ordinal,
-                        'resource_id' => $entry->resourceId,
-                        'resource_type' => $entry->resourceType->value,
-                    ];
-                }
+            $rows = [];
+            foreach ($sortedCandidates as $ordinal => $entry) {
+                $rows[] = [
+                    'snapshot_id' => $snapshotId,
+                    'ordinal' => $ordinal,
+                    'resource_id' => $entry->resourceId,
+                    'resource_type' => $entry->resourceType->value,
+                ];
+            }
 
-                foreach (array_chunk($rows, 200) as $chunk) {
-                    $this->db->query('ai_search_items')->insert($chunk);
-                }
+            foreach (array_chunk($rows, 200) as $chunk) {
+                $this->db->query('ai_search_items')->insert($chunk);
             }
         }, tenantId: $context->tenantId);
 
-        return $this->sliceSnapshot(
-            context: $context,
-            snapshotId: $snapshotId,
-            afterOrdinal: -1,
-            queryHashBinary: $queryHashBinary,
-            expiresAt: $expiresAt,
-            limit: $limit,
-            directory: $directory,
-        );
+        return [
+            'items' => $items,
+            'truncated' => true,
+            'next_cursor' => $this->encodeCursor($context, $snapshotId, $nextOffset, $queryHashBinary, $expiresAt),
+        ];
     }
 
     /**

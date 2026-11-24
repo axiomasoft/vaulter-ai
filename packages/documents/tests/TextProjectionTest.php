@@ -506,3 +506,64 @@ test('durable OutboxConsumer replays document creation via vaulter:relay when in
     expect($afterRelay->ok)->toBeTrue();
     expect($afterRelay->result?->data->segments[0]->text)->toBe('Условие из outbox');
 });
+
+test('IndexText::publishSnapshot leaves unchanged blocks untouched when editing one block', function (): void {
+    Config::set('vaulter-ai-documents.default_tenant_id', '61');
+
+    $owner = TestOwner::query()->create(['name' => 'Org Incremental']);
+    $drive = Vaulter::drive($owner)->asSystem('seed');
+
+    $docV1 = [
+        'type' => 'doc',
+        'content' => [
+            ['type' => 'paragraph', 'attrs' => ['blockId' => 'p-keep-1'], 'content' => [['type' => 'text', 'text' => 'Unchanged one']]],
+            ['type' => 'paragraph', 'attrs' => ['blockId' => 'p-edit'], 'content' => [['type' => 'text', 'text' => 'Original text']]],
+            ['type' => 'paragraph', 'attrs' => ['blockId' => 'p-keep-2'], 'content' => [['type' => 'text', 'text' => 'Unchanged two']]],
+        ],
+    ];
+    $node = Documents::in($drive)->create('Incremental Doc', 'vaulter/rich-text', $docV1);
+    $docKey = Identity::key($node->id);
+    $indexer = $this->app->make(IndexText::class);
+    $reader = $this->app->make(TextProjectionReader::class);
+    $build1 = $indexer->publishSnapshot(61, 'default', Documents::in($drive)->content($node->id), forceRebuild: true);
+    expect($build1)->toBeString();
+
+    $blockQueries = [];
+    $this->app->make(VaulterDatabase::class)->connection()->listen(static function (QueryExecuted $q) use (&$blockQueries): void {
+        if (str_contains($q->sql, 'ai_text_blocks') && ! str_starts_with(strtolower(ltrim($q->sql)), 'select')) {
+            $blockQueries[] = $q->sql;
+        }
+    });
+
+    $docV2 = $docV1;
+    $docV2['content'][1]['content'][0]['text'] = 'Modified text';
+    $snap1 = Documents::in($drive)->snapshot($node->id);
+    Documents::in($drive)->update($node->id, $docV2, $snap1->stateVersion);
+
+    expect($blockQueries)->toHaveCount(2)
+        ->and(strtolower(ltrim($blockQueries[0])))->toStartWith('update');
+
+    // Insert at top (ordinal shift) + delete last block succeeds without UNIQUE(..., ordinal) collisions.
+    $docV3 = [
+        'type' => 'doc',
+        'content' => [
+            ['type' => 'paragraph', 'attrs' => ['blockId' => 'p-new-top'], 'content' => [['type' => 'text', 'text' => 'New top']]],
+            ['type' => 'paragraph', 'attrs' => ['blockId' => 'p-keep-1'], 'content' => [['type' => 'text', 'text' => 'Unchanged one']]],
+            ['type' => 'paragraph', 'attrs' => ['blockId' => 'p-edit'], 'content' => [['type' => 'text', 'text' => 'Modified text']]],
+        ],
+    ];
+    $snap2 = Documents::in($drive)->snapshot($node->id);
+    Documents::in($drive)->update($node->id, $docV3, $snap2->stateVersion);
+
+    $actor = TestActor::query()->create(['name' => 'Inc Reader', 'email' => 'inc@example.test']);
+    $drive->access()->grant($drive->root()->id, new GrantInput(Subject::ofModel($actor), RoleRegistry::READER));
+    $ctx = new CallContext('61', 'default', 'user/'.$actor->getKey(), 'documents', '1', $drive->snapshot()->id, $actor);
+    $office = $this->app->make(Office::class);
+    $outline = $office->handle($ctx, new OfficeRequest(1, OfficeOperation::Read, (object) [
+        'resource_id' => $node->id,
+        'selector' => (object) ['kind' => 'text_outline'],
+        'limit' => 10,
+    ]));
+    expect($outline->ok)->toBeTrue()
+        ->and(array_column($outline->result?->data->blocks ?? [], 'block_id'))->toBe(['p-new-top', 'p-keep-1', 'p-edit']);
+});

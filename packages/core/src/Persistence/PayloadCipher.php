@@ -11,7 +11,7 @@ use RuntimeException;
  * Authenticated AES-256-GCM encryption for stored read-token dependencies and proposal payloads
  * with AAD binding to table, scope and record identity.
  */
-final readonly class PayloadCipher
+final class PayloadCipher
 {
     private const int NONCE_BYTES = 12;
 
@@ -19,8 +19,13 @@ final readonly class PayloadCipher
 
     private const string VERSION_PREFIX = "\x01";
 
+    private ?string $cachedRawKey = null;
+
+    /** @var array<string, string> */
+    private array $derivedKeyCache = [];
+
     public function __construct(
-        private ConfigRepository $config,
+        private readonly ConfigRepository $config,
     ) {}
 
     public function keyId(): string
@@ -116,6 +121,15 @@ final readonly class PayloadCipher
             throw new RuntimeException('APP_KEY is required for Vaulter AI payload protection.');
         }
 
+        if ($this->cachedRawKey !== $raw) {
+            $this->cachedRawKey = $raw;
+            $this->derivedKeyCache = [];
+        }
+
+        if (isset($this->derivedKeyCache[$purpose])) {
+            return $this->derivedKeyCache[$purpose];
+        }
+
         if (str_starts_with($raw, 'base64:')) {
             $decoded = base64_decode(substr($raw, 7), true);
             if ($decoded === false || $decoded === '') {
@@ -126,6 +140,6 @@ final readonly class PayloadCipher
             $masterKey = $raw;
         }
 
-        return hash_hkdf('sha256', $masterKey, 32, 'vaulter-ai:'.$purpose);
+        return $this->derivedKeyCache[$purpose] = hash_hkdf('sha256', $masterKey, 32, 'vaulter-ai:'.$purpose);
     }
 }

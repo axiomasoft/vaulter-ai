@@ -1234,4 +1234,147 @@ final readonly class Runs
             (string) $stepId,
         ];
     }
+
+    /**
+     * @param  list<string>  $proposalIds
+     * @return array{
+     *     commit: array<string, OfficeRunStep>,
+     *     prepare: array<string, OfficeRunStep>,
+     *     latest: array<string, OfficeRunStep>,
+     *     run_states: array<string, string>,
+     * }
+     */
+    public function findLatestStepsForProposalsInTransaction(CallContext $viewer, array $proposalIds): array
+    {
+        $commit = [];
+        $prepare = [];
+        $latest = [];
+        $runStates = [];
+        if ($proposalIds === []) {
+            return ['commit' => $commit, 'prepare' => $prepare, 'latest' => $latest, 'run_states' => $runStates];
+        }
+
+        $runsTable = $this->db->table('ai_runs');
+        $stepsTable = $this->db->table('ai_run_steps');
+        foreach (array_chunk(array_values(array_unique($proposalIds)), 500) as $chunk) {
+            $rows = $this->db->connection()->table($stepsTable.' as s')
+                ->join($runsTable.' as r', 'r.run_id', '=', 's.run_id')
+                ->where('r.tenant_id', $viewer->tenantId)
+                ->where('r.project_scope', $viewer->projectScope)
+                ->whereIn('s.proposal_id', $chunk)
+                ->orderByDesc('s.step_id')
+                ->select(['s.*', 'r.state as run_state'])
+                ->get();
+
+            foreach ($rows as $row) {
+                $step = $this->hydrateStep($row);
+                $pid = $step->proposalId;
+                if ($pid === null || $pid === '') {
+                    continue;
+                }
+                $runStates[$step->runId] ??= QueryRecord::str($row, 'run_state');
+                $latest[$pid] ??= $step;
+                if ($step->operation === OfficeOperation::Commit) {
+                    $commit[$pid] ??= $step;
+                } elseif ($step->operation === OfficeOperation::Prepare) {
+                    $prepare[$pid] ??= $step;
+                }
+            }
+        }
+
+        return ['commit' => $commit, 'prepare' => $prepare, 'latest' => $latest, 'run_states' => $runStates];
+    }
+
+    /**
+     * @param  list<string>  $runIds
+     * @return array<string, list<OfficeRunStep>>
+     */
+    public function findVerifyStepsForRunsInTransaction(CallContext $viewer, array $runIds): array
+    {
+        $out = [];
+        if ($runIds === []) {
+            return $out;
+        }
+
+        $runsTable = $this->db->table('ai_runs');
+        $stepsTable = $this->db->table('ai_run_steps');
+        foreach (array_chunk(array_values(array_unique($runIds)), 500) as $chunk) {
+            $rows = $this->db->connection()->table($stepsTable.' as s')
+                ->join($runsTable.' as r', 'r.run_id', '=', 's.run_id')
+                ->where('r.tenant_id', $viewer->tenantId)
+                ->where('r.project_scope', $viewer->projectScope)
+                ->whereIn('s.run_id', $chunk)
+                ->where('s.operation', OfficeOperation::Verify->value)
+                ->orderByDesc('s.step_id')
+                ->select('s.*')
+                ->get();
+
+            foreach ($rows as $row) {
+                $step = $this->hydrateStep($row);
+                $out[$step->runId][] = $step;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  list<string>  $runIds
+     * @return array<string, OfficeRun>
+     */
+    public function findByIdsInTransaction(CallContext $viewer, array $runIds): array
+    {
+        $out = [];
+        if ($runIds === []) {
+            return $out;
+        }
+
+        foreach (array_chunk(array_values(array_unique($runIds)), 500) as $chunk) {
+            $rows = $this->db->query('ai_runs')
+                ->where('tenant_id', $viewer->tenantId)
+                ->where('project_scope', $viewer->projectScope)
+                ->whereIn('run_id', $chunk)
+                ->get();
+
+            foreach ($rows as $row) {
+                $run = $this->hydrateRunRow($row);
+                $out[$run->runId] = $run;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  list<string>  $runIds
+     * @return array<string, list<OfficeRunStep>>
+     */
+    public function listStepsByRunIdsInTransaction(CallContext $viewer, array $runIds): array
+    {
+        $out = [];
+        if ($runIds === []) {
+            return $out;
+        }
+
+        $runsTable = $this->db->table('ai_runs');
+        $stepsTable = $this->db->table('ai_run_steps');
+        foreach (array_chunk(array_values(array_unique($runIds)), 500) as $chunk) {
+            $rows = $this->db->connection()->table($stepsTable.' as s')
+                ->join($runsTable.' as r', 'r.run_id', '=', 's.run_id')
+                ->where('r.tenant_id', $viewer->tenantId)
+                ->where('r.project_scope', $viewer->projectScope)
+                ->whereIn('s.run_id', $chunk)
+                ->orderBy('s.run_id')
+                ->orderBy('s.step_id')
+                ->select('s.*')
+                ->get();
+
+            foreach ($rows as $row) {
+                $step = $this->hydrateStep($row);
+                $out[$step->runId][] = $step;
+            }
+        }
+
+        return $out;
+    }
 }

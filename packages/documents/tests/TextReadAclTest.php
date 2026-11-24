@@ -575,6 +575,15 @@ test('HTTP enforces byte limit on the exact UTF-8 envelope sent over HTTP for Cy
     // Search snapshot creation uses VaulterTransactionRunner and propagates tenant context inside PG transaction.
     expect($this->app->make(TransactionRunner::class))->toBeInstanceOf(VaulterTransactionRunner::class);
     if ($officeDb->driver() === 'pgsql') {
+        Documents::in($drive)->create('Кириллица 2', 'vaulter/rich-text', [
+            'type' => 'doc',
+            'content' => [[
+                'type' => 'paragraph',
+                'attrs' => ['blockId' => 'p-extra'],
+                'content' => [['type' => 'text', 'text' => 'Второй документ для пагинации']],
+            ]],
+        ]);
+
         $vDb = $this->app->make(VaulterDatabase::class);
         $observedTenant = null;
         $conn = $vDb->connection();
@@ -585,8 +594,46 @@ test('HTTP enforces byte limit on the exact UTF-8 envelope sent over HTTP for Cy
         });
 
         $office = $this->app->make(Office::class);
-        $search = $office->handle($ctx, new OfficeRequest(1, OfficeOperation::Search, (object) ['query' => 'Кириллица', 'limit' => 5]));
+        $search = $office->handle($ctx, new OfficeRequest(1, OfficeOperation::Search, (object) ['query' => 'Кириллица', 'limit' => 1]));
         expect($search->ok)->toBeTrue();
+        expect($search->result?->next_cursor)->not->toBeNull();
         expect($observedTenant)->toBe('61');
     }
+});
+
+test('TextReader::read skips Documents::content and RichTextBlockExtractor::extract when projection is fresh', function (): void {
+    Config::set('vaulter-ai-documents.default_tenant_id', '61');
+
+    $actor = TestActor::query()->create(['name' => 'Fast Reader', 'email' => 'fastreader@example.test']);
+    $owner = TestOwner::query()->create(['name' => 'Org Fast']);
+    $drive = Vaulter::drive($owner)->asSystem('seed');
+    $drive->access()->grant($drive->root()->id, new GrantInput(Subject::ofModel($actor), RoleRegistry::READER));
+
+    $doc = Documents::in($drive)->create('Fast Doc', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [[
+            'type' => 'paragraph',
+            'attrs' => ['blockId' => 'p-fast'],
+            'content' => [['type' => 'text', 'text' => 'Projected paragraph content']],
+        ]],
+    ]);
+
+    $office = $this->app->make(Office::class);
+    $ctx = new CallContext('61', 'default', 'user/'.$actor->getKey(), 'documents', '1', $drive->snapshot()->id, $actor);
+
+    $contentQueries = 0;
+    $this->app->make(VaulterDatabase::class)->connection()->listen(static function (QueryExecuted $query) use (&$contentQueries): void {
+        if (str_contains($query->sql, 'document_revision_payloads')) {
+            $contentQueries++;
+        }
+    });
+
+    $res = $office->handle($ctx, new OfficeRequest(1, OfficeOperation::Read, (object) [
+        'resource_id' => $doc->id,
+        'selector' => (object) ['kind' => 'text_block', 'block_id' => 'p-fast'],
+    ]));
+
+    expect($res->ok)->toBeTrue()
+        ->and($res->result?->data->block_id)->toBe('p-fast')
+        ->and($contentQueries)->toBe(0);
 });

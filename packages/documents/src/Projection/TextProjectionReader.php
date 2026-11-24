@@ -98,7 +98,7 @@ final readonly class TextProjectionReader
             $generation = QueryRecord::int($headRow, 'source_generation');
             $position = QueryRecord::int($headRow, 'source_position');
             $buildId = QueryRecord::str($headRow, 'build_id');
-            if ($cursorData !== null && ($cursorData['build_id'] !== $buildId || $cursorData['generation'] !== $generation)) {
+            if ($cursorData !== null && ($cursorData['build_id'] !== $buildId || $cursorData['generation'] !== $generation || $cursorData['position'] !== $position)) {
                 throw OfficeException::cursorExpired('Projection build changed; restart outline read.');
             }
 
@@ -157,7 +157,7 @@ final readonly class TextProjectionReader
         $position = QueryRecord::int($firstRow, 'source_position');
         $buildId = QueryRecord::str($firstRow, 'build_id');
 
-        if ($cursorData !== null && ($cursorData['build_id'] !== $buildId || $cursorData['generation'] !== $generation)) {
+        if ($cursorData !== null && ($cursorData['build_id'] !== $buildId || $cursorData['generation'] !== $generation || $cursorData['position'] !== $position)) {
             throw OfficeException::cursorExpired('Projection build changed; restart outline read.');
         }
 
@@ -184,7 +184,7 @@ final readonly class TextProjectionReader
         }
 
         $nextCursor = $hasMore
-            ? $this->encodeCursor($context, $resourceId, $queryString, $generation, $buildId, $lastOrdinal)
+            ? $this->encodeCursor($context, $resourceId, $queryString, $generation, $position, $buildId, $lastOrdinal)
             : null;
 
         return [
@@ -395,6 +395,7 @@ final readonly class TextProjectionReader
         string $resourceId,
         string $query,
         int $generation,
+        int $position,
         string $buildId,
         int $lastOrdinal,
     ): string {
@@ -405,6 +406,7 @@ final readonly class TextProjectionReader
         $payload = $this->b64uEncode(json_encode([
             'v' => 1,
             'g' => $generation,
+            'p' => $position,
             'b' => $buildId,
             'o' => $lastOrdinal,
             'q' => hash('sha256', $query),
@@ -417,7 +419,7 @@ final readonly class TextProjectionReader
     }
 
     /**
-     * @return array{generation: int, build_id: string, last_ordinal: int}
+     * @return array{generation: int, position: int, build_id: string, last_ordinal: int}
      */
     private function decodeCursor(
         CallContext $context,
@@ -452,6 +454,7 @@ final readonly class TextProjectionReader
             ! is_array($data)
             || ($data['v'] ?? null) !== 1
             || ! is_int($data['g'] ?? null)
+            || ! is_int($data['p'] ?? null)
             || ! is_string($data['b'] ?? null)
             || $data['b'] === ''
             || ! is_int($data['o'] ?? null)
@@ -465,6 +468,7 @@ final readonly class TextProjectionReader
 
         return [
             'generation' => $data['g'],
+            'position' => $data['p'],
             'build_id' => $data['b'],
             'last_ordinal' => $data['o'],
         ];

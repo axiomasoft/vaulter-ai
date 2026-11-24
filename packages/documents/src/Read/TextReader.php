@@ -92,30 +92,48 @@ final readonly class TextReader implements ResourceReader
         $actingDrive = $drive->actingAs($actor);
 
         try {
-            $snapshot = $this->documents->in($actingDrive)->content($resource->resourceId);
+            $meta = $this->documents->in($actingDrive)->metadata($resource->resourceId);
         } catch (NodeNotFoundException|PermissionDeniedException|DriveArchivedException) {
             throw OfficeException::resourceUnavailable();
-        } catch (DocumentStatePendingException) {
-            throw OfficeException::projectionPending();
-        } catch (DocumentTypeUnavailableException|DocumentContentDegradedException) {
+        } catch (DocumentTypeUnavailableException) {
             throw OfficeException::unsupportedContent();
         }
 
-        if ($snapshot->type !== 'vaulter/rich-text' || ! $snapshot->content instanceof TipTapContent) {
+        if ($meta->type !== 'vaulter/rich-text') {
             throw OfficeException::unsupportedContent('Document type does not support addressable rich text.');
         }
 
-        // Validate document block identity invariants on read (never writing).
-        $liveBlocks = $this->extractor->extract($snapshot->content->toArray());
+        $loadLiveSnapshotAndBlocks = function () use ($actingDrive, $resource): array {
+            try {
+                $snapshot = $this->documents->in($actingDrive)->content($resource->resourceId);
+            } catch (NodeNotFoundException|PermissionDeniedException|DriveArchivedException) {
+                throw OfficeException::resourceUnavailable();
+            } catch (DocumentStatePendingException) {
+                throw OfficeException::projectionPending();
+            } catch (DocumentTypeUnavailableException|DocumentContentDegradedException) {
+                throw OfficeException::unsupportedContent();
+            }
+
+            if ($snapshot->type !== 'vaulter/rich-text' || ! $snapshot->content instanceof TipTapContent) {
+                throw OfficeException::unsupportedContent('Document type does not support addressable rich text.');
+            }
+
+            // Validate document block identity invariants on read (never writing).
+            $liveBlocks = $this->extractor->extract($snapshot->content->toArray());
+
+            return [$snapshot, $liveBlocks];
+        };
 
         $live = $this->live ?? $this->registry?->ownerFor(ReplaceExact::COMMAND, 'journal');
         if ($live instanceof LiveTextJournal) {
             $liveReceipt = $afterReceipt === null ? null : $live->receiptMarker($context, $resource, $afterReceipt);
-            if ($liveReceipt !== null && $liveReceipt->generation !== $snapshot->epoch) {
+            if ($liveReceipt !== null && $liveReceipt->generation !== $meta->generation) {
                 throw OfficeException::generationChanged();
             }
-            $projection = $live->projected($context, $resource, $snapshot->epoch, $snapshot->stateVersion);
+            $projection = $live->projected($context, $resource, $meta->generation, $meta->stateVersion);
             if ($projection !== null && ($afterReceipt === null || $liveReceipt !== null)) {
+                [$snapshot, $liveBlocks] = $loadLiveSnapshotAndBlocks();
+
                 return $this->serveFromLiveSnapshot($context, $snapshot, $liveBlocks, $kind, $selector, $limit, $cursor, $liveReceipt, $projection);
             }
             if ($liveReceipt !== null) {
@@ -124,7 +142,7 @@ final readonly class TextReader implements ResourceReader
         }
 
         $scope = $this->scopes->forContext($context, $driveId);
-        $documentKey = Identity::key($snapshot->documentId);
+        $documentKey = Identity::key($meta->documentId);
         if ($documentKey === null) {
             throw OfficeException::resourceUnavailable();
         }
@@ -136,10 +154,10 @@ final readonly class TextReader implements ResourceReader
                 throw OfficeException::resourceUnavailable();
             }
             $requiredMarker = $receipt['marker'];
-            if ($snapshot->epoch > $requiredMarker->generation) {
+            if ($meta->generation > $requiredMarker->generation) {
                 throw OfficeException::generationChanged('Document generation moved after receipt.');
             }
-            if ($snapshot->epoch < $requiredMarker->generation || $snapshot->stateVersion < $requiredMarker->position) {
+            if ($meta->generation < $requiredMarker->generation || $meta->stateVersion < $requiredMarker->position) {
                 throw OfficeException::temporarilyUnavailable();
             }
         }
@@ -147,8 +165,10 @@ final readonly class TextReader implements ResourceReader
         $head = $this->projection->head($scope['tenant_id'], $scope['project_scope'], $documentKey);
         $useLiveFallback = (bool) $this->config->get('vaulter-ai-documents.read.live_fallback_on_lag', false);
 
-        if ($head === null || $head['generation'] !== $snapshot->epoch) {
+        if ($head === null || $head['generation'] !== $meta->generation) {
             if ($useLiveFallback) {
+                [$snapshot, $liveBlocks] = $loadLiveSnapshotAndBlocks();
+
                 return $this->serveFromLiveSnapshot($context, $snapshot, $liveBlocks, $kind, $selector, $limit, $cursor, $requiredMarker);
             }
             throw OfficeException::projectionPending();
@@ -156,12 +176,14 @@ final readonly class TextReader implements ResourceReader
 
         if ($requiredMarker !== null && $head['position'] < $requiredMarker->position) {
             if ($useLiveFallback) {
+                [$snapshot, $liveBlocks] = $loadLiveSnapshotAndBlocks();
+
                 return $this->serveFromLiveSnapshot($context, $snapshot, $liveBlocks, $kind, $selector, $limit, $cursor, $requiredMarker);
             }
             throw OfficeException::projectionPending();
         }
 
-        return $this->serveFromProjection($context, $scope['tenant_id'], $scope['project_scope'], $documentKey, $resource, $snapshot, $kind, $selector, $limit, $cursor, $requiredMarker);
+        return $this->serveFromProjection($context, $scope['tenant_id'], $scope['project_scope'], $documentKey, $resource, $meta->schemaVersion, $kind, $selector, $limit, $cursor, $requiredMarker);
     }
 
     private function serveFromProjection(
@@ -170,14 +192,14 @@ final readonly class TextReader implements ResourceReader
         string $projectScope,
         int|string $documentKey,
         ResourceEntry $resource,
-        DocumentSnapshot $snapshot,
+        int $schemaVersion,
         string $kind,
         stdClass $selector,
         ?int $limit,
         ?string $cursor,
         ?Marker $requiredMarker,
     ): ReadPage {
-        $schemaRevision = (string) $snapshot->schemaVersion;
+        $schemaRevision = (string) $schemaVersion;
 
         if ($kind === 'text_outline') {
             $query = property_exists($selector, 'query') && is_string($selector->query) ? $selector->query : null;
@@ -263,7 +285,7 @@ final readonly class TextReader implements ResourceReader
             selectorDependencies: [
                 'block_id' => $blockId,
                 'formatted_node' => $found['block'],
-                'schema_version' => $snapshot->schemaVersion,
+                'schema_version' => $schemaVersion,
             ],
         );
     }

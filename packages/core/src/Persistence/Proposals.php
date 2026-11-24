@@ -100,32 +100,92 @@ final readonly class Proposals
         ?string $decision = null,
         int $limit = 50,
     ): array {
-        $bounded = max(1, min(100, $limit));
+        return $this->db->transaction(function () use ($viewer, $resourceId, $decision, $limit): array {
+            $headers = $this->listHeadersInScopeInTransaction($viewer, $resourceId, $decision, $limit);
 
-        return $this->db->transaction(function () use ($viewer, $resourceId, $decision, $bounded): array {
-            $query = $this->db->query('ai_proposals')
-                ->where('tenant_id', $viewer->tenantId)
-                ->where('project_scope', $viewer->projectScope);
-            if ($resourceId !== null && $resourceId !== '') {
-                $query->where('resource_id', $resourceId);
-            }
-            if ($decision !== null && $decision !== '') {
-                $query->where('decision', $decision);
-            }
-
-            $rows = $query
-                ->orderByDesc('created_at')
-                ->orderByDesc('proposal_id')
-                ->limit($bounded)
-                ->get();
-
-            $result = [];
-            foreach ($rows as $row) {
-                $result[] = $this->hydrateRow($row);
-            }
-
-            return $result;
+            return $this->hydrateFromHeadersInTransaction($headers);
         }, $viewer->tenantId);
+    }
+
+    /**
+     * Lightweight header-only listing (no v_ai_proposal_payloads query or AES-GCM decryption).
+     *
+     * @return list<object>
+     */
+    public function listHeadersInScope(
+        CallContext $viewer,
+        ?string $resourceId = null,
+        ?string $decision = null,
+        int $limit = 50,
+    ): array {
+        return $this->db->transaction(
+            fn (): array => $this->listHeadersInScopeInTransaction($viewer, $resourceId, $decision, $limit),
+            $viewer->tenantId,
+        );
+    }
+
+    /**
+     * @return list<object>
+     */
+    public function listHeadersInScopeInTransaction(
+        CallContext $viewer,
+        ?string $resourceId = null,
+        ?string $decision = null,
+        int $limit = 50,
+    ): array {
+        $bounded = max(1, min(100, $limit));
+        $query = $this->db->query('ai_proposals')
+            ->where('tenant_id', $viewer->tenantId)
+            ->where('project_scope', $viewer->projectScope);
+        if ($resourceId !== null && $resourceId !== '') {
+            $query->where('resource_id', $resourceId);
+        }
+        if ($decision !== null && $decision !== '') {
+            $query->where('decision', $decision);
+        }
+
+        return array_values($query
+            ->orderByDesc('created_at')
+            ->orderByDesc('proposal_id')
+            ->limit($bounded)
+            ->get()
+            ->all());
+    }
+
+    /**
+     * Batch-hydrate StoredProposals from lightweight ai_proposals header rows.
+     *
+     * @param  list<object>  $headerRows
+     * @return list<StoredProposal>
+     */
+    public function hydrateFromHeadersInTransaction(array $headerRows): array
+    {
+        if ($headerRows === []) {
+            return [];
+        }
+
+        $proposalIds = [];
+        foreach ($headerRows as $row) {
+            $proposalIds[] = QueryRecord::str($row, 'proposal_id');
+        }
+
+        $payloadsById = [];
+        foreach (array_chunk(array_values(array_unique($proposalIds)), 500) as $chunk) {
+            $payloadRows = $this->db->query('ai_proposal_payloads')
+                ->whereIn('proposal_id', $chunk)
+                ->get();
+            foreach ($payloadRows as $payloadRow) {
+                $payloadsById[QueryRecord::str($payloadRow, 'proposal_id')] = $payloadRow;
+            }
+        }
+
+        $result = [];
+        foreach ($headerRows as $row) {
+            $proposalId = QueryRecord::str($row, 'proposal_id');
+            $result[] = $this->buildStoredProposal($row, $payloadsById[$proposalId] ?? null);
+        }
+
+        return $result;
     }
 
     /** Use the caller's CORE transaction. Lock only the decision row, not its nullable payload. */
@@ -167,6 +227,14 @@ final readonly class Proposals
     private function hydrateRow(object $row): StoredProposal
     {
         $proposalId = QueryRecord::str($row, 'proposal_id');
+        $payload = $this->db->query('ai_proposal_payloads')->where('proposal_id', $proposalId)->first();
+
+        return $this->buildStoredProposal($row, $payload);
+    }
+
+    private function buildStoredProposal(object $row, ?object $payload): StoredProposal
+    {
+        $proposalId = QueryRecord::str($row, 'proposal_id');
         $tenantId = QueryRecord::str($row, 'tenant_id');
         $projectScope = QueryRecord::str($row, 'project_scope');
         $effectiveSubject = QueryRecord::str($row, 'effective_subject');
@@ -179,7 +247,6 @@ final readonly class Proposals
         ];
 
         $digest = bin2hex($this->db->decodeBinary(QueryRecord::raw($row, 'digest')));
-        $payload = $this->db->query('ai_proposal_payloads')->where('proposal_id', $proposalId)->first();
         $decoded = [];
         if ($payload !== null) {
             try {
