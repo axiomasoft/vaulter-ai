@@ -64,6 +64,7 @@ final readonly class TextVerifier
             throw new OfficeException(ErrorCode::EvidenceUnavailable);
         }
 
+        $operation = is_string($evidence['operation'] ?? null) ? $evidence['operation'] : 'replace_exact';
         $block = TextReplacement::node($evidence['block'] ?? null);
         if ($mode === 'current') {
             $snapshot = $this->access->content($context, $resource);
@@ -88,6 +89,23 @@ final readonly class TextVerifier
                 }
                 $block = [];
             }
+        }
+
+        if ($operation === 'delete_block') {
+            $absent = ($evidence['deleted_block_absent'] ?? false) === true && $block === [];
+            $actualText = $absent ? '' : TextReplacement::runs($block)[0];
+            $checks = [
+                (object) ['name' => 'text_exact', 'passed' => $absent, 'actual' => $actualText],
+                (object) ['name' => 'marks', 'passed' => $absent, 'actual' => []],
+            ];
+
+            return (object) [
+                'receipt_id' => $receiptId,
+                'mode' => $mode,
+                'outcome' => $absent ? 'passed' : 'failed',
+                'marker' => $marker->toStdClass(),
+                'checks' => $checks,
+            ];
         }
 
         $checks = $this->checks($block, $evidence);

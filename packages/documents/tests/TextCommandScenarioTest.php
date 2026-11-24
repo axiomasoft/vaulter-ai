@@ -184,3 +184,99 @@ test('the Python OfficeClient replays the same text fixture over HTTP', function
         }
     }
 })->with('text office scenarios');
+
+test('text.insert_block@1 and text.delete_block@1 execute atomically with blockId assignment and receipt verification', function (): void {
+    $fixture = new TextCommandFixture($this->app);
+    $fixture->authorizeHttp();
+    $validator = $this->app->make(WireValidator::class);
+    $headers = ['Authorization' => 'Bearer scenario-test-token'];
+
+    $postOp = function (string $operation, array $input) use ($headers, $validator): array {
+        $res = $this->postJson('/api/vaulter-ai/v1/operations', [
+            'version' => 1,
+            'operation' => $operation,
+            'input' => $input,
+        ], $headers);
+        expect($res->status())->toBe(200, $res->getContent());
+        $json = $res->json();
+        expect($validator->isValidMessage(json_decode(json_encode($json, JSON_THROW_ON_ERROR), false, 512, JSON_THROW_ON_ERROR)))->toBeTrue();
+
+        return $json;
+    };
+
+    // 1. Read anchor block p42 and insert a new paragraph block after it.
+    $readAnchor = $postOp('office.read', [
+        'resource_id' => $fixture->node->id,
+        'selector' => ['kind' => 'text_block', 'block_id' => 'p42'],
+    ]);
+    $prepInsert = $postOp('office.prepare', [
+        'resource_id' => $fixture->node->id,
+        'command' => 'text.insert_block@1',
+        'read_token' => $readAnchor['result']['read_token'],
+        'arguments' => [
+            'anchor_block_id' => 'p42',
+            'position' => 'after',
+            'block_type' => 'paragraph',
+            'text' => 'Inserted block text.',
+            'marks' => ['bold'],
+        ],
+    ]);
+    $newBlockId = $prepInsert['result']['targets'][1] ?? null;
+    expect($newBlockId)->toBeString()->not->toBe('');
+
+    $commitInsert = $postOp('office.commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $prepInsert['result']['proposal_id'],
+        'digest' => $prepInsert['result']['digest'],
+        'command_id' => 'cmd-insert-1',
+    ]);
+    expect($commitInsert['result']['state'])->toBe('committed');
+
+    foreach (['at_commit', 'current'] as $mode) {
+        $verifyInsert = $postOp('office.verify', [
+            'resource_id' => $fixture->node->id,
+            'receipt_id' => $commitInsert['result']['receipt_id'],
+            'mode' => $mode,
+        ]);
+        expect($verifyInsert['result']['outcome'])->toBe('passed');
+    }
+
+    $blocks = $fixture->snapshot()->content->toArray()['content'] ?? [];
+    $found = array_values(array_filter($blocks, static fn (array $b): bool => ($b['attrs']['blockId'] ?? null) === $newBlockId));
+    expect($found)->toHaveCount(1)
+        ->and($found[0]['content'][0]['text'] ?? null)->toBe('Inserted block text.');
+
+    // 2. Read the newly inserted block and delete it by blockId.
+    $readNew = $postOp('office.read', [
+        'resource_id' => $fixture->node->id,
+        'selector' => ['kind' => 'text_block', 'block_id' => $newBlockId],
+    ]);
+    $prepDelete = $postOp('office.prepare', [
+        'resource_id' => $fixture->node->id,
+        'command' => 'text.delete_block@1',
+        'read_token' => $readNew['result']['read_token'],
+        'arguments' => [
+            'block_id' => $newBlockId,
+        ],
+    ]);
+    $commitDelete = $postOp('office.commit', [
+        'resource_id' => $fixture->node->id,
+        'proposal_id' => $prepDelete['result']['proposal_id'],
+        'digest' => $prepDelete['result']['digest'],
+        'command_id' => 'cmd-delete-1',
+    ]);
+    expect($commitDelete['result']['state'])->toBe('committed');
+
+    foreach (['at_commit', 'current'] as $mode) {
+        $verifyDelete = $postOp('office.verify', [
+            'resource_id' => $fixture->node->id,
+            'receipt_id' => $commitDelete['result']['receipt_id'],
+            'mode' => $mode,
+        ]);
+        expect($verifyDelete['result']['outcome'])->toBe('passed');
+    }
+
+    $afterDeleteBlocks = $fixture->snapshot()->content->toArray()['content'] ?? [];
+    $remaining = array_values(array_filter($afterDeleteBlocks, static fn (array $b): bool => ($b['attrs']['blockId'] ?? null) === $newBlockId));
+    expect($remaining)->toBe([]);
+});

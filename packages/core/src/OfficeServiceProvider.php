@@ -10,6 +10,7 @@ use Illuminate\Database\DatabaseManager;
 use Illuminate\Support\ServiceProvider;
 use Override;
 use Vaulter\Ai\Core\Actions\ResolveProposal;
+use Vaulter\Ai\Core\Console\RotateProviderSecrets;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
 use Vaulter\Ai\Core\Contracts\Clock;
 use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
@@ -27,6 +28,7 @@ use Vaulter\Ai\Core\Operations\Search;
 use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
 use Vaulter\Ai\Core\Persistence\ConfigHostPolicy;
 use Vaulter\Ai\Core\Persistence\ConfigProviderSecretStore;
+use Vaulter\Ai\Core\Persistence\DatabaseProviderSecretStore;
 use Vaulter\Ai\Core\Persistence\DefaultProposalApprovalPolicy;
 use Vaulter\Ai\Core\Persistence\DefaultTransactionRunner;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
@@ -89,7 +91,8 @@ final class OfficeServiceProvider extends ServiceProvider
         $this->app->singleton(HostPolicy::class, ConfigHostPolicy::class);
         $this->app->singletonIf(ProposalApprovalPolicy::class, DefaultProposalApprovalPolicy::class);
         $this->app->singletonIf(ConfigProviderSecretStore::class);
-        $this->app->singletonIf(ProviderSecretStore::class, ConfigProviderSecretStore::class);
+        $this->app->singletonIf(DatabaseProviderSecretStore::class);
+        $this->app->singletonIf(ProviderSecretStore::class, DatabaseProviderSecretStore::class);
         $this->app->singletonIf(RegistryCommandWriteCapability::class);
         $this->app->singletonIf(CommandWriteCapability::class, RegistryCommandWriteCapability::class);
         $this->app->singleton(CallContextResolver::class, NullCallContextResolver::class);
@@ -119,6 +122,10 @@ final class OfficeServiceProvider extends ServiceProvider
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
         $this->loadRoutesFrom(__DIR__.'/../routes/api.php');
         $this->loadRoutesFrom(__DIR__.'/../routes/workspace.php');
+
+        if ($this->app->runningInConsole()) {
+            $this->commands([RotateProviderSecrets::class]);
+        }
 
         $this->app->booted(function (): void {
             $this->app->make(OfficeRegistry::class)->freeze();

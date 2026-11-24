@@ -19,6 +19,8 @@ use Vaulter\Ai\Core\Data\PreparedPlan;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Protocol\RequestFingerprint;
+use Vaulter\Ai\Documents\Commands\DeleteBlock;
+use Vaulter\Ai\Documents\Commands\InsertBlock;
 use Vaulter\Ai\Documents\Commands\ReplaceExact;
 use Vaulter\Ai\Documents\Host\TextDocumentAccess;
 use Vaulter\Ai\Documents\Persistence\TextCommands;
@@ -55,7 +57,8 @@ final readonly class SingleTextOwner implements CommandOwner, TextVerificationEv
 
     public function supports(string $command, ?string $writeMode = null): bool
     {
-        return $command === ReplaceExact::COMMAND && ($writeMode === null || $writeMode === 'snapshot');
+        return in_array($command, [ReplaceExact::COMMAND, InsertBlock::COMMAND, DeleteBlock::COMMAND], true)
+            && ($writeMode === null || $writeMode === 'snapshot');
     }
 
     public function commit(CommandScope $scope, PreparedPlan $plan): CommandOutcome
@@ -106,26 +109,14 @@ final readonly class SingleTextOwner implements CommandOwner, TextVerificationEv
             if (! $state->content instanceof TipTapContent) {
                 throw OfficeException::unsupportedContent();
             }
-            $blockId = $conditions['block_id'] ?? null;
-            $expected = $conditions['expected'] ?? null;
-            $replacement = $conditions['replacement'] ?? null;
-            if (! is_string($blockId) || ! is_string($expected) || $expected === '' || ! is_string($replacement)) {
-                throw OfficeException::preconditionFailed();
-            }
-
             $document = $state->content->toArray();
             $protection = ContentProtectionPolicy::resolve($scope->context);
-            RichTextBlockExtractor::assertBlockEditable($document, $blockId, $protection);
-            [$path, $block] = TextReplacement::find($document, $blockId);
-            if (TextReplacement::identity($block) !== ($conditions['block_identity'] ?? null)) {
-                throw OfficeException::preconditionFailed('target_changed');
-            }
-            $target = TextReplacement::target($block, $expected);
-            $applied = TextReplacement::apply($document, $path, $block, $target, $expected, $replacement);
-            if ($applied['evidence']['start_utf16'] !== ($conditions['start_utf16'] ?? null)
-                || TextReplacement::length($expected) !== ($conditions['length_utf16'] ?? null)) {
-                throw OfficeException::preconditionFailed('target_changed');
-            }
+            $applied = match ($plan->command) {
+                ReplaceExact::COMMAND => $this->applyReplaceExact($document, $conditions, $protection),
+                InsertBlock::COMMAND => $this->applyInsertBlock($document, $conditions, $protection),
+                DeleteBlock::COMMAND => $this->applyDeleteBlock($document, $conditions, $protection),
+                default => throw OfficeException::unsupportedContent(),
+            };
             $content = $type->codec()->decode($applied['document'], $state->schemaVersion);
         } catch (OfficeException $failure) {
             if ($failure->errorCode === ErrorCode::ProjectionPending) {
@@ -142,17 +133,170 @@ final readonly class SingleTextOwner implements CommandOwner, TextVerificationEv
         $marker = new Marker($after->generation, $after->position);
         $outcome = new CommandOutcome($scope->commandId, 'committed', $receipt, $marker);
         $this->commands->record($db, $scope, $plan->proposalId, $fingerprint, $after->documentId, $outcome);
-        [, $committedBlock] = TextReplacement::find($after->content->toArray(), $blockId);
-        $this->verifier->record($db, $scope, $receipt, $marker, $applied['evidence'] + [
-            'block_id' => $blockId,
-            'block' => $committedBlock,
-        ]);
+
+        $evidence = $applied['evidence'];
+        $rawBlockId = $evidence['block_id'] ?? '';
+        $targetBlockId = is_string($rawBlockId) ? $rawBlockId : '';
+        if ($plan->command === DeleteBlock::COMMAND) {
+            if (in_array($targetBlockId, TextReplacement::extractBlockIds($after->content->toArray()), true)) {
+                throw OfficeException::preconditionFailed('delete_failed');
+            }
+            $evidence['block'] = [];
+        } else {
+            [, $committedBlock] = TextReplacement::find($after->content->toArray(), $targetBlockId);
+            $evidence['block'] = $committedBlock;
+        }
+
+        $this->verifier->record($db, $scope, $receipt, $marker, $evidence);
         $this->events->record(new TextCommandCommitted(
             new EventScope($drive->operation->tenant->id, $drive->operation->scope->id, $scope->context->profile),
             $scope->resourceId, $scope->commandId, $receipt, $marker, $drive,
         ));
 
         return $outcome;
+    }
+
+    /**
+     * @param  array<string, mixed>  $document
+     * @param  array<string, mixed>  $conditions
+     * @return array{document: array<string, mixed>, evidence: array<string, mixed>}
+     */
+    private function applyReplaceExact(array $document, array $conditions, ContentProtectionPolicy $protection): array
+    {
+        $blockId = $conditions['block_id'] ?? null;
+        $expected = $conditions['expected'] ?? null;
+        $replacement = $conditions['replacement'] ?? null;
+        if (! is_string($blockId) || ! is_string($expected) || $expected === '' || ! is_string($replacement)) {
+            throw OfficeException::preconditionFailed();
+        }
+
+        RichTextBlockExtractor::assertBlockEditable($document, $blockId, $protection);
+        [$path, $block] = TextReplacement::find($document, $blockId);
+        if (TextReplacement::identity($block) !== ($conditions['block_identity'] ?? null)) {
+            throw OfficeException::preconditionFailed('target_changed');
+        }
+        $target = TextReplacement::target($block, $expected);
+        $applied = TextReplacement::apply($document, $path, $block, $target, $expected, $replacement);
+        if ($applied['evidence']['start_utf16'] !== ($conditions['start_utf16'] ?? null)
+            || TextReplacement::length($expected) !== ($conditions['length_utf16'] ?? null)) {
+            throw OfficeException::preconditionFailed('target_changed');
+        }
+
+        $applied['evidence']['block_id'] = $blockId;
+
+        return $applied;
+    }
+
+    /**
+     * @param  array<string, mixed>  $document
+     * @param  array<string, mixed>  $conditions
+     * @return array{document: array<string, mixed>, evidence: array<string, mixed>}
+     */
+    private function applyInsertBlock(array $document, array $conditions, ContentProtectionPolicy $protection): array
+    {
+        $anchorBlockId = $conditions['anchor_block_id'] ?? null;
+        $anchorIdentity = $conditions['anchor_identity'] ?? null;
+        $position = $conditions['position'] ?? null;
+        $newBlockId = $conditions['new_block_id'] ?? null;
+        $blockType = $conditions['block_type'] ?? null;
+        $text = $conditions['text'] ?? null;
+        $level = $conditions['level'] ?? null;
+        $rawMarks = $conditions['marks'] ?? [];
+
+        if (! is_string($anchorBlockId) || $anchorBlockId === ''
+            || ! is_string($anchorIdentity) || $anchorIdentity === ''
+            || ! is_string($position) || ! in_array($position, ['before', 'after'], true)
+            || ! is_string($newBlockId) || $newBlockId === ''
+            || ! is_string($blockType) || ! in_array($blockType, ['paragraph', 'heading'], true)
+            || ! is_string($text)
+            || ($level !== null && ! is_int($level))
+            || ! is_array($rawMarks)) {
+            throw OfficeException::preconditionFailed();
+        }
+
+        if (in_array($newBlockId, TextReplacement::extractBlockIds($document), true)) {
+            throw OfficeException::preconditionFailed('block_id_exists');
+        }
+
+        $marks = array_values(array_filter($rawMarks, is_string(...)));
+        $newBlock = TextReplacement::buildBlock($newBlockId, $blockType, $text, $level, $marks);
+
+        if (! $protection->isEmpty()) {
+            $found = RichTextBlockExtractor::findBlockWithAncestors($document, $anchorBlockId);
+            if ($found !== null) {
+                if ($protection->modeForPath([...$found['ancestors'], $found['rawBlock']]) === 'hidden') {
+                    throw OfficeException::resourceUnavailable();
+                }
+                if ($protection->modeForPath($found['ancestors']) === 'read_only') {
+                    throw OfficeException::unsupportedContent('content_protected');
+                }
+                $newMode = $protection->modeForPath([...$found['ancestors'], $newBlock]);
+                if ($newMode === 'hidden') {
+                    throw OfficeException::resourceUnavailable();
+                }
+                if ($newMode === 'read_only') {
+                    throw OfficeException::unsupportedContent('content_protected');
+                }
+            }
+        }
+
+        [$anchorPath, $anchorBlock] = TextReplacement::find($document, $anchorBlockId);
+        if (TextReplacement::identity($anchorBlock) !== $anchorIdentity) {
+            throw OfficeException::preconditionFailed('target_changed');
+        }
+
+        $markObjects = $text === ''
+            ? []
+            : array_map(static fn (string $mark): array => ['type' => $mark], $marks);
+
+        return [
+            'document' => TextReplacement::insertRelative($document, $anchorPath, $position, $newBlock),
+            'evidence' => [
+                'operation' => 'insert_block',
+                'block_id' => $newBlockId,
+                'anchor_block_id' => $anchorBlockId,
+                'position' => $position,
+                'start_utf16' => 0,
+                'length_utf16' => TextReplacement::length($text),
+                'replacement' => $text,
+                'marks' => $markObjects,
+                'committed_text' => $text,
+            ],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $document
+     * @param  array<string, mixed>  $conditions
+     * @return array{document: array<string, mixed>, evidence: array<string, mixed>}
+     */
+    private function applyDeleteBlock(array $document, array $conditions, ContentProtectionPolicy $protection): array
+    {
+        $blockId = $conditions['block_id'] ?? null;
+        $blockIdentity = $conditions['block_identity'] ?? null;
+        if (! is_string($blockId) || $blockId === '' || ! is_string($blockIdentity) || $blockIdentity === '') {
+            throw OfficeException::preconditionFailed();
+        }
+
+        RichTextBlockExtractor::assertBlockEditable($document, $blockId, $protection);
+        [$path, $block] = TextReplacement::find($document, $blockId);
+        if (TextReplacement::identity($block) !== $blockIdentity) {
+            throw OfficeException::preconditionFailed('target_changed');
+        }
+
+        return [
+            'document' => TextReplacement::deleteAt($document, $path),
+            'evidence' => [
+                'operation' => 'delete_block',
+                'block_id' => $blockId,
+                'deleted_block_absent' => true,
+                'start_utf16' => 0,
+                'length_utf16' => 0,
+                'replacement' => '',
+                'marks' => [],
+                'committed_text' => '',
+            ],
+        ];
     }
 
     public function status(CommandScope $scope): CommandOutcome

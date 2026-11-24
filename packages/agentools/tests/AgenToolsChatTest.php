@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use AgenTools\Contracts\LlmPort as AgenToolsSdkLlmPort;
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\DB;
@@ -17,6 +18,7 @@ use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Contracts\RunContextResolver;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandScope;
+use Vaulter\Ai\Core\Data\HostProfile;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
@@ -258,4 +260,122 @@ test('AgenTools requires a terminal HTTP response and rejects tools after the ad
         }
     });
     $assertBudget();
+});
+
+test('AgenToolsLlmPort parses OpenAI /chat/completions and Anthropic /v1/messages SSE formats', function (): void {
+    $fixture = new TextCommandFixture($this->app);
+    Config::set('vaulter-ai.secret_store.connections', [
+        'openai_chat' => [
+            'driver' => 'openai',
+            'wire_format' => 'chat_completions',
+            'key' => 'sk-chat-comp-secret',
+            'model' => 'gpt-4o-mini',
+            'base_url' => 'https://llm-chat.local.test/v1',
+        ],
+        'anthropic_msg' => [
+            'driver' => 'anthropic',
+            'key' => 'sk-anth-msg-secret',
+            'model' => 'claude-3-5-sonnet-latest',
+            'base_url' => 'https://llm-anth.local.test',
+        ],
+    ]);
+
+    Http::fake([
+        'https://llm-chat.local.test/v1/chat/completions' => Http::sequence()
+            ->push(
+                implode("\n\n", [
+                    'data: {"choices":[{"delta":{"content":"Hi "}}]}',
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"office_read","arguments":"{\"id\":"}}]}}]}',
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"n1\"}"}}]},"finish_reason":"tool_calls"}]}',
+                ])."\n\n",
+                200,
+                ['Content-Type' => 'text/event-stream'],
+            )
+            ->push(
+                implode("\n\n", [
+                    'data: {"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}',
+                    'data: [DONE]',
+                ])."\n\n",
+                200,
+                ['Content-Type' => 'text/event-stream'],
+            ),
+        'https://llm-anth.local.test/v1/messages' => Http::sequence()
+            ->push(
+                implode("\n\n", [
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello \"}}",
+                    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"office_read\"}}",
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"id\\\":\\\"n2\\\"}\"}}",
+                    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}",
+                ])."\n\n",
+                200,
+                ['Content-Type' => 'text/event-stream'],
+            )
+            ->push(
+                implode("\n\n", [
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"All set.\"}}",
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}",
+                ])."\n\n",
+                200,
+                ['Content-Type' => 'text/event-stream'],
+            ),
+    ]);
+
+    /** @var AgenToolsLlmPort $port */
+    $port = $this->app->make(LlmPort::class);
+    $catalog = $this->app->make(ChatTools::class)->catalog($fixture->context, [$fixture->node->id]);
+    $baseProfile = $this->app->make(HostPolicy::class)->profile($fixture->context);
+
+    $chatProfile = new HostProfile(
+        $baseProfile->name,
+        $baseProfile->executor,
+        'openai_chat',
+        $baseProfile->commands,
+        $baseProfile->approval,
+        $baseProfile->revision,
+    );
+
+    $chatToolEvents = iterator_to_array($port->stream([['role' => 'user', 'content' => 'hi']], $catalog, $chatProfile, static fn (): bool => false), false);
+    expect($chatToolEvents[0])->toBe(['type' => 'textDelta', 'text' => 'Hi '])
+        ->and($chatToolEvents[1])->toBe([
+            'type' => 'toolInputComplete',
+            'tool' => 'office_read',
+            'input' => '{"id":"n1"}',
+            'providerToolCallId' => 'call_1',
+        ]);
+
+    $chatTextEvents = iterator_to_array($port->stream([['role' => 'user', 'content' => 'hi']], $catalog, $chatProfile, static fn (): bool => false), false);
+    expect($chatTextEvents)->toBe([
+        ['type' => 'textDelta', 'text' => 'Done.'],
+        ['type' => 'finish'],
+    ]);
+
+    $anthProfile = new HostProfile(
+        $baseProfile->name,
+        $baseProfile->executor,
+        'anthropic_msg',
+        $baseProfile->commands,
+        $baseProfile->approval,
+        $baseProfile->revision,
+    );
+
+    $anthToolEvents = iterator_to_array($port->stream([['role' => 'user', 'content' => 'hi']], $catalog, $anthProfile, static fn (): bool => false), false);
+    expect($anthToolEvents[0])->toBe(['type' => 'textDelta', 'text' => 'Hello '])
+        ->and($anthToolEvents[1])->toBe([
+            'type' => 'toolInputComplete',
+            'tool' => 'office_read',
+            'input' => '{"id":"n2"}',
+            'providerToolCallId' => 'toolu_1',
+        ]);
+
+    $anthTextEvents = iterator_to_array($port->stream([['role' => 'user', 'content' => 'hi']], $catalog, $anthProfile, static fn (): bool => false), false);
+    expect($anthTextEvents)->toBe([
+        ['type' => 'textDelta', 'text' => 'All set.'],
+        ['type' => 'finish'],
+    ]);
+
+    Http::assertSent(static fn (Request $req): bool => $req->url() === 'https://llm-chat.local.test/v1/chat/completions'
+        && $req->hasHeader('Authorization', 'Bearer sk-chat-comp-secret'));
+    Http::assertSent(static fn (Request $req): bool => $req->url() === 'https://llm-anth.local.test/v1/messages'
+        && $req->hasHeader('x-api-key', 'sk-anth-msg-secret')
+        && $req->hasHeader('anthropic-version', '2023-06-01'));
 });

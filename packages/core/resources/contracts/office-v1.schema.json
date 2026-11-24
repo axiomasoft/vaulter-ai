@@ -24,7 +24,7 @@
         "office.verify"
       ]
     },
-    "command": {"enum": ["text.replace_exact@1", "sheet.fill_formula@1"]},
+    "command": {"enum": ["text.replace_exact@1", "text.insert_block@1", "text.delete_block@1", "sheet.fill_formula@1"]},
     "resourceType": {"enum": ["text", "sheet"]},
     "mode": {"enum": ["at_commit", "current"]},
     "cellValue": {"type": ["string", "number", "boolean", "null"]},
@@ -245,6 +245,31 @@
       },
       "additionalProperties": false
     },
+    "textInsertBlockArguments": {
+      "type": "object",
+      "required": ["anchor_block_id", "position", "block_type", "text"],
+      "properties": {
+        "anchor_block_id": {"$ref": "#/$defs/id"},
+        "position": {"enum": ["before", "after"]},
+        "block_type": {"enum": ["paragraph", "heading"]},
+        "text": {"type": "string"},
+        "level": {"type": "integer", "minimum": 1, "maximum": 6},
+        "marks": {
+          "type": "array",
+          "items": {"enum": ["bold", "italic", "strike", "code", "underline"]},
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "textDeleteBlockArguments": {
+      "type": "object",
+      "required": ["block_id"],
+      "properties": {
+        "block_id": {"$ref": "#/$defs/id"}
+      },
+      "additionalProperties": false
+    },
     "formulaExpression": {
       "type": "object",
       "required": ["op", "left_column_id", "right_column_id"],
@@ -314,6 +339,77 @@
           "type": "object",
           "required": ["command", "effect", "input_schema", "verification"],
           "properties": {
+            "command": {"const": "text.insert_block@1"},
+            "effect": {"const": "single_resource_write"},
+            "input_schema": {
+              "type": "object",
+              "required": ["type", "required", "properties", "additionalProperties"],
+              "properties": {
+                "type": {"const": "object"},
+                "additionalProperties": {"const": false},
+                "required": {
+                  "type": "array",
+                  "items": {"enum": ["anchor_block_id", "position", "block_type", "text"]},
+                  "uniqueItems": true,
+                  "minItems": 4,
+                  "maxItems": 4
+                },
+                "properties": {
+                  "type": "object",
+                  "required": ["anchor_block_id", "position", "block_type", "text", "level", "marks"],
+                  "properties": {
+                    "anchor_block_id": {"type": "object"},
+                    "position": {"type": "object"},
+                    "block_type": {"type": "object"},
+                    "text": {"type": "object"},
+                    "level": {"type": "object"},
+                    "marks": {"type": "object"}
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "verification": {"const": "text_and_marks"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["command", "effect", "input_schema", "verification"],
+          "properties": {
+            "command": {"const": "text.delete_block@1"},
+            "effect": {"const": "single_resource_write"},
+            "input_schema": {
+              "type": "object",
+              "required": ["type", "required", "properties", "additionalProperties"],
+              "properties": {
+                "type": {"const": "object"},
+                "additionalProperties": {"const": false},
+                "required": {
+                  "type": "array",
+                  "items": {"enum": ["block_id"]},
+                  "uniqueItems": true,
+                  "minItems": 1,
+                  "maxItems": 1
+                },
+                "properties": {
+                  "type": "object",
+                  "required": ["block_id"],
+                  "properties": {
+                    "block_id": {"type": "object"}
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "verification": {"const": "text_and_marks"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["command", "effect", "input_schema", "verification"],
+          "properties": {
             "command": {"const": "sheet.fill_formula@1"},
             "effect": {"const": "single_resource_write"},
             "input_schema": {
@@ -359,6 +455,28 @@
             "command": {"const": "text.replace_exact@1"},
             "read_token": {"$ref": "#/$defs/id"},
             "arguments": {"$ref": "#/$defs/textArguments"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["resource_id", "command", "read_token", "arguments"],
+          "properties": {
+            "resource_id": {"$ref": "#/$defs/id"},
+            "command": {"const": "text.insert_block@1"},
+            "read_token": {"$ref": "#/$defs/id"},
+            "arguments": {"$ref": "#/$defs/textInsertBlockArguments"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["resource_id", "command", "read_token", "arguments"],
+          "properties": {
+            "resource_id": {"$ref": "#/$defs/id"},
+            "command": {"const": "text.delete_block@1"},
+            "read_token": {"$ref": "#/$defs/id"},
+            "arguments": {"$ref": "#/$defs/textDeleteBlockArguments"}
           },
           "additionalProperties": false
         },

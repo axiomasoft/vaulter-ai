@@ -1,5 +1,5 @@
-"""Thin stdlib HTTP client for the Vaulter Office SDK v1 wire protocol."""
+"""Thin stdlib HTTP clients for the Vaulter Office SDK v1 wire protocol."""
 
-from .client import OfficeClient, OfficeProtocolError
+from .client import AsyncOfficeClient, OfficeClient, OfficeProtocolError
 
-__all__ = ["OfficeClient", "OfficeProtocolError"]
+__all__ = ["AsyncOfficeClient", "OfficeClient", "OfficeProtocolError"]

@@ -6,6 +6,7 @@ namespace Vaulter\Ai\Documents\Writing;
 
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Documents\Projection\RichTextBlockExtractor;
+use Vaulter\Documents\Content\TipTap\BlockIdentity;
 
 /**
  * @phpstan-type Node array<string, mixed>
@@ -203,5 +204,127 @@ final class TextReplacement
     public static function length(string $text): int
     {
         return intdiv(strlen(mb_convert_encoding($text, 'UTF-16LE', 'UTF-8')), 2);
+    }
+
+    /**
+     * @param  Node  $document
+     * @return list<string>
+     */
+    public static function extractBlockIds(array $document): array
+    {
+        return BlockIdentity::extractIds($document);
+    }
+
+    /**
+     * @param  Node  $document
+     * @return list<string>
+     */
+    public static function sectionPathFor(array $document, string $blockId): array
+    {
+        foreach ((new RichTextBlockExtractor)->extract($document) as $extracted) {
+            if ($extracted->blockId === $blockId) {
+                return $extracted->headingPath;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * @param  list<string>  $marks
+     * @return Node
+     */
+    public static function buildBlock(
+        string $blockId,
+        string $blockType,
+        string $text,
+        ?int $level = null,
+        array $marks = [],
+    ): array {
+        $attrs = [BlockIdentity::ATTR_KEY => $blockId];
+        if ($blockType === 'heading') {
+            $attrs['level'] = $level ?? 1;
+        }
+
+        $block = [
+            'type' => $blockType,
+            'attrs' => $attrs,
+        ];
+
+        if ($text !== '') {
+            $textNode = [
+                'type' => 'text',
+                'text' => $text,
+            ];
+            if ($marks !== []) {
+                $textNode['marks'] = array_map(
+                    static fn (string $mark): array => ['type' => $mark],
+                    $marks,
+                );
+            }
+            $block['content'] = [$textNode];
+        }
+
+        return RichTextBlockExtractor::normalizeBlock($block);
+    }
+
+    /**
+     * @param  Node  $document
+     * @param  list<int>  $anchorPath
+     * @param  Node  $newBlock
+     * @return Node
+     */
+    public static function insertRelative(array $document, array $anchorPath, string $position, array $newBlock): array
+    {
+        if ($anchorPath === []) {
+            throw OfficeException::preconditionFailed('block_missing');
+        }
+
+        $index = array_pop($anchorPath);
+        $offset = $position === 'before' ? $index : $index + 1;
+
+        return self::spliceAt($document, $anchorPath, $offset, 0, [$newBlock]);
+    }
+
+    /**
+     * @param  Node  $document
+     * @param  list<int>  $path
+     * @return Node
+     */
+    public static function deleteAt(array $document, array $path): array
+    {
+        if ($path === []) {
+            throw OfficeException::preconditionFailed('block_missing');
+        }
+
+        $index = array_pop($path);
+
+        return self::spliceAt($document, $path, $index, 1, []);
+    }
+
+    /**
+     * @param  Node  $node
+     * @param  list<int>  $parentPath
+     * @param  list<Node>  $replacement
+     * @return Node
+     */
+    private static function spliceAt(array $node, array $parentPath, int $offset, int $deleteCount, array $replacement): array
+    {
+        $children = self::nodes($node['content'] ?? null);
+        if ($parentPath === []) {
+            array_splice($children, $offset, $deleteCount, $replacement);
+            $node['content'] = $children;
+
+            return $node;
+        }
+
+        $index = array_shift($parentPath);
+        if (! isset($children[$index])) {
+            throw OfficeException::preconditionFailed('block_missing');
+        }
+        $children[$index] = self::spliceAt($children[$index], $parentPath, $offset, $deleteCount, $replacement);
+        $node['content'] = $children;
+
+        return $node;
     }
 }

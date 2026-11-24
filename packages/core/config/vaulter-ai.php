@@ -16,7 +16,7 @@ return [
         'documents' => [
             'executor' => 'laravel-ai',
             'provider_connection' => 'office_model',
-            'commands' => ['text.replace_exact@1'],
+            'commands' => ['text.replace_exact@1', 'text.insert_block@1', 'text.delete_block@1'],
             'approval' => 'human',
         ],
         'sheets' => [
@@ -43,6 +43,8 @@ return [
     ],
     'secret_store' => [
         'default_model' => env('VAULTER_AI_MODEL'),
+        'key_version' => (int) env('VAULTER_AI_SECRET_KEY_VERSION', 1),
+        'keys' => [],
         'connections' => [
             'office_model' => [
                 'driver' => env('VAULTER_AI_PROVIDER', 'openai'),

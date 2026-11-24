@@ -296,6 +296,104 @@ class OfficeClientWireTest(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2.0)
 
+    def test_full_scenario_and_commit_timeout_retry_and_async_client(self) -> None:
+        import asyncio
+        import time
+        from http.server import ThreadingHTTPServer
+        from vaulter_office import AsyncOfficeClient
+
+        class _ScenarioHandler(BaseHTTPRequestHandler):
+            seen: list[dict[str, object]] = []
+            commit_attempts = 0
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                _ScenarioHandler.seen.append(body)
+                op = body["operation"]
+                inp = body["input"]
+
+                if op == "office.search":
+                    payload = {"ok": True, "result": {"hits": [{"resource_id": "doc-1"}]}}
+                elif op == "office.read":
+                    payload = {"ok": True, "result": {"resource_id": "doc-1", "content": "hello"}}
+                elif op == "office.prepare":
+                    payload = {"ok": True, "result": {"proposal_id": "prop-1", "digest": "dig-1"}}
+                elif op == "office.commit":
+                    _ScenarioHandler.commit_attempts += 1
+                    if _ScenarioHandler.commit_attempts == 1:
+                        time.sleep(0.25)
+                        return
+                    payload = {
+                        "ok": True,
+                        "result": {
+                            "state": "committed",
+                            "receipt_id": "rcpt-1",
+                            "command_id": inp["command_id"],
+                        },
+                    }
+                elif op == "office.verify":
+                    payload = {"ok": True, "result": {"verified": True, "receipt_id": inp["receipt_id"]}}
+                else:
+                    payload = {"ok": True, "result": {}}
+
+                encoded = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                return None
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _ScenarioHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = OfficeClient(
+                f"http://127.0.0.1:{server.server_port}/v1/operations",
+                credentials_provider=lambda: {"Authorization": "Bearer tok"},
+                timeout=0.08,
+                max_retries=1,
+            )
+            search_res = client.search("doc")
+            read_res = client.read("doc-1", {"kind": "outline"})
+            prep_res = client.prepare("doc-1", "text.replace_exact@1", "rt-1", {"block_id": "p1"})
+            cmd_id = "cmd-retry-123"
+            commit_res = client.commit(
+                "doc-1",
+                prep_res["result"]["proposal_id"],
+                prep_res["result"]["digest"],
+                command_id=cmd_id,
+            )
+            verify_res = client.verify("doc-1", commit_res["result"]["receipt_id"])
+
+            self.assertTrue(search_res["ok"])
+            self.assertTrue(read_res["ok"])
+            self.assertEqual(commit_res["result"]["command_id"], cmd_id)
+            self.assertTrue(verify_res["result"]["verified"])
+
+            commit_calls = [b for b in _ScenarioHandler.seen if b["operation"] == "office.commit"]
+            self.assertEqual(len(commit_calls), 2)
+            self.assertEqual(commit_calls[0]["input"]["command_id"], cmd_id)
+            self.assertEqual(commit_calls[1]["input"]["command_id"], cmd_id)
+
+            async def _run_async() -> None:
+                async_client = AsyncOfficeClient(
+                    f"http://127.0.0.1:{server.server_port}/v1/operations",
+                    credentials_provider=lambda: {"Authorization": "Bearer tok"},
+                    timeout=1.0,
+                )
+                res = await async_client.search("doc")
+                self.assertTrue(res["ok"])
+
+            asyncio.run(_run_async())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,7 +19,9 @@ use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Jobs\DispatchApprovedCommand;
 use Vaulter\Ai\Core\Jobs\ExecuteChatRun;
 use Vaulter\Ai\Core\Persistence\ConfigProviderSecretStore;
+use Vaulter\Ai\Core\Persistence\DatabaseProviderSecretStore;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
+use Vaulter\Ai\Core\Persistence\QueryRecord;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Workspace\ChannelChatBridge;
 use Vaulter\Ai\Core\Workspace\ChatTurn;
@@ -302,4 +304,62 @@ test('ChannelChatBridge maps external partial/final/duplicate/hijack cleanly ont
     $shown = $chat->show($fixture->context, $final['chat_session_id']);
     expect($shown['runs'][0]['run_id'])->toBe($final['run_id'])
         ->and($shown['messages'][0]['content'])->toBe('Apply change to p42');
+});
+
+test('database provider secret store encrypts per-tenant secrets with key_version, rotates without leaking plaintext, and rejects AAD tampering', function (): void {
+    config()->set('vaulter-ai.secret_store.key_version', 1);
+    config()->set('vaulter-ai.secret_store.keys', [
+        1 => base64_encode(str_repeat('a', 32)),
+        2 => base64_encode(str_repeat('b', 32)),
+    ]);
+
+    /** @var DatabaseProviderSecretStore $store */
+    $store = $this->app->make(ProviderSecretStore::class);
+    expect($store)->toBeInstanceOf(DatabaseProviderSecretStore::class);
+
+    $plaintext = 'sk-byok-tenant-1-secret-9999';
+    $store->put('tenant-a', 'openai', 'openai', $plaintext);
+    $store->put('tenant-b', 'openai', 'openai', 'sk-byok-tenant-b-secret-1111');
+
+    $db = $this->app->make(OfficeDatabase::class);
+    $row = $db->query('ai_provider_secrets')
+        ->where('tenant_id', 'tenant-a')
+        ->where('connection', 'openai')
+        ->first();
+
+    $rawBlob = $db->decodeBinary(QueryRecord::raw($row, 'encrypted_secret'));
+
+    expect($row)->not->toBeNull()
+        ->and((int) $row->key_version)->toBe(1)
+        ->and($rawBlob)->not->toBe('')
+        ->and(str_contains($rawBlob, $plaintext))->toBeFalse();
+
+    $resolved = $store->resolve('openai', 'tenant-a');
+    expect($resolved->apiKey())->toBe($plaintext);
+
+    $inspected = $store->inspect('tenant-a', 'openai');
+    expect($inspected)->not->toBeNull()
+        ->and($inspected['hint'])->toBe('****9999')
+        ->and(json_encode($inspected, JSON_THROW_ON_ERROR))->not->toContain($plaintext);
+
+    // Masking never leaks the plaintext secret.
+    expect($store->maskText("Error with {$plaintext}", 'tenant-a'))->not->toContain($plaintext);
+
+    // AAD tampering: copying encrypted_secret from tenant-a to tenant-b fails decryption.
+    $db->query('ai_provider_secrets')
+        ->where('tenant_id', 'tenant-b')
+        ->where('connection', 'openai')
+        ->update(['encrypted_secret' => $db->binaryLiteral($rawBlob)]);
+    expect(fn () => $store->resolve('openai', 'tenant-b'))->toThrow(OfficeException::class);
+
+    // Rotate to version 2 via artisan command.
+    $this->artisan('vaulter-ai:secrets:rotate', ['--key-version' => '2', '--tenant' => 'tenant-a'])
+        ->assertExitCode(0);
+
+    $rotatedRow = $db->query('ai_provider_secrets')
+        ->where('tenant_id', 'tenant-a')
+        ->where('connection', 'openai')
+        ->first();
+    expect((int) $rotatedRow?->key_version)->toBe(2)
+        ->and($store->resolve('openai', 'tenant-a')->apiKey())->toBe($plaintext);
 });

@@ -6,6 +6,7 @@ namespace Vaulter\Ai\Core\Workspace;
 
 use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Database\Query\Builder;
+use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Str;
 use RuntimeException;
 use Vaulter\Ai\Core\Contracts\Clock;
@@ -427,7 +428,7 @@ final readonly class ChatWorkspace
             }
 
             $provider = $this->secretStore !== null
-                ? $this->secretStore->status($profile->providerConnection)
+                ? $this->withTenantSecretContext($context->tenantId, fn (): array => $this->secretStore->status($profile->providerConnection))
                 : [
                     'configured' => false,
                     'connection' => $profile->providerConnection ?? '',
@@ -740,6 +741,29 @@ final readonly class ChatWorkspace
             'project_scope' => $context->projectScope,
             'owner_subject' => $context->effectiveSubject,
         ]);
+    }
+
+    /**
+     * @template T
+     *
+     * @param  callable(): T  $callback
+     * @return T
+     */
+    private function withTenantSecretContext(string $tenantId, callable $callback): mixed
+    {
+        $hadPrior = Context::has('vaulter.ai.tenant_id');
+        $prior = $hadPrior ? Context::get('vaulter.ai.tenant_id') : null;
+        Context::add('vaulter.ai.tenant_id', $tenantId);
+
+        try {
+            return $callback();
+        } finally {
+            if ($hadPrior) {
+                Context::add('vaulter.ai.tenant_id', $prior);
+            } else {
+                Context::forget(['vaulter.ai.tenant_id']);
+            }
+        }
     }
 
     private function runMessage(string $sessionId, string $runId): ?object

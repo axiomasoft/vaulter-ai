@@ -6,8 +6,8 @@
     {
       "source_path": "plan/spec/schemas/office-v1.schema.json",
       "target_path": "packages/core/resources/contracts/office-v1.schema.json",
-      "sha256": "d576508de51c2996c7e8b3d6e2aa9ad7b000e279dfb04d23e767e6b82d2b29ef",
-      "bytes": 29353
+      "sha256": "8af9a105011812c7f0552dcccb32300eb178bd6d5f7b01db52033749f856a5ce",
+      "bytes": 33886
     },
     {
       "source_path": "plan/examples/office-sdk.json",

@@ -15,6 +15,8 @@ use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Contracts\TransactionRunner;
 use Vaulter\Ai\Core\Persistence\RegistryCommandWriteCapability;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
+use Vaulter\Ai\Documents\Commands\DeleteBlock;
+use Vaulter\Ai\Documents\Commands\InsertBlock;
 use Vaulter\Ai\Documents\Commands\ReplaceExact;
 use Vaulter\Ai\Documents\Console\RebuildTextIndex;
 use Vaulter\Ai\Documents\Contracts\DocumentScopeResolver;
@@ -64,6 +66,8 @@ final class DocumentsAiServiceProvider extends ServiceProvider
         $this->app->singleton(TextProjectionReader::class);
         $this->app->singleton(TextReader::class);
         $this->app->singleton(ReplaceExact::class);
+        $this->app->singleton(InsertBlock::class);
+        $this->app->singleton(DeleteBlock::class);
 
         $this->app->singleton(ResourceDirectory::class, VaulterResourceDirectory::class);
         $this->app->singleton(DocumentsCommandWriteCapability::class, static fn (Container $app): DocumentsCommandWriteCapability => new DocumentsCommandWriteCapability(
@@ -95,9 +99,14 @@ final class DocumentsAiServiceProvider extends ServiceProvider
 
         $registry = $this->app->make(OfficeRegistry::class);
         if (! $registry->isFrozen()) {
+            $singleTextOwner = $this->app->make(SingleTextOwner::class);
             $registry->registerReader($this->app->make(TextReader::class));
             $registry->registerCommand($this->app->make(ReplaceExact::class));
-            $registry->registerOwner(ReplaceExact::COMMAND, 'snapshot', $this->app->make(SingleTextOwner::class));
+            $registry->registerCommand($this->app->make(InsertBlock::class));
+            $registry->registerCommand($this->app->make(DeleteBlock::class));
+            $registry->registerOwner(ReplaceExact::COMMAND, 'snapshot', $singleTextOwner);
+            $registry->registerOwner(InsertBlock::COMMAND, 'snapshot', $singleTextOwner);
+            $registry->registerOwner(DeleteBlock::COMMAND, 'snapshot', $singleTextOwner);
         }
 
         $this->registerProjectionListeners();
