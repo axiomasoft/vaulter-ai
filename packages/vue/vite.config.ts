@@ -21,11 +21,18 @@ export default defineConfig({
       cssFileName: 'style',
     },
     rollupOptions: {
-      external: ['vue'],
+      external: ['vue', 'yjs', /^@tiptap\//],
       output: {
         exports: 'named',
-        globals: {
-          vue: 'Vue',
+        globals(id: string): string {
+          if (id === 'vue') return 'Vue'
+          if (id === 'yjs') return 'Y'
+          if (id.startsWith('@tiptap/')) {
+            return id
+              .replace(/^@tiptap\//, 'Tiptap_')
+              .replace(/[^a-zA-Z0-9_]/g, '_')
+          }
+          return id
         },
       },
     },

@@ -34,9 +34,22 @@
     "test": "vitest run"
   },
   "peerDependencies": {
-    "vue": "^3.5.42"
+    "@tiptap/core": "^3.34.0",
+    "@tiptap/pm": "^3.34.0",
+    "vue": "^3.5.42",
+    "yjs": "^13.6.33"
+  },
+  "peerDependenciesMeta": {
+    "yjs": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@tiptap/core": "^3.34.0",
+    "@tiptap/extension-table": "^3.34.0",
+    "@tiptap/pm": "^3.34.0",
+    "@tiptap/starter-kit": "^3.34.0",
+    "@tiptap/y-tiptap": "^3.0.10",
     "@vitejs/plugin-vue": "^5.2.0",
     "@vue/test-utils": "^2.4.6",
     "happy-dom": "^20.10.6",
@@ -45,6 +58,7 @@
     "vite-plugin-dts": "^4.3.0",
     "vitest": "^4.1.10",
     "vue": "^3.5.42",
-    "vue-tsc": "^2.1.0"
+    "vue-tsc": "^2.1.0",
+    "yjs": "^13.6.33"
   }
 }
