@@ -131,13 +131,15 @@ final readonly class VaulterResourceDirectory implements ResourceDirectory
                             continue;
                         }
 
+                        // Only the document id is needed to match the projection hits; the
+                        // metadata read skips the stored state and the content egress gate.
                         try {
-                            $snapshot = $this->documents->in($acting)->content($node->id);
+                            $metadata = $this->documents->in($acting)->metadata($node->id);
                         } catch (\Throwable) {
                             continue;
                         }
 
-                        $docKey = (string) (Identity::key($snapshot->documentId) ?? $snapshot->documentId);
+                        $docKey = (string) (Identity::key($metadata->documentId) ?? $metadata->documentId);
                         if (isset($docSet[$docKey])) {
                             unset($remainingDocs[$docKey]);
                             $found[$entry->resourceId] = $entry;
