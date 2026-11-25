@@ -47,6 +47,8 @@ final readonly class OfficeToolPort implements ToolPort
         private ?string $runId = null,
         private ?OfficeRegistry $officeRegistry = null,
         private ?CommandWriteCapability $writeCapability = null,
+        /** @var list<string> Resource ids a scoped port may touch; empty means the caller's whole access. */
+        private array $scopedResourceIds = [],
     ) {}
 
     /** @param list<ResourceEntry> $resources */
@@ -68,6 +70,7 @@ final readonly class OfficeToolPort implements ToolPort
             runId: $runId,
             officeRegistry: $this->officeRegistry,
             writeCapability: $this->writeCapability,
+            scopedResourceIds: array_map(static fn (ResourceEntry $entry): string => $entry->resourceId, $resources),
         );
     }
 
@@ -118,6 +121,16 @@ final readonly class OfficeToolPort implements ToolPort
                     false,
                     'Unexpected argument for Office tool.',
                 ));
+            }
+        }
+
+        // A port scoped to resources must not reach any other resource the caller can access,
+        // and search could only surface such resources, so it is refused too.
+        if ($this->scopedResourceIds !== []) {
+            $resourceId = $arguments['resource_id'] ?? null;
+            if ($operation === OfficeOperation::Search || ! is_string($resourceId)
+                || ! in_array($resourceId, $this->scopedResourceIds, true)) {
+                return $this->toToolResult($this->errorMapper->toResponse($operation, ErrorCode::ResourceUnavailable));
             }
         }
 

@@ -17,6 +17,7 @@ use Vaulter\Ai\AgenTools\OfficeToolPort;
 use Vaulter\Ai\Core\Actions\ResolveProposal;
 use Vaulter\Ai\Core\Contracts\ApprovedCommandContextResolver;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
+use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandScope;
 use Vaulter\Ai\Core\Data\HostProfile;
@@ -29,6 +30,7 @@ use Vaulter\Ai\Tests\Support\AgenToolsTestCase;
 use Vaulter\Ai\Tests\Support\TestActor;
 use Vaulter\Ai\Tests\Support\TextCommandFixture;
 use Vaulter\Database\VaulterDatabase;
+use Vaulter\Documents\Facades\Documents;
 use Vaulter\Drive\Access\Roles\RoleRegistry;
 use Vaulter\Drive\Access\ValueObjects\Subject;
 use Vaulter\Drive\Data\Access\GrantInput;
@@ -332,3 +334,29 @@ test('AgenToolsOfficeExecutor preserves awaiting_approval and resumes the same r
         ->and($owner->table('v_outbox')->where('type', 'office.text_command_committed')->count())->toBe(1)
         ->and($runs->listSteps($fixture->context, $pausedRun->runId))->toHaveCount(4);
 })->with(['array arguments' => false, 'object arguments' => true]);
+
+test('a port scoped to resources refuses tool calls on any other resource', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: true);
+    $outside = Documents::in($fixture->drive)->create('Outside the scope', 'vaulter/rich-text', [
+        'type' => 'doc',
+        'content' => [['type' => 'paragraph', 'attrs' => ['blockId' => 'p1'], 'content' => [['type' => 'text', 'text' => 'Not in scope']]]],
+    ]);
+    $inScope = $this->app->make(ResourceDirectory::class)->findAccessible($fixture->context, $fixture->node->id);
+    expect($inScope)->toBeInstanceOf(ResourceEntry::class);
+
+    $port = $this->app->make(OfficeToolPort::class)->forContext($fixture->context, null, [$inScope]);
+    $read = static fn (string $id, string $key) => $port->call('office_read', [
+        'resource_id' => $id,
+        'selector' => ['kind' => 'text_block', 'block_id' => 'p42'],
+    ], $key);
+
+    // The user can read both documents; only the scoped one is reachable through this port.
+    expect($read($fixture->node->id, 'k-in')->isError())->toBeFalse();
+    foreach ([
+        $read($outside->id, 'k-out'),
+        $port->call('office_search', ['query' => 'scope'], 'k-search'),
+    ] as $refused) {
+        expect($refused->isError())->toBeTrue()
+            ->and($refused->error?->code)->toBe('vaulter.not_found.resource_unavailable');
+    }
+});
