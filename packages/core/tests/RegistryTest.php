@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Contracts\OfficeCommand;
+use Vaulter\Ai\Core\Contracts\OfficeExecutor;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\CommandDescriptor;
@@ -147,4 +148,65 @@ test('office.describe enforces host policy and resource visibility identically',
     );
     expect($wrongProject->ok)->toBeFalse();
     expect($wrongProject->errorCode)->toBe(ErrorCode::ResourceUnavailable);
+});
+
+function makeExecutor(string $key): OfficeExecutor
+{
+    return new class($key) implements OfficeExecutor
+    {
+        public function __construct(private readonly string $key) {}
+
+        public function key(): string
+        {
+            return $this->key;
+        }
+
+        public function dispatch(CallContext $context, array $payload): void {}
+    };
+}
+
+test('OfficeRegistry builds a lazily registered executor once, on first lookup', function (): void {
+    $registry = new OfficeRegistry;
+    $built = 0;
+    $registry->registerLazyExecutor('lazy', static function () use (&$built): OfficeExecutor {
+        $built++;
+
+        return makeExecutor('lazy');
+    });
+
+    expect($built)->toBe(0);
+
+    $registry->freeze();
+    $first = $registry->executor('lazy');
+
+    expect($first)->not->toBeNull()
+        ->and($first?->key())->toBe('lazy')
+        ->and($registry->executor('lazy'))->toBe($first)
+        ->and($built)->toBe(1)
+        ->and($registry->executor('missing'))->toBeNull();
+});
+
+test('OfficeRegistry rejects duplicate executor keys across eager and lazy registration', function (): void {
+    $registry = new OfficeRegistry;
+    $registry->registerExecutor(makeExecutor('dup'));
+
+    expect(static fn () => $registry->registerLazyExecutor('dup', static fn (): OfficeExecutor => makeExecutor('dup')))
+        ->toThrow(OfficeRegistryException::class, 'dup');
+
+    $lazyFirst = new OfficeRegistry;
+    $lazyFirst->registerLazyExecutor('dup', static fn (): OfficeExecutor => makeExecutor('dup'));
+
+    expect(static fn () => $lazyFirst->registerExecutor(makeExecutor('dup')))
+        ->toThrow(OfficeRegistryException::class, 'dup');
+});
+
+test('OfficeRegistry refuses lazy registration after freeze and a factory that builds another key', function (): void {
+    $registry = new OfficeRegistry;
+    $registry->registerLazyExecutor('declared', static fn (): OfficeExecutor => makeExecutor('actual'));
+    $registry->freeze();
+
+    expect(static fn () => $registry->registerLazyExecutor('late', static fn (): OfficeExecutor => makeExecutor('late')))
+        ->toThrow(OfficeRegistryException::class, 'frozen')
+        ->and(static fn () => $registry->executor('declared'))
+        ->toThrow(OfficeRegistryException::class, 'reports key [actual]');
 });

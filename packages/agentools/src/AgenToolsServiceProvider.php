@@ -40,7 +40,10 @@ final class AgenToolsServiceProvider extends ServiceProvider
 
         $registry = $this->app->make(OfficeRegistry::class);
         if (! $registry->isFrozen()) {
-            $registry->registerExecutor($this->app->make(AgenToolsOfficeExecutor::class));
+            $registry->registerLazyExecutor(
+                AgenToolsOfficeExecutor::KEY,
+                fn (): AgenToolsOfficeExecutor => $this->app->make(AgenToolsOfficeExecutor::class),
+            );
         }
     }
 }

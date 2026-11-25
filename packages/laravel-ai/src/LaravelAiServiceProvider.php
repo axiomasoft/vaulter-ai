@@ -33,7 +33,10 @@ final class LaravelAiServiceProvider extends ServiceProvider
 
         $registry = $this->app->make(OfficeRegistry::class);
         if (! $registry->isFrozen()) {
-            $registry->registerExecutor($this->app->make(LaravelOfficeExecutor::class));
+            $registry->registerLazyExecutor(
+                LaravelOfficeExecutor::KEY,
+                fn (): LaravelOfficeExecutor => $this->app->make(LaravelOfficeExecutor::class),
+            );
         }
     }
 }

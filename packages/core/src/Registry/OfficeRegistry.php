@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\Ai\Core\Registry;
 
+use Closure;
 use Vaulter\Ai\Core\Contracts\CommandOwner;
 use Vaulter\Ai\Core\Contracts\CommandWriteCapability;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
@@ -34,7 +35,11 @@ final class OfficeRegistry
     /** @var array<string, string> keyed by "{command}\0{writeMode}" -> ownerKey */
     private array $ownerBindings = [];
 
-    /** @var array<string, OfficeExecutor> */
+    /**
+     * Built executors, or the factory that builds one on first lookup.
+     *
+     * @var array<string, OfficeExecutor|Closure(): OfficeExecutor>
+     */
     private array $executors = [];
 
     private bool $frozen = false;
@@ -93,6 +98,26 @@ final class OfficeRegistry
         $this->executors[$key] = $executor;
     }
 
+    /**
+     * Registers an executor that is only constructed when a run first asks for it.
+     *
+     * Executors pull in LLM ports, provider secret stores and the encrypter. Building them
+     * while service providers boot makes every request and every console command pay for
+     * that graph, and makes the application unbootable before APP_KEY exists (for example
+     * `php artisan key:generate` on a fresh host, or Larastan booting the package).
+     *
+     * @param  Closure(): OfficeExecutor  $factory
+     */
+    public function registerLazyExecutor(string $key, Closure $factory): void
+    {
+        $this->assertMutable();
+        if (isset($this->executors[$key])) {
+            throw OfficeRegistryException::duplicateExecutor($key);
+        }
+
+        $this->executors[$key] = $factory;
+    }
+
     public function freeze(): void
     {
         $this->frozen = true;
@@ -127,7 +152,20 @@ final class OfficeRegistry
 
     public function executor(string $key): ?OfficeExecutor
     {
-        return $this->executors[$key] ?? null;
+        $entry = $this->executors[$key] ?? null;
+        if (! $entry instanceof Closure) {
+            return $entry;
+        }
+
+        $executor = $entry();
+        if ($executor->key() !== $key) {
+            throw new OfficeRegistryException("Office executor registered as [{$key}] reports key [{$executor->key()}].");
+        }
+
+        // Memoising the built executor is not a registration, so it stays allowed after freeze().
+        $this->executors[$key] = $executor;
+
+        return $executor;
     }
 
     /**
