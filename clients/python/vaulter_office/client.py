@@ -131,6 +131,37 @@ def _parse_sse_block(block: str) -> dict[str, Any] | None:
     }
 
 
+class _SseDecoder:
+    """Incremental text/event-stream decoder: feed raw lines, get an event at each blank line."""
+
+    def __init__(self) -> None:
+        self._lines: list[str] = []
+
+    def feed(self, raw_line: bytes) -> dict[str, Any] | None:
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if line != "":
+            self._lines.append(line)
+            return None
+        return self.finish()
+
+    def finish(self) -> dict[str, Any] | None:
+        """Flush a trailing event when the stream ends without its blank line."""
+        if not self._lines:
+            return None
+        block = "\n".join(self._lines)
+        self._lines.clear()
+        return _parse_sse_block(block)
+
+
+def _is_error(response: dict[str, Any], code: str) -> bool:
+    error = response.get("error")
+    return response.get("ok") is False and isinstance(error, dict) and error.get("code") == code
+
+
+def _retry_delay(backoff: float, attempt: int) -> float:
+    return backoff * (1 << attempt)
+
+
 class OfficeClient:
     """Thin stdlib HTTP client without ORM, DSN, or owner credentials."""
 
@@ -285,30 +316,21 @@ class OfficeClient:
             except (TimeoutError, ConnectionError):
                 if attempt >= retries:
                     raise
-                if backoff > 0:
-                    time.sleep(backoff * (2**attempt))
+                time.sleep(_retry_delay(backoff, attempt))
                 continue
 
-            if (
-                res.get("ok") is False
-                and isinstance(res.get("error"), dict)
-                and res["error"].get("code") == "temporarily_unavailable"
-                and attempt < retries
-            ):
-                if backoff > 0:
-                    time.sleep(backoff * (2**attempt))
+            if attempt < retries and _is_error(res, "temporarily_unavailable"):
+                # The commit may have landed before the failure: ask for its status under the same
+                # command_id and only re-send it when the server has no record of the command.
+                time.sleep(_retry_delay(backoff, attempt))
                 status_res = self.status(resource_id, resolved_command_id)
-                if (
-                    status_res.get("ok") is False
-                    and isinstance(status_res.get("error"), dict)
-                    and status_res["error"].get("code") == "operation_unknown"
-                ):
+                if _is_error(status_res, "operation_unknown"):
                     continue
                 return status_res
 
             return res
 
-        raise RuntimeError("Unreachable commit retry state")
+        raise AssertionError("the last commit attempt always returns or raises")
 
     def status(self, resource_id: str, command_id: str) -> dict[str, Any]:
         return self.call(
@@ -434,25 +456,13 @@ class OfficeClient:
 
     def stream_chat_events(self, session_id: str, *, cursor: int = 0) -> Iterator[dict[str, Any]]:
         resp = self._open_chat_event_stream(session_id, cursor)
+        decoder = _SseDecoder()
         try:
-            lines: list[str] = []
-            while True:
-                raw_line = resp.readline()
-                if not raw_line:
-                    if lines:
-                        parsed = _parse_sse_block("\n".join(lines))
-                        if parsed is not None:
-                            yield parsed
-                    break
-                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-                if line == "":
-                    if lines:
-                        parsed = _parse_sse_block("\n".join(lines))
-                        lines.clear()
-                        if parsed is not None:
-                            yield parsed
-                    continue
-                lines.append(line)
+            while raw_line := resp.readline():
+                if (event := decoder.feed(raw_line)) is not None:
+                    yield event
+            if (event := decoder.finish()) is not None:
+                yield event
         finally:
             resp.close()
 
@@ -589,30 +599,21 @@ class AsyncOfficeClient:
             except (TimeoutError, ConnectionError):
                 if attempt >= retries:
                     raise
-                if backoff > 0:
-                    await asyncio.sleep(backoff * (2**attempt))
+                await asyncio.sleep(_retry_delay(backoff, attempt))
                 continue
 
-            if (
-                res.get("ok") is False
-                and isinstance(res.get("error"), dict)
-                and res["error"].get("code") == "temporarily_unavailable"
-                and attempt < retries
-            ):
-                if backoff > 0:
-                    await asyncio.sleep(backoff * (2**attempt))
+            if attempt < retries and _is_error(res, "temporarily_unavailable"):
+                # The commit may have landed before the failure: ask for its status under the same
+                # command_id and only re-send it when the server has no record of the command.
+                await asyncio.sleep(_retry_delay(backoff, attempt))
                 status_res = await self.status(resource_id, resolved_command_id)
-                if (
-                    status_res.get("ok") is False
-                    and isinstance(status_res.get("error"), dict)
-                    and status_res["error"].get("code") == "operation_unknown"
-                ):
+                if _is_error(status_res, "operation_unknown"):
                     continue
                 return status_res
 
             return res
 
-        raise RuntimeError("Unreachable commit retry state")
+        raise AssertionError("the last commit attempt always returns or raises")
 
     async def status(self, resource_id: str, command_id: str) -> dict[str, Any]:
         return await self._call(OfficeClient.status, resource_id, command_id)
@@ -698,24 +699,12 @@ class AsyncOfficeClient:
     async def stream_chat_events(self, session_id: str, *, cursor: int = 0) -> AsyncIterator[dict[str, Any]]:
         client = self._sync._with_credentials(await self._resolve_headers())
         resp = await asyncio.to_thread(client._open_chat_event_stream, session_id, cursor)
+        decoder = _SseDecoder()
         try:
-            lines: list[str] = []
-            while True:
-                raw_line = await asyncio.to_thread(resp.readline)
-                if not raw_line:
-                    if lines:
-                        parsed = _parse_sse_block("\n".join(lines))
-                        if parsed is not None:
-                            yield parsed
-                    break
-                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-                if line == "":
-                    if lines:
-                        parsed = _parse_sse_block("\n".join(lines))
-                        lines.clear()
-                        if parsed is not None:
-                            yield parsed
-                    continue
-                lines.append(line)
+            while raw_line := await asyncio.to_thread(resp.readline):
+                if (event := decoder.feed(raw_line)) is not None:
+                    yield event
+            if (event := decoder.finish()) is not None:
+                yield event
         finally:
             await asyncio.to_thread(resp.close)

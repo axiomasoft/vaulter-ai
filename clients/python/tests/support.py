@@ -74,7 +74,8 @@ class LoopbackServer:
                 return
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        # A short poll interval keeps shutdown() (called once per test) from blocking for the 0.5 s default.
+        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
 
     @property
     def base_url(self) -> str:
