@@ -679,3 +679,33 @@ test('PostgreSQL serializes two chat writers on one row while a writer in anothe
         }
     }
 })->group('engine:pgsql');
+
+test('chat refuses a retention, cursor, resource list or selection outside its bounds', function (): void {
+    Bus::fake([ExecuteChatRun::class]);
+    $fixture = new TextCommandFixture($this->app);
+    $fixture->authorizeHttp();
+    $this->withToken('scenario-test-token');
+    foreach ([0, 604801, '3600'] as $retention) {
+        $this->postJson('/office/chat/sessions', ['retention_seconds' => $retention])->assertBadRequest();
+    }
+    $this->postJson('/office/chat/sessions', ['retention_seconds' => 604800])->assertCreated();
+
+    $url = '/office/chat/sessions/'.$this->app->make(ChatWorkspace::class)->open($fixture->context);
+    $message = ['message_id' => 'bounded', 'content' => 'Read the contract', 'resource_ids' => [$fixture->node->id]];
+    $deep = ['sheet' => 'a'];
+    for ($level = 0; $level < 16; $level++) {
+        $deep = ['nested' => $deep];
+    }
+    foreach ([
+        'resource map' => ['resource_ids' => ['first' => $fixture->node->id]],
+        'numeric resource' => ['resource_ids' => [7]],
+        'list selection' => ['selection' => [1, 2]],
+        'selection deeper than 16' => ['selection' => $deep],
+    ] as $label => $override) {
+        expect($this->postJson($url.'/messages', [...$message, ...$override])->status())->toBe(400, $label);
+    }
+    foreach (['+1', '01', '1e0'] as $cursor) {
+        expect($this->get($url.'/events?cursor='.urlencode($cursor))->status())->toBe(400, $cursor);
+    }
+    expect($this->app->make(OfficeDatabase::class)->query('ai_chat_messages')->count())->toBe(0);
+});

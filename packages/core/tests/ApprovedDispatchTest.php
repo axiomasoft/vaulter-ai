@@ -90,6 +90,11 @@ test('the decision alias and string booleans are accepted, anything else is inva
 
     $this->withToken('rev')->postJson('/office/proposals/'.$rejected->proposal_id.'/decision', [
         'digest' => $rejected->digest,
+        'approved' => 2,
+    ])->assertStatus(400)->assertJsonPath('error.code', 'invalid_input');
+
+    $this->withToken('rev')->postJson('/office/proposals/'.$rejected->proposal_id.'/decision', [
+        'digest' => $rejected->digest,
         'decision' => 'postpone',
     ])->assertStatus(400)->assertJsonPath('error.code', 'invalid_input');
 
