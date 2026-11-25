@@ -1,0 +1,14 @@
+{
+    "preset": "laravel",
+    "exclude": [
+        "build"
+    ],
+    "rules": {
+        "declare_strict_types": true,
+        "final_class": false,
+        "ordered_imports": {
+            "sort_algorithm": "alpha",
+            "imports_order": ["class", "function", "const"]
+        }
+    }
+}
