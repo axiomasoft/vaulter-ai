@@ -7,10 +7,10 @@ import copy
 import http.client
 import inspect
 import json
-import socket
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, Concatenate
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
@@ -39,6 +39,41 @@ class OfficeProtocolError(RuntimeError):
         self.status = status
         self.body = body
         super().__init__(f"Office HTTP error {status}: {body!r}")
+
+
+@contextmanager
+def _transport_errors(kind: str) -> Iterator[None]:
+    """Map socket/HTTP-library failures to TimeoutError or ConnectionError; HTTP status errors pass through."""
+    try:
+        yield
+    except HTTPError:
+        raise
+    except TimeoutError as exc:
+        raise TimeoutError(f"Office {kind} request timed out: {exc}") from exc
+    except URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise TimeoutError(f"Office {kind} request timed out: {exc.reason}") from exc
+        raise ConnectionError(f"Office {kind} transport error: {exc.reason}") from exc
+    except (http.client.HTTPException, OSError) as exc:
+        raise ConnectionError(f"Office {kind} transport error: {exc}") from exc
+
+
+def _drain(exc: HTTPError) -> bytes:
+    try:
+        return exc.read()
+    finally:
+        exc.close()
+
+
+def _json_object(status: int, raw: bytes) -> dict[str, Any]:
+    """Decode a JSON object body; anything else (HTML error page, bad UTF-8, a list) is a protocol error."""
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise OfficeProtocolError(status, raw.decode("utf-8", errors="replace")) from exc
+    if not isinstance(decoded, dict):
+        raise OfficeProtocolError(status, decoded)
+    return decoded
 
 
 def _derive_workspace_endpoint(operations_endpoint: str) -> str:
@@ -145,34 +180,15 @@ class OfficeClient:
         req = Request(url, data=data, headers=headers, method=method)
 
         try:
-            with self._opener.open(req, timeout=self._timeout) as resp:
-                raw = resp.read().decode("utf-8")
-                decoded = json.loads(raw)
-                if not isinstance(decoded, dict):
-                    raise OfficeProtocolError(resp.status, decoded)
-                return decoded
+            with _transport_errors("HTTP"), self._opener.open(req, timeout=self._timeout) as resp:
+                status: int = resp.status
+                return _json_object(status, resp.read())
         except HTTPError as exc:
-            try:
-                raw = exc.read().decode("utf-8", errors="replace")
-            finally:
-                exc.close()
+            raw = _drain(exc)
             if 300 <= exc.code < 400:
-                raise OfficeProtocolError(exc.code, raw) from exc
-            try:
-                decoded = json.loads(raw)
-            except json.JSONDecodeError as parse_err:
-                raise OfficeProtocolError(exc.code, raw) from parse_err
-            if not isinstance(decoded, dict):
-                raise OfficeProtocolError(exc.code, decoded)
-            return decoded
-        except (TimeoutError, socket.timeout) as exc:
-            raise TimeoutError(f"Office HTTP request timed out: {exc}") from exc
-        except URLError as exc:
-            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                raise TimeoutError(f"Office HTTP request timed out: {exc.reason}") from exc
-            raise ConnectionError(f"Office HTTP transport error: {exc.reason}") from exc
-        except (http.client.HTTPException, OSError) as exc:
-            raise ConnectionError(f"Office HTTP transport error: {exc}") from exc
+                raise OfficeProtocolError(exc.code, raw.decode("utf-8", errors="replace")) from exc
+            # The Office endpoint reports domain errors as JSON envelopes with a 4xx/5xx status.
+            return _json_object(exc.code, raw)
 
     def _workspace_url(self, path: str, query: dict[str, str] | None = None) -> str:
         url = f"{self._workspace_endpoint}{path}"
@@ -393,7 +409,7 @@ class OfficeClient:
             payload=body,
         )
 
-    def _open_chat_event_stream(self, session_id: str, cursor: int) -> Any:
+    def _open_chat_event_stream(self, session_id: str, cursor: int) -> http.client.HTTPResponse:
         url = self._workspace_url(
             f"/chat/sessions/{quote(session_id, safe='')}/events",
             {"cursor": str(cursor)},
@@ -405,23 +421,16 @@ class OfficeClient:
         }
         req = Request(url, headers=headers, method="GET")
         try:
-            return self._opener.open(req, timeout=self._timeout)
+            with _transport_errors("SSE"):
+                resp: http.client.HTTPResponse = self._opener.open(req, timeout=self._timeout)
+                return resp
         except HTTPError as exc:
+            text = _drain(exc).decode("utf-8", errors="replace")
             try:
-                raw = exc.read().decode("utf-8", errors="replace")
-            finally:
-                exc.close()
-            try:
-                decoded = json.loads(raw)
-            except json.JSONDecodeError:
-                decoded = raw
-            raise OfficeProtocolError(exc.code, decoded) from exc
-        except (TimeoutError, socket.timeout) as exc:
-            raise TimeoutError(f"Office SSE request timed out: {exc}") from exc
-        except URLError as exc:
-            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                raise TimeoutError(f"Office SSE request timed out: {exc.reason}") from exc
-            raise ConnectionError(f"Office SSE transport error: {exc.reason}") from exc
+                body: Any = json.loads(text)
+            except ValueError:
+                body = text
+            raise OfficeProtocolError(exc.code, body) from exc
 
     def stream_chat_events(self, session_id: str, *, cursor: int = 0) -> Iterator[dict[str, Any]]:
         resp = self._open_chat_event_stream(session_id, cursor)

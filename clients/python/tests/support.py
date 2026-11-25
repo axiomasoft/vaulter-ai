@@ -55,13 +55,17 @@ class LoopbackServer:
                 with outer._lock:
                     outer.requests.append(recorded)
                 reply = responder(recorded)
-                self.send_response(reply.status)
-                self.send_header("Content-Type", reply.content_type)
-                self.send_header("Content-Length", str(len(reply.body)))
-                for name, value in reply.extra_headers.items():
-                    self.send_header(name, value)
-                self.end_headers()
-                self.wfile.write(reply.body)
+                try:
+                    self.send_response(reply.status)
+                    self.send_header("Content-Type", reply.content_type)
+                    self.send_header("Content-Length", str(len(reply.body)))
+                    for name, value in reply.extra_headers.items():
+                        self.send_header(name, value)
+                    self.end_headers()
+                    self.wfile.write(reply.body)
+                except (BrokenPipeError, ConnectionResetError):
+                    # The client gave up first (timeout tests); nothing left to deliver.
+                    return
 
             do_GET = _handle  # noqa: N815
             do_POST = _handle  # noqa: N815
