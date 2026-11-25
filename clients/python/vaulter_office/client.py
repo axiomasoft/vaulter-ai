@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import http.client
 import inspect
 import json
@@ -10,7 +11,7 @@ import socket
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from typing import Any
+from typing import Any, Concatenate
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -119,6 +120,12 @@ class OfficeClient:
         self._max_retries = max(0, max_retries)
         self._retry_backoff = max(0.0, retry_backoff)
         self._opener = build_opener(_NoRedirectHandler())
+
+    def _with_credentials(self, headers: dict[str, str]) -> OfficeClient:
+        """Return a shallow copy that sends fixed credentials, sharing endpoint, opener and retry settings."""
+        bound = copy.copy(self)
+        bound._credentials_provider = lambda: headers
+        return bound
 
     def _send_json(
         self,
@@ -478,13 +485,22 @@ class AsyncOfficeClient:
             return await result
         return result
 
-    async def _run_with_headers(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        headers = await self._resolve_headers()
-        self._sync._credentials_provider = lambda: headers
-        return await asyncio.to_thread(fn, *args, **kwargs)
+    async def _call[**P, R](
+        self,
+        method: Callable[Concatenate[OfficeClient, P], R],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        """Run a sync client method in a worker thread with credentials resolved for this call only.
+
+        Every call gets its own credential-bound copy of the sync client: swapping the provider on
+        one shared client let a concurrent task's worker thread send another caller's credentials.
+        """
+        client = self._sync._with_credentials(await self._resolve_headers())
+        return await asyncio.to_thread(method, client, *args, **kwargs)
 
     async def call(self, operation: str, payload_input: dict[str, Any], *, version: int = 1) -> dict[str, Any]:
-        return await self._run_with_headers(self._sync.call, operation, payload_input, version=version)
+        return await self._call(OfficeClient.call, operation, payload_input, version=version)
 
     async def search(
         self,
@@ -494,8 +510,8 @@ class AsyncOfficeClient:
         limit: int | None = None,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        return await self._run_with_headers(
-            self._sync.search,
+        return await self._call(
+            OfficeClient.search,
             query,
             resource_type=resource_type,
             limit=limit,
@@ -511,8 +527,8 @@ class AsyncOfficeClient:
         cursor: str | None = None,
         after_receipt: str | None = None,
     ) -> dict[str, Any]:
-        return await self._run_with_headers(
-            self._sync.read,
+        return await self._call(
+            OfficeClient.read,
             resource_id,
             selector,
             limit=limit,
@@ -521,7 +537,7 @@ class AsyncOfficeClient:
         )
 
     async def describe(self, resource_id: str, command: str) -> dict[str, Any]:
-        return await self._run_with_headers(self._sync.describe, resource_id, command)
+        return await self._call(OfficeClient.describe, resource_id, command)
 
     async def prepare(
         self,
@@ -530,8 +546,8 @@ class AsyncOfficeClient:
         read_token: str,
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
-        return await self._run_with_headers(
-            self._sync.prepare,
+        return await self._call(
+            OfficeClient.prepare,
             resource_id,
             command,
             read_token,
@@ -590,13 +606,13 @@ class AsyncOfficeClient:
         raise RuntimeError("Unreachable commit retry state")
 
     async def status(self, resource_id: str, command_id: str) -> dict[str, Any]:
-        return await self._run_with_headers(self._sync.status, resource_id, command_id)
+        return await self._call(OfficeClient.status, resource_id, command_id)
 
     async def resume(self, resource_id: str, command_id: str) -> dict[str, Any]:
         return await self.status(resource_id, command_id)
 
     async def verify(self, resource_id: str, receipt_id: str, mode: str = "at_commit") -> dict[str, Any]:
-        return await self._run_with_headers(self._sync.verify, resource_id, receipt_id, mode)
+        return await self._call(OfficeClient.verify, resource_id, receipt_id, mode)
 
     async def list_proposals(
         self,
@@ -604,14 +620,14 @@ class AsyncOfficeClient:
         resource_id: str | None = None,
         decision: str | None = None,
     ) -> dict[str, Any]:
-        return await self._run_with_headers(
-            self._sync.list_proposals,
+        return await self._call(
+            OfficeClient.list_proposals,
             resource_id=resource_id,
             decision=decision,
         )
 
     async def get_proposal(self, proposal_id: str) -> dict[str, Any]:
-        return await self._run_with_headers(self._sync.get_proposal, proposal_id)
+        return await self._call(OfficeClient.get_proposal, proposal_id)
 
     async def decide_proposal(
         self,
@@ -621,8 +637,8 @@ class AsyncOfficeClient:
         *,
         command_id: str | None = None,
     ) -> dict[str, Any]:
-        return await self._run_with_headers(
-            self._sync.decide_proposal,
+        return await self._call(
+            OfficeClient.decide_proposal,
             proposal_id,
             digest,
             approved,
@@ -630,7 +646,7 @@ class AsyncOfficeClient:
         )
 
     async def get_run(self, run_id: str) -> dict[str, Any]:
-        return await self._run_with_headers(self._sync.get_run, run_id)
+        return await self._call(OfficeClient.get_run, run_id)
 
     async def resume_run(
         self,
@@ -639,18 +655,18 @@ class AsyncOfficeClient:
         arguments_by_resource: dict[str, dict[str, Any]] | None = None,
         reread_only: bool = False,
     ) -> dict[str, Any]:
-        return await self._run_with_headers(
-            self._sync.resume_run,
+        return await self._call(
+            OfficeClient.resume_run,
             run_id,
             arguments_by_resource=arguments_by_resource,
             reread_only=reread_only,
         )
 
     async def open_chat_session(self, *, retention_seconds: int | None = None) -> dict[str, Any]:
-        return await self._run_with_headers(self._sync.open_chat_session, retention_seconds=retention_seconds)
+        return await self._call(OfficeClient.open_chat_session, retention_seconds=retention_seconds)
 
     async def get_chat_session(self, session_id: str) -> dict[str, Any]:
-        return await self._run_with_headers(self._sync.get_chat_session, session_id)
+        return await self._call(OfficeClient.get_chat_session, session_id)
 
     async def post_chat_message(
         self,
@@ -661,8 +677,8 @@ class AsyncOfficeClient:
         *,
         selection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return await self._run_with_headers(
-            self._sync.post_chat_message,
+        return await self._call(
+            OfficeClient.post_chat_message,
             session_id,
             message_id,
             content,
@@ -671,9 +687,8 @@ class AsyncOfficeClient:
         )
 
     async def stream_chat_events(self, session_id: str, *, cursor: int = 0) -> AsyncIterator[dict[str, Any]]:
-        headers = await self._resolve_headers()
-        self._sync._credentials_provider = lambda: headers
-        resp = await asyncio.to_thread(self._sync._open_chat_event_stream, session_id, cursor)
+        client = self._sync._with_credentials(await self._resolve_headers())
+        resp = await asyncio.to_thread(client._open_chat_event_stream, session_id, cursor)
         try:
             lines: list[str] = []
             while True:
