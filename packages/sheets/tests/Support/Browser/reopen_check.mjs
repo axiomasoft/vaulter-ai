@@ -32,10 +32,11 @@ const { createServer: createViteServer } = await import(pathToFileURL(path.join(
 const workbook = JSON.parse(readFileSync(workbookPath, 'utf8'));
 
 // Serve a minimal standalone mount harness using @vaulter/sheets-vue from sibling vaulter-sheets build.
+const sheetsVueEntry = path.join(sheetsRepo, 'packages/vue/dist/vaulter-sheets-vue.js');
 const virtualMountId = path.join(sheetsRepo, '__reopen_virtual_mount.js');
 const mountModule = `
 import { createApp, h, ref } from 'vue';
-import { VaulterSpreadsheet } from ${JSON.stringify(path.join(sheetsRepo, 'packages/vue/dist/vaulter-sheets-vue.js'))};
+import { VaulterSpreadsheet } from ${JSON.stringify(sheetsVueEntry)};
 import ${JSON.stringify(path.join(sheetsRepo, 'packages/vue/dist/vaulter-sheets-vue.css'))};
 
 const params = new URLSearchParams(location.search);
@@ -79,13 +80,16 @@ const vite = await createViteServer({
     root: sheetsRepo,
     logLevel: 'silent',
     // Do not reuse or delete the sibling repo's node_modules/.vite cache, and do not
-    // crawl its bench/e2e HTML (those pull Univer in and blow the PHP process timeout).
+    // crawl its bench/e2e HTML (those pull extra pages in and blow the PHP process
+    // timeout). Scan only the built component instead: its lazy editor and realtime
+    // chunks import CommonJS packages (async-lock and friends) that the browser can
+    // load only after Vite pre-bundles them to ESM, so a fixed include list goes stale
+    // whenever sheets-vue gains a dependency.
     cacheDir: viteCacheDir,
     optimizeDeps: {
-        entries: [],
-        noDiscovery: true,
+        entries: [sheetsVueEntry],
         include: ['vue'],
-        holdUntilCrawlEnd: false,
+        holdUntilCrawlEnd: true,
     },
     server: {
         port: 0,
