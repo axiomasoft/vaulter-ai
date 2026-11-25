@@ -104,7 +104,7 @@
         "orchestra/testbench": "^11.3",
         "pestphp/pest": "^5.2",
         "pestphp/pest-plugin-type-coverage": "^5.1",
-        "phpstan/phpstan": "^2.2.16 <2.3.6",
+        "phpstan/phpstan": "^2.3.6",
         "phpstan/phpstan-strict-rules": "^2.0.12",
         "spaze/phpstan-disallowed-calls": "^4.15.1",
         "symfony/yaml": "^8.0"
