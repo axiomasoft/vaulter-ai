@@ -40,3 +40,15 @@ test('workspace form posts refuse open-redirect targets', function (mixed $candi
     'empty' => '',
     'array' => [['/office/proposals']],
 ]);
+
+test('the previous-page fallback stays on this origin', function (string $referer, bool $kept): void {
+    $request = Request::create('/office/proposals/p-1/decision', 'POST', [], [], [], ['HTTP_REFERER' => $referer]);
+    $this->app->instance('request', $request);
+
+    expect(LocalRedirect::after($request)->getTargetUrl())
+        ->toBe($kept ? $referer : route('vaulter-ai.workspace.proposals.index'));
+})->with([
+    'same origin page' => [fn (): string => url('/documents/42?tab=review'), true],
+    'foreign origin' => ['https://evil.example/phish', false],
+    'origin prefix lookalike' => [fn (): string => url('/').'.evil.example/phish', false],
+]);

@@ -13,8 +13,9 @@ use Illuminate\Http\Request;
  * The caller-supplied redirect_to must stay on this host: only absolute paths are
  * accepted, and network-path references ("//host", "/\host", which browsers treat
  * as "//host") and control characters are rejected, so the endpoint cannot be used
- * as an open redirect. Anything else falls back to the previous page or the
- * proposals list under the configured workspace prefix.
+ * as an open redirect. Anything else falls back to the previous page when it is on
+ * this application's origin (the Referer header is client-controlled, so it gets the
+ * same treatment), otherwise to the proposals list under the configured workspace prefix.
  */
 final class LocalRedirect
 {
@@ -23,9 +24,18 @@ final class LocalRedirect
         $candidate = $request->input('redirect_to');
 
         return new RedirectResponse(
-            self::isLocalPath($candidate) ? $candidate : url()->previous(route('vaulter-ai.workspace.proposals.index')),
+            self::isLocalPath($candidate) ? $candidate : self::sameOriginPrevious(),
             303,
         );
+    }
+
+    private static function sameOriginPrevious(): string
+    {
+        $fallback = route('vaulter-ai.workspace.proposals.index');
+        $previous = url()->previous($fallback);
+        $root = url()->to('/');
+
+        return $previous === $root || str_starts_with($previous, $root.'/') ? $previous : $fallback;
     }
 
     /**
