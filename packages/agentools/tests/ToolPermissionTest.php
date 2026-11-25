@@ -6,6 +6,7 @@ use AgenTools\Error\ToolExecutionResult;
 use Illuminate\Support\Facades\Config;
 use Vaulter\Ai\AgenTools\OfficeToolPort;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Tests\Support\AgenToolsTestCase;
 use Vaulter\Ai\Tests\Support\TestActor;
@@ -122,4 +123,24 @@ test('replaying a prepared step under its key for another command is an idempote
 
     expect(toolPermissionCode($prepare('text.replace_exact@1')))->toBeNull()
         ->and(toolPermissionCode($prepare('text.delete_block@1')))->toBe('vaulter.conflict.idempotency_conflict');
+});
+
+test('replaying a prepared step whose proposal is gone does not hand back the stale proposal', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: false);
+    $run = $this->app->make(Runs::class)->createOrFind($fixture->context, 'agentools', 'evt-replay-gone', 'rev-1', ['prompt' => '']);
+    $port = $this->app->make(OfficeToolPort::class)->forContext($fixture->context, $run->runId);
+    $id = $fixture->node->id;
+    $read = $port->call('office_read', ['resource_id' => $id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p42']], 'k-read');
+    $prepare = fn (): ToolExecutionResult => $port->call('office_prepare', [
+        'resource_id' => $id,
+        'command' => 'text.replace_exact@1',
+        'read_token' => (string) $read->value['read_token'],
+        'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+    ], 'k-prepare');
+
+    $first = $prepare();
+    expect(toolPermissionCode($first))->toBeNull();
+
+    $this->app->make(OfficeDatabase::class)->query('ai_proposals')->where('proposal_id', $first->value['proposal_id'])->delete();
+    expect(toolPermissionCode($prepare()))->toBe('vaulter.not_found.resource_unavailable');
 });

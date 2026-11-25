@@ -345,15 +345,19 @@ test('a port scoped to resources refuses tool calls on any other resource', func
     expect($inScope)->toBeInstanceOf(ResourceEntry::class);
 
     $port = $this->app->make(OfficeToolPort::class)->forContext($fixture->context, null, [$inScope]);
-    $read = static fn (string $id, string $key) => $port->call('office_read', [
+    $read = static fn (string $id, string $blockId, string $key) => $port->call('office_read', [
         'resource_id' => $id,
-        'selector' => ['kind' => 'text_block', 'block_id' => 'p42'],
+        'selector' => ['kind' => 'text_block', 'block_id' => $blockId],
     ], $key);
 
-    // The user can read both documents; only the scoped one is reachable through this port.
-    expect($read($fixture->node->id, 'k-in')->isError())->toBeFalse();
+    // The user can read both documents (each with a selector that exists in it);
+    // only the scoped one is reachable through this port.
+    expect($read($fixture->node->id, 'p42', 'k-in')->isError())->toBeFalse()
+        ->and($this->app->make(OfficeToolPort::class)->forContext($fixture->context)
+            ->call('office_read', ['resource_id' => $outside->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p1']], 'k-unscoped')
+            ->isError())->toBeFalse();
     foreach ([
-        $read($outside->id, 'k-out'),
+        $read($outside->id, 'p1', 'k-out'),
         $port->call('office_search', ['query' => 'scope'], 'k-search'),
     ] as $refused) {
         expect($refused->isError())->toBeTrue()
