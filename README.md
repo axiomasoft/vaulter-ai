@@ -20,7 +20,7 @@ Private / proprietary channel for FlexCrm and Edufy.
 
 The root workspace uses the Composer path repository `packages/*` and npm workspaces.
 
-Install `axiomasoft/vaulter-ai-collaboration` alongside AI Documents for live text. Laravel discovers `CollaborationAiServiceProvider` automatically. Hosts that register providers manually should include it with the Vaulter Collaboration provider. The legacy `Vaulter\Ai\Documents\Writing\LiveTextOwner` class name resolves to the new owner when the adapter is installed.
+Install `axiomasoft/vaulter-ai-collaboration` alongside AI Documents for live text. Laravel discovers `CollaborationAiServiceProvider` automatically. Hosts that register providers manually should include it with the Vaulter Collaboration provider.
 
 ## Toolchain
 

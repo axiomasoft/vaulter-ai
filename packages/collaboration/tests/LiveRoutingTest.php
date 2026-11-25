@@ -10,7 +10,6 @@ use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Core\Workspace\ChatTools;
 use Vaulter\Ai\Documents\Commands\ReplaceExact;
-use Vaulter\Ai\Documents\Writing\LiveTextOwner;
 use Vaulter\Ai\Tests\Support\TextCommandFixture;
 use Vaulter\Documents\Facades\Documents;
 
@@ -28,8 +27,7 @@ test('routes strict live reads and commands through the collaboration adapter', 
     $owner = $registry->ownerFor(ReplaceExact::COMMAND, 'journal');
 
     expect($owner)->toBeInstanceOf(LiveTextCommandOwner::class)
-        ->toBeInstanceOf(LiveTextOwner::class)
-        ->toBe($this->app->make(LiveTextOwner::class))
+        ->toBe($this->app->make(LiveTextCommandOwner::class))
         ->toBe($registry->owner('documents.live_text@1'));
 
     expect($capability->canWrite($fixture->context, $entry, $descriptor))->toBeTrue()

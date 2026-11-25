@@ -8,7 +8,6 @@ use Illuminate\Support\ServiceProvider;
 use Override;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Documents\Commands\ReplaceExact;
-use Vaulter\Ai\Documents\Writing\LiveTextOwner;
 use Vaulter\Kernel;
 
 final class CollaborationAiServiceProvider extends ServiceProvider
@@ -17,7 +16,6 @@ final class CollaborationAiServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->singleton(LiveTextCommandOwner::class);
-        $this->app->alias(LiveTextCommandOwner::class, LiveTextOwner::class);
     }
 
     public function boot(): void
