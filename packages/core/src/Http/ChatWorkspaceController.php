@@ -128,6 +128,7 @@ final readonly class ChatWorkspaceController
             $start = hrtime(true);
             $deadline = $start + 25_000_000_000;
             $keepAlive = $start + 12_000_000_000;
+            $backoff = new IdlePollBackoff;
             yield ": connected\n\n";
             while (hrtime(true) < $deadline && connection_aborted() === 0) {
                 try {
@@ -151,8 +152,10 @@ final readonly class ChatWorkspaceController
                     yield ": keep-alive\n\n";
                     $keepAlive += 12_000_000_000;
                 }
-                if ($batch === []) {
-                    usleep(200_000);
+                // Never sleep past the connection cap: the client reconnects with Last-Event-ID.
+                $delay = min($backoff->after(count($batch)), intdiv(max(0, $deadline - hrtime(true)), 1000));
+                if ($delay > 0) {
+                    usleep($delay);
                 }
             }
         };
