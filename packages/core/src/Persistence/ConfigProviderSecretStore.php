@@ -6,7 +6,6 @@ namespace Vaulter\Ai\Core\Persistence;
 
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Contracts\Encryption\DecryptException;
-use Illuminate\Contracts\Encryption\Encrypter;
 use Illuminate\Contracts\Encryption\StringEncrypter;
 use RuntimeException;
 use Vaulter\Ai\Core\Contracts\ProviderSecretStore;
@@ -22,7 +21,7 @@ final readonly class ConfigProviderSecretStore implements ProviderSecretStore
     public function __construct(
         private ConfigRepository $config,
         private PayloadCipher $cipher,
-        private ?Encrypter $encrypter = null,
+        private ?StringEncrypter $encrypter = null,
     ) {}
 
     public function resolve(string $connection): ProviderSecret
@@ -182,12 +181,7 @@ final readonly class ConfigProviderSecretStore implements ProviderSecretStore
         $encrypted = $record['encrypted_key'] ?? null;
         if (is_string($encrypted) && $encrypted !== '' && $this->encrypter !== null) {
             try {
-                if ($this->encrypter instanceof StringEncrypter) {
-                    return trim($this->encrypter->decryptString($encrypted));
-                }
-                $plain = $this->encrypter->decrypt($encrypted, false);
-
-                return is_string($plain) ? trim($plain) : '';
+                return trim($this->encrypter->decryptString($encrypted));
             } catch (DecryptException) {
                 throw OfficeException::temporarilyUnavailable();
             }
