@@ -28,8 +28,9 @@ through the workspace can approve a `human` proposal.
 Prefix `/{workspace_prefix}` (default `/office`), middleware `web`. They return
 `{"data": …}` JSON. The two POST endpoints that change state also accept
 classic form posts: without `Accept: application/json` they answer
-`303 See Other` to `redirect_to` when it is a same-host absolute path, or to the
-previous page otherwise.
+`303 See Other` to `redirect_to` when it is a same-host absolute path, otherwise
+to the previous page if it is on this application's origin, and to the proposals
+list as the last resort.
 
 | Method and path | Route name | Purpose |
 | --- | --- | --- |
