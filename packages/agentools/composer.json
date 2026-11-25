@@ -13,7 +13,7 @@
     "require": {
         "php": ">=8.4 <8.6",
         "agentools/sdk": "^1.0",
-        "axiomasoft/vaulter-ai-core": "^1.0",
+        "axiomasoft/vaulter-ai-core": "self.version",
         "illuminate/contracts": "^13.0",
         "illuminate/support": "^13.0"
     },

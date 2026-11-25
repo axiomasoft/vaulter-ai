@@ -12,8 +12,8 @@
     ],
     "require": {
         "php": ">=8.4 <8.6",
-        "axiomasoft/vaulter-ai-core": "^1.0",
-        "axiomasoft/vaulter-ai-documents": "^1.0",
+        "axiomasoft/vaulter-ai-core": "self.version",
+        "axiomasoft/vaulter-ai-documents": "self.version",
         "axiomasoft/vaulter-collaboration": "^1.0",
         "axiomasoft/vaulter-core": "^1.0"
     },

@@ -12,7 +12,7 @@
     ],
     "require": {
         "php": ">=8.4 <8.6",
-        "axiomasoft/vaulter-ai-core": "^1.0",
+        "axiomasoft/vaulter-ai-core": "self.version",
         "illuminate/bus": "^13.0",
         "illuminate/contracts": "^13.0",
         "illuminate/json-schema": "^13.15",
