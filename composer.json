@@ -145,9 +145,26 @@
         }
     },
     "scripts": {
+        "prepare": "bash scripts/dev/prepare-siblings.sh",
         "lint": "@php vendor/bin/pint",
         "lint:check": "@php vendor/bin/pint --test",
-        "test": "@php vendor/bin/pest -c phpunit.xml.dist",
-        "phpstan": "@php vendor/bin/phpstan analyse -c phpstan.neon.dist --memory-limit=1G --no-progress"
+        "phpstan": "@php vendor/bin/phpstan analyse -c phpstan.neon.dist --memory-limit=1G --no-progress",
+        "quality": [
+            "@composer validate --strict --no-check-publish",
+            "@lint:check",
+            "@phpstan"
+        ],
+        "test": [
+            "@prepare",
+            "@php vendor/bin/pest -c phpunit.xml.dist"
+        ]
+    },
+    "scripts-descriptions": {
+        "prepare": "Build the sibling Node artifacts (vaulter vue, vaulter-sheets runtime/realtime/vue, Playwright Chromium) that the PHP suites execute; no-op when up to date.",
+        "lint": "Format PHP sources with Pint.",
+        "lint:check": "Fail when Pint would change a file.",
+        "phpstan": "PHPStan at level max with strict-rules, disallowed-calls and the SQL stop rail.",
+        "quality": "composer validate, Pint check and PHPStan.",
+        "test": "Prepare siblings, then run every Pest suite (SQLite by default; set DB_CONNECTION=pgsql for PostgreSQL)."
     }
 }
