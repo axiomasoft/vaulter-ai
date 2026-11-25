@@ -23,9 +23,16 @@ client = OfficeClient(
 hits = client.search("termination clause", resource_type="text")
 doc = hits["result"]["items"][0]["resource_id"]
 outline = client.read(doc, {"kind": "text_outline"})
-proposal = client.prepare(doc, "text.replace_exact@1", outline["result"]["read_token"], {
-    "block_id": "p42", "expected": "…", "replacement": "…",
-})
+proposal = client.prepare(
+    doc,
+    "text.replace_exact@1",
+    outline["result"]["read_token"],
+    {
+        "block_id": "p42",
+        "expected": "…",
+        "replacement": "…",
+    },
+)
 outcome = client.commit(doc, proposal["result"]["proposal_id"], proposal["result"]["digest"])
 ```
 
