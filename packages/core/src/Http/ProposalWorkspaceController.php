@@ -96,11 +96,7 @@ final readonly class ProposalWorkspaceController
             );
 
             if (! $request->expectsJson() && ! $request->isJson()) {
-                $redirectTo = is_string($request->input('redirect_to')) && str_starts_with($request->input('redirect_to'), '/')
-                    ? $request->input('redirect_to')
-                    : url()->previous('/office/proposals');
-
-                return new RedirectResponse($redirectTo, 303);
+                return LocalRedirect::after($request);
             }
 
             return new JsonResponse(['data' => $result], 200);
