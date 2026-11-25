@@ -9,6 +9,7 @@ from typing import Any
 from unittest import mock
 
 from support import LoopbackServer, Recorded, Reply
+
 from vaulter_office import AsyncOfficeClient, OfficeClient
 
 

@@ -9,17 +9,21 @@ import inspect
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from typing import Any, Concatenate
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Any, Concatenate, override
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
     """Refuse all HTTP redirects so Authorization headers never leave the configured origin."""
 
+    @override
     def redirect_request(
         self,
         req: Request,
@@ -102,13 +106,12 @@ def _parse_sse_block(block: str) -> dict[str, Any] | None:
     data_lines: list[str] = []
 
     for raw_line in block.split("\n"):
-        line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
+        line = raw_line.removesuffix("\r")
         if line == "" or line.startswith(":"):
             continue
         if ":" in line:
             field, value = line.split(":", 1)
-            if value.startswith(" "):
-                value = value[1:]
+            value = value.removeprefix(" ")
         else:
             field, value = line, ""
 
@@ -217,7 +220,7 @@ class OfficeClient:
             headers["Content-Type"] = "application/json"
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
-        req = Request(url, data=data, headers=headers, method=method)
+        req = Request(url, data=data, headers=headers, method=method)  # noqa: S310 -- http(s) enforced in __init__
 
         try:
             with _transport_errors("HTTP"), self._opener.open(req, timeout=self._timeout) as resp:
@@ -225,7 +228,7 @@ class OfficeClient:
                 return _json_object(status, resp.read())
         except HTTPError as exc:
             raw = _drain(exc)
-            if 300 <= exc.code < 400:
+            if HTTPStatus.MULTIPLE_CHOICES <= exc.code < HTTPStatus.BAD_REQUEST:
                 raise OfficeProtocolError(exc.code, raw.decode("utf-8", errors="replace")) from exc
             # The Office endpoint reports domain errors as JSON envelopes with a 4xx/5xx status.
             return _json_object(exc.code, raw)
@@ -450,7 +453,7 @@ class OfficeClient:
             "Last-Event-ID": str(cursor),
             **self._credentials_provider(),
         }
-        req = Request(url, headers=headers, method="GET")
+        req = Request(url, headers=headers, method="GET")  # noqa: S310 -- http(s) enforced in __init__
         try:
             with _transport_errors("SSE"):
                 resp: http.client.HTTPResponse = self._opener.open(req, timeout=self._timeout)
@@ -492,7 +495,7 @@ class AsyncOfficeClient:
         self._credentials_provider = credentials_provider
         self._sync = OfficeClient(
             endpoint=endpoint,
-            credentials_provider=lambda: {},
+            credentials_provider=dict,
             timeout=timeout,
             workspace_endpoint=workspace_endpoint,
             max_retries=max_retries,

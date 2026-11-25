@@ -13,3 +13,38 @@ dependencies = []
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vaulter_office*"]
+
+[tool.setuptools.package-data]
+vaulter_office = ["py.typed"]
+
+[dependency-groups]
+dev = ["mypy>=2.4", "ruff>=0.17"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "UP", "B", "C4", "SIM", "RUF", "PIE", "RET", "S", "PL", "TC",
+    "PERF", "FURB", "BLE", "T20", "PTH", "ARG", "N", "A", "ISC", "ANN",
+]
+ignore = [
+    "PLR0913", # wire methods mirror the Office envelope fields one keyword per field
+    "ANN401",  # JSON payloads are dict[str, Any] by design
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vaulter_office"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S310", "PLR2004", "ARG001", "ARG002"]
+# Puts the package on sys.path before importing it, for runs without an installed client.
+"tests/test_wire.py" = ["E402"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["vaulter_office", "tests"]
+mypy_path = "tests"
+warn_unreachable = true

@@ -1,14 +1,27 @@
-"""Loopback HTTP server shared by the client tests."""
+"""Loopback HTTP server shared by the client tests.
+
+Test modules import this module before vaulter_office (isort keeps third-party `support` ahead of the
+first-party package), so it also makes the package importable when the suite runs without an installed
+client: `python -m unittest discover -s clients/python/tests` only puts the tests directory on sys.path.
+"""
 
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from types import TracebackType
-from typing import Any, Self
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Self
+
+if TYPE_CHECKING:
+    from types import TracebackType
+
+_PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
 
 
 @dataclass(frozen=True)

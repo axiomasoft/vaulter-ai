@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from support import LoopbackServer, Recorded, Reply
+
 from vaulter_office import OfficeClient
 
 
@@ -35,11 +36,19 @@ class WorkspaceRequestTest(unittest.TestCase):
                 ("GET", "/tenant/office/proposals", None),
                 ("GET", "/tenant/office/proposals?resource_id=doc+1&decision=pending", None),
                 ("GET", "/tenant/office/proposals/p%2F1", None),
-                ("POST", "/tenant/office/proposals/p%2F1/decision", {"digest": "d" * 64, "approved": True, "command_id": "cmd-1"}),
+                (
+                    "POST",
+                    "/tenant/office/proposals/p%2F1/decision",
+                    {"digest": "d" * 64, "approved": True, "command_id": "cmd-1"},
+                ),
                 ("POST", "/tenant/office/proposals/p-2/decision", {"digest": "e" * 64, "approved": False}),
                 ("GET", "/tenant/office/runs/r%2F1", None),
                 ("POST", "/tenant/office/runs/r%2F1/resume", {"reread_only": False}),
-                ("POST", "/tenant/office/runs/r-2/resume", {"reread_only": True, "arguments_by_resource": {"doc-1": {"x": 1}}}),
+                (
+                    "POST",
+                    "/tenant/office/runs/r-2/resume",
+                    {"reread_only": True, "arguments_by_resource": {"doc-1": {"x": 1}}},
+                ),
                 ("POST", "/tenant/office/chat/sessions", {}),
                 ("POST", "/tenant/office/chat/sessions", {"retention_seconds": 60}),
                 ("GET", "/tenant/office/chat/sessions/s%2F1", None),
@@ -55,7 +64,9 @@ class WorkspaceRequestTest(unittest.TestCase):
     def test_unknown_operations_path_falls_back_to_the_root_workspace(self) -> None:
         with LoopbackServer(_ok) as server:
             OfficeClient(f"{server.base_url}/custom/ops", dict).get_run("r-1")
-            OfficeClient(f"{server.base_url}/custom/ops", dict, workspace_endpoint=f"{server.base_url}/ws/").get_run("r-2")
+            OfficeClient(f"{server.base_url}/custom/ops", dict, workspace_endpoint=f"{server.base_url}/ws/").get_run(
+                "r-2"
+            )
 
         self.assertEqual([r.path for r in server.requests], ["/office/runs/r-1", "/ws/runs/r-2"])
 
@@ -77,7 +88,12 @@ class CommitRetryTest(unittest.TestCase):
         self.assertEqual(result, {"ok": True, "result": {"state": "committed"}})
         self.assertEqual(
             [(r.body["operation"], r.body["input"]["command_id"]) for r in server.requests],
-            [("office.commit", "cmd-7"), ("office.status", "cmd-7"), ("office.commit", "cmd-7"), ("office.status", "cmd-7")],
+            [
+                ("office.commit", "cmd-7"),
+                ("office.status", "cmd-7"),
+                ("office.commit", "cmd-7"),
+                ("office.status", "cmd-7"),
+            ],
         )
 
     def test_last_attempt_returns_the_server_answer_without_another_status_call(self) -> None:

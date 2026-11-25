@@ -6,6 +6,7 @@ import unittest
 from typing import Any
 
 from support import LoopbackServer, Reply
+
 from vaulter_office import AsyncOfficeClient, OfficeClient
 
 _STREAM = (

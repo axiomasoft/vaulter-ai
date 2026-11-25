@@ -7,6 +7,7 @@ import time
 import unittest
 
 from support import LoopbackServer, Recorded, Reply
+
 from vaulter_office import OfficeClient, OfficeProtocolError
 
 
@@ -45,7 +46,9 @@ class ResponseBodyTest(unittest.TestCase):
         self.assertEqual(ctx.exception.body, body)
 
     def test_html_success_page_is_a_protocol_error(self) -> None:
-        self.assert_protocol_error(Reply(body=b"<html>proxy</html>", content_type="text/html"), 200, "<html>proxy</html>")
+        self.assert_protocol_error(
+            Reply(body=b"<html>proxy</html>", content_type="text/html"), 200, "<html>proxy</html>"
+        )
 
     def test_invalid_utf8_is_a_protocol_error(self) -> None:
         self.assert_protocol_error(Reply(body=b'{"ok": "\xff"}'), 200, '{"ok": "\ufffd"}')
@@ -54,7 +57,9 @@ class ResponseBodyTest(unittest.TestCase):
         self.assert_protocol_error(Reply.json([1, 2]), 200, [1, 2])
 
     def test_non_json_gateway_error_is_a_protocol_error(self) -> None:
-        self.assert_protocol_error(Reply(status=502, body=b"Bad Gateway", content_type="text/plain"), 502, "Bad Gateway")
+        self.assert_protocol_error(
+            Reply(status=502, body=b"Bad Gateway", content_type="text/plain"), 502, "Bad Gateway"
+        )
 
     def test_json_error_envelope_is_returned_to_the_caller(self) -> None:
         envelope = {"ok": False, "error": {"code": "invalid_input"}}
@@ -80,9 +85,11 @@ class TransportFailureTest(unittest.TestCase):
 
     def test_sse_http_error_carries_the_decoded_envelope(self) -> None:
         envelope = {"ok": False, "error": {"code": "resource_unavailable"}}
-        with LoopbackServer(lambda _r: Reply.json(envelope, status=404)) as server:
-            with self.assertRaises(OfficeProtocolError) as ctx:
-                next(_client(server).stream_chat_events("s-1"))
+        with (
+            LoopbackServer(lambda _r: Reply.json(envelope, status=404)) as server,
+            self.assertRaises(OfficeProtocolError) as ctx,
+        ):
+            next(_client(server).stream_chat_events("s-1"))
         self.assertEqual(ctx.exception.status, 404)
         self.assertEqual(ctx.exception.body, envelope)
 

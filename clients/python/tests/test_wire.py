@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import socket
 import sys
 import threading
+import time
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 # `unittest discover -s clients/python/tests` puts the tests directory on
 # sys.path, not the sibling package, and the pre-gate does not install it.
@@ -17,14 +20,14 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 if str(_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PACKAGE_ROOT))
 
-from vaulter_office import OfficeClient, OfficeProtocolError
+from vaulter_office import AsyncOfficeClient, OfficeClient, OfficeProtocolError
 
 
 class _MockOfficeHandler(BaseHTTPRequestHandler):
-    captured_requests: list[tuple[dict[str, str], dict[str, Any]]] = []
-    next_response: tuple[int, dict[str, Any]] = (200, {})
+    captured_requests: ClassVar[list[tuple[dict[str, str], dict[str, Any]]]] = []
+    next_response: ClassVar[tuple[int, dict[str, Any]]] = (200, {})
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length).decode("utf-8"))
         headers = {k.lower(): v for k, v in self.headers.items()}
@@ -111,7 +114,7 @@ class OfficeClientWireTest(unittest.TestCase):
         )
         client = OfficeClient(
             endpoint=f"http://127.0.0.1:{self.port}/api/vaulter-ai/v1/operations",
-            credentials_provider=lambda: {},
+            credentials_provider=dict,
         )
 
         res = client.read("hidden-node", {"kind": "text_outline", "query": "срок"})
@@ -129,7 +132,7 @@ class OfficeClientWireTest(unittest.TestCase):
             redirect_target = ""
             redirect_code = 302
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
                 self.rfile.read(length)
                 body = json.dumps({"ok": True}).encode("utf-8")
@@ -149,10 +152,10 @@ class OfficeClientWireTest(unittest.TestCase):
                 self.send_response(200)
                 self.end_headers()
 
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 self._record()
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 self._record()
 
             def log_message(self, format: str, *args: object) -> None:  # noqa: A002
@@ -224,18 +227,16 @@ class OfficeClientWireTest(unittest.TestCase):
 
     def test_lost_commit_response_resumes_with_the_known_command_id(self) -> None:
         class _DropCommitHandler(BaseHTTPRequestHandler):
-            seen: list[dict[str, Any]] = []
+            seen: ClassVar[list[dict[str, Any]]] = []
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
                 body = json.loads(self.rfile.read(length).decode("utf-8"))
                 type(self).seen.append(body)
                 if body["operation"] == "office.commit":
                     self.close_connection = True
-                    try:
+                    with contextlib.suppress(OSError):
                         self.connection.shutdown(socket.SHUT_RDWR)
-                    except OSError:
-                        pass
                     return
 
                 command_id = body["input"]["command_id"]
@@ -297,16 +298,11 @@ class OfficeClientWireTest(unittest.TestCase):
             thread.join(timeout=2.0)
 
     def test_full_scenario_and_commit_timeout_retry_and_async_client(self) -> None:
-        import asyncio
-        import time
-        from http.server import ThreadingHTTPServer
-        from vaulter_office import AsyncOfficeClient
-
         class _ScenarioHandler(BaseHTTPRequestHandler):
-            seen: list[dict[str, object]] = []
+            seen: ClassVar[list[dict[str, Any]]] = []
             commit_attempts = 0
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
                 body = json.loads(self.rfile.read(length).decode("utf-8"))
                 _ScenarioHandler.seen.append(body)
