@@ -21,6 +21,22 @@ def _unused_port() -> int:
         return port
 
 
+class EndpointValidationTest(unittest.TestCase):
+    def test_only_absolute_http_urls_are_accepted(self) -> None:
+        for endpoint in (
+            "file:///etc/passwd",
+            "ftp://host/ops",
+            "data:,{}",
+            "/api/vaulter-ai/v1/operations",
+            "localhost",
+        ):
+            with self.subTest(endpoint=endpoint), self.assertRaisesRegex(ValueError, "absolute http"):
+                OfficeClient(endpoint, dict)
+        with self.assertRaisesRegex(ValueError, "absolute http"):
+            OfficeClient("https://office.example/api/vaulter-ai/v1/operations", dict, workspace_endpoint="file:///tmp")
+        OfficeClient("https://office.example/api/vaulter-ai/v1/operations", dict)
+
+
 class ResponseBodyTest(unittest.TestCase):
     def assert_protocol_error(self, reply: Reply, status: int, body: object) -> None:
         with LoopbackServer(lambda _r: reply) as server, self.assertRaises(OfficeProtocolError) as ctx:

@@ -76,6 +76,15 @@ def _json_object(status: int, raw: bytes) -> dict[str, Any]:
     return decoded
 
 
+def _require_http_url(url: str) -> str:
+    """Accept only absolute http(s) URLs: urllib would otherwise also open file:, ftp: and data: URLs."""
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        msg = f"Office endpoint must be an absolute http(s) URL, got {url!r}"
+        raise ValueError(msg)
+    return url
+
+
 def _derive_workspace_endpoint(operations_endpoint: str) -> str:
     parsed = urlsplit(operations_endpoint)
     suffix = "/api/vaulter-ai/v1/operations"
@@ -175,9 +184,9 @@ class OfficeClient:
         max_retries: int = 2,
         retry_backoff: float = 0.1,
     ) -> None:
-        self._endpoint = endpoint
+        self._endpoint = _require_http_url(endpoint)
         self._workspace_endpoint = (
-            workspace_endpoint.rstrip("/")
+            _require_http_url(workspace_endpoint).rstrip("/")
             if workspace_endpoint is not None
             else _derive_workspace_endpoint(endpoint)
         )
