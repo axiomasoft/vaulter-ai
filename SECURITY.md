@@ -15,4 +15,4 @@ Please test only systems you own or are allowed to assess, minimize data
 access, and stop if customer data or model provider credentials are exposed.
 
 The security model of the packages is described in
-[docs/security.md](docs/security.md).
+[docs/security/overview.md](docs/security/overview.md).

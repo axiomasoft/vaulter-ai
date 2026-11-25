@@ -44,4 +44,4 @@ from the editor context sent to the model.
 
 ## Reporting
 
-See [SECURITY.md](../SECURITY.md).
+See [SECURITY.md](../../SECURITY.md).

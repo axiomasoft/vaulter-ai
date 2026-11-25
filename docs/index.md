@@ -16,7 +16,7 @@ and verifies the result.
 | [Configuration](reference/configuration.md) | Every config key and environment variable |
 | [HTTP API](reference/http-api.md) | Operation endpoint, workspace endpoints, chat SSE |
 | [Errors](reference/errors.md) | Wire error codes, HTTP statuses and the `next_action` contract |
-| [Security model](security.md) | Trust boundaries, secrets, approvals and verification |
+| [Security model](security/overview.md) | Trust boundaries, secrets, approvals and verification |
 
 Client libraries:
 

@@ -34,7 +34,7 @@ Start with [docs/index.md](docs/index.md):
 [configuration](docs/reference/configuration.md),
 [HTTP API](docs/reference/http-api.md),
 [errors](docs/reference/errors.md),
-[security](docs/security.md).
+[security](docs/security/overview.md).
 
 ## Requirements
 
@@ -57,4 +57,4 @@ vulnerabilities.
 
 ## License
 
-Proprietary. All rights reserved.
+Proprietary; see [LICENSE](LICENSE).
