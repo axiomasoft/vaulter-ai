@@ -29,6 +29,10 @@ workspace/
 └── packman/                 axiomasoft/packman
 ```
 
+`scripts/ci/checkout-ecosystem.sh` clones any missing sibling (branch `main`,
+packman at the tag pinned in `composer.json`); set `VAULTER_READ_TOKEN` to a
+token that can read the private repositories.
+
 ## PHP
 
 ```bash
