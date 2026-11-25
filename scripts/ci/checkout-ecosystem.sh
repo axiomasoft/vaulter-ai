@@ -26,7 +26,12 @@ fetch_dependency() {
     fi
     mkdir -p "$dest"
     git -C "$dest" init -q
-    GIT_TERMINAL_PROMPT=0 git "${auth[@]}" -C "$dest" fetch --quiet --depth=1 "https://github.com/axiomasoft/$repository.git" "$ref"
+    if ! GIT_TERMINAL_PROMPT=0 git "${auth[@]}" -C "$dest" fetch --quiet --depth=1 "https://github.com/axiomasoft/$repository.git" "$ref"; then
+        rm -rf "$dest"
+        # ::error:: surfaces as an annotation on GitHub Actions and reads as a plain line elsewhere.
+        echo "::error title=checkout-ecosystem::cannot read axiomasoft/$repository ($ref). It is private or missing; set VAULTER_READ_TOKEN to a token with read access to it." >&2
+        exit 1
+    fi
     git -C "$dest" checkout -q -b main FETCH_HEAD
 }
 
