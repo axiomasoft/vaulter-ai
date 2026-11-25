@@ -247,6 +247,14 @@ test('HTTP enforces all three transport boundaries and rejects body authority in
         expect((string) $resp->getContent())->not->toContain('secret_probe');
     }
 
+    // Boundary 0: a body above 1 MiB is refused before it is decoded; one of exactly 1 MiB is read.
+    $search = json_encode(['version' => 1, 'operation' => 'office.search', 'input' => ['query' => 'alpha']], JSON_THROW_ON_ERROR);
+    $post = fn (string $raw) => $this->call('POST', '/api/vaulter-ai/v1/operations', [], [], [], ['CONTENT_TYPE' => 'application/json'], $raw);
+    $post(str_pad($search, WireValidator::MAX_HTTP_BODY_BYTES))->assertStatus(401);
+    $tooLarge = $post(str_pad($search, WireValidator::MAX_HTTP_BODY_BYTES + 1));
+    $tooLarge->assertStatus(413);
+    expect($tooLarge->json())->toBe(['error' => 'request_too_large']);
+
     // Bind trusted CallContext resolver ignoring request body.
     $this->app->instance(CallContextResolver::class, new class implements CallContextResolver
     {

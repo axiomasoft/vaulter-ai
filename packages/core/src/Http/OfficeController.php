@@ -32,6 +32,9 @@ final readonly class OfficeController
         $parsed = $this->validator->parseHttpPayload($request->getContent());
 
         if (! $parsed['ok']) {
+            if ($parsed['kind'] === 'too_large') {
+                return new JsonResponse(['error' => 'request_too_large'], 413, options: OfficeResponse::WIRE_JSON_OPTIONS);
+            }
             if ($parsed['kind'] === 'invalid_request') {
                 return new JsonResponse(['error' => 'invalid_request'], 400, options: OfficeResponse::WIRE_JSON_OPTIONS);
             }

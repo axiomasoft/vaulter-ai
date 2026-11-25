@@ -19,6 +19,12 @@ use Vaulter\Ai\Core\Enums\OfficeOperation;
  */
 final class WireValidator
 {
+    /**
+     * The largest operation body read. Requests are small by design (reads and results travel in the
+     * response); the bound keeps a client from making the server decode megabytes of JSON.
+     */
+    public const int MAX_HTTP_BODY_BYTES = 1_048_576;
+
     private readonly stdClass $schema;
 
     private readonly Validator $validator;
@@ -137,10 +143,15 @@ final class WireValidator
      *  2. Known operation with integer version !== 1 => HTTP 400 v1 envelope with unsupported_version
      *  3. Known operation v1 failing schema (missing/bad fields, extra envelope keys) => HTTP 400 v1 envelope with invalid_input
      *
-     * @return array{ok: true, request: OfficeRequest}|array{ok: false, kind: 'invalid_request'}|array{ok: false, kind: 'envelope', operation: OfficeOperation, error_code: ErrorCode}
+     * A body above MAX_HTTP_BODY_BYTES is refused before it is decoded (transport 413).
+     *
+     * @return array{ok: true, request: OfficeRequest}|array{ok: false, kind: 'invalid_request'}|array{ok: false, kind: 'too_large'}|array{ok: false, kind: 'envelope', operation: OfficeOperation, error_code: ErrorCode}
      */
     public function parseHttpPayload(string $rawBody): array
     {
+        if (strlen($rawBody) > self::MAX_HTTP_BODY_BYTES) {
+            return ['ok' => false, 'kind' => 'too_large'];
+        }
         if (trim($rawBody) === '') {
             return ['ok' => false, 'kind' => 'invalid_request'];
         }

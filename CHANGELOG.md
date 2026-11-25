@@ -9,6 +9,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `POST /operations` refuses a body above 1 MiB with `413 {"error":"request_too_large"}`
+  before decoding it; there was no bound.
 - Providers boot without an `APP_KEY`; executors are built on first use.
 - Workspace form posts no longer redirect to other hosts.
 - The AgenTools executor honours its `channel` and `lease_seconds` settings.

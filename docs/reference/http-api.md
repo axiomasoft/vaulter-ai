@@ -8,8 +8,10 @@ it returns `null` they answer `401` with `authentication_required`.
 `POST /{route_prefix}/operations` (default `/api/vaulter-ai/v1/operations`,
 middleware `api`). Named route `vaulter-ai.operations`.
 
-The body is one Office SDK v1 request; the response is the matching success or
-failure envelope, with the HTTP status from [Errors](errors.md).
+The body is one Office SDK v1 request of at most 1 MiB; the response is the
+matching success or failure envelope, with the HTTP status from
+[Errors](errors.md). A larger body is answered `413 {"error":"request_too_large"}`
+without being decoded.
 
 ```http
 POST /api/vaulter-ai/v1/operations

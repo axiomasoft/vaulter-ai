@@ -35,5 +35,11 @@ should branch on `next_action`, not on the HTTP status.
 | `unsupported_content` | 422 | no | `stop` | The target contains content the command cannot change safely |
 | `temporarily_unavailable` | 503 | yes | `status` for commit, `retry_read` otherwise | Transient failure; after a commit always ask `office.status` |
 
+Two failures of `POST /operations` happen before the body is read as a request,
+so they carry no envelope: `400 {"error":"invalid_request"}` for a body that is
+not JSON, not an object, or names no known operation, and
+`413 {"error":"request_too_large"}` for a body above 1 MiB
+(`WireValidator::MAX_HTTP_BODY_BYTES`).
+
 The workspace endpoints (`/office/...`) use the same codes in their JSON error
 bodies.
