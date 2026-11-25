@@ -363,7 +363,7 @@ test('resumeStep recovers a pre-route crash by replaying the saved command and r
         ->and($owner->table('v_ai_text_commands')->count())->toBe(1);
 });
 
-test('resumeStep rejects a competing commit bound after it looked up the saved command route (F1)', function (): void {
+test('resumeStep rejects a competing commit bound after it looked up the saved command route', function (): void {
     $fixture = new TextCommandFixture($this->app);
     configureDeterministicLaravelAi($this->app, $fixture);
     $runs = $this->app->make(Runs::class);
@@ -410,7 +410,7 @@ test('resumeStep rejects a competing commit bound after it looked up the saved c
         ->and($resumed['step']->receiptId)->toBeNull();
 });
 
-test('worker SIGKILL reconciles saved commit BEFORE prompting so a fresh read+prepare fake cannot double-commit (F2)', function (): void {
+test('worker SIGKILL reconciles saved commit BEFORE prompting so a fresh read+prepare fake cannot double-commit', function (): void {
     $fixture = new TextCommandFixture($this->app, automatic: true);
     configureDeterministicLaravelAi($this->app, $fixture);
 
@@ -529,7 +529,7 @@ test('worker SIGKILL reconciles saved commit BEFORE prompting so a fresh read+pr
         ->and($verifySteps[0]->receiptId)->toBe($originalReceiptId);
 });
 
-test('explicit resumeStep job keeps recovery scheduled under active dispatch lease and settles parent run when owner commits (F3)', function (): void {
+test('explicit resumeStep job keeps recovery scheduled under active dispatch lease and settles parent run when owner commits', function (): void {
     Queue::fake();
     $fixture = new TextCommandFixture($this->app, automatic: false);
     configureDeterministicLaravelAi($this->app, $fixture, approval: 'human');
@@ -597,7 +597,7 @@ test('explicit resumeStep job keeps recovery scheduled under active dispatch lea
         ->and($owner->table('v_ai_text_commands')->count())->toBe(1);
 });
 
-test('LaravelOfficeExecutor dispatch does not publish jobs when an outer host transaction rolls back (F7)', function (): void {
+test('LaravelOfficeExecutor dispatch does not publish jobs when an outer host transaction rolls back', function (): void {
     $fixture = new TextCommandFixture($this->app, automatic: true);
     configureDeterministicLaravelAi($this->app, $fixture);
 
@@ -633,7 +633,7 @@ test('LaravelOfficeExecutor dispatch does not publish jobs when an outer host tr
     Queue::assertPushed(ExecuteOfficeRun::class, 1);
 });
 
-test('failed current-state verification preserves verification failure in the run state instead of marking completed (F8)', function (): void {
+test('failed current-state verification preserves verification failure in the run state instead of marking completed', function (): void {
     $fixture = new TextCommandFixture($this->app, automatic: true);
     configureDeterministicLaravelAi($this->app, $fixture);
 
@@ -709,7 +709,7 @@ test('failed current-state verification preserves verification failure in the ru
         ->and($verifySteps[0]->compactResult['result']['outcome'] ?? null)->toBe('failed');
 });
 
-test('live-smoke runner skips cleanly without opt-in and fails when --require-key is passed without credentials (F11)', function (): void {
+test('live-smoke runner skips cleanly without opt-in and fails when --require-key is passed without credentials', function (): void {
     $script = dirname(__DIR__).'/bin/live-smoke.php';
 
     $skipProc = new Process(['php', $script], dirname(__DIR__, 3), [

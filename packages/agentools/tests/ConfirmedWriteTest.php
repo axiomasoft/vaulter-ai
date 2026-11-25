@@ -216,7 +216,7 @@ test('ConfirmedWrite fails cleanly when initiator edit permission is revoked bef
     expect($owner->table('v_ai_text_commands')->count())->toBe(0);
 });
 
-test('ConfirmedWrite blocks command_id reuse across proposals, reader downgrade replay, wrong-digest lock-in, and replan key reuse (F1, F4, F5)', function (): void {
+test('ConfirmedWrite blocks command_id reuse across proposals, reader downgrade replay, wrong-digest lock-in, and replan key reuse', function (): void {
     $fixture = new TextCommandFixture($this->app, automatic: true);
     Config::set('vaulter-ai.profiles.documents', [
         'executor' => 'agentools',
@@ -250,7 +250,7 @@ test('ConfirmedWrite blocks command_id reuse across proposals, reader downgrade 
     $proposalA = (string) $propA->value['proposal_id'];
     $digestA = (string) $propA->value['digest'];
 
-    // F4: First commit attempt with wrong digest must fail WITHOUT making a binding durable.
+    // First commit attempt with wrong digest must fail WITHOUT making a binding durable.
     $wrongFirst = $port->call('office_commit', [
         'resource_id' => $fixture->node->id,
         'proposal_id' => $proposalA,
@@ -271,7 +271,7 @@ test('ConfirmedWrite blocks command_id reuse across proposals, reader downgrade 
         ->and($commitA->value['state'])->toBe('committed');
     $receiptA = (string) $commitA->value['receipt_id'];
 
-    // F5: Replay proposal A with replan key k2 succeeds, AND k2 stays bound so proposal B cannot reuse k2.
+    // Replay proposal A with replan key k2 succeeds, AND k2 stays bound so proposal B cannot reuse k2.
     $replayA = $port->call('office_commit', [
         'resource_id' => $fixture->node->id,
         'proposal_id' => $proposalA,
@@ -294,7 +294,7 @@ test('ConfirmedWrite blocks command_id reuse across proposals, reader downgrade 
     $proposalB = (string) $propB->value['proposal_id'];
     $digestB = (string) $propB->value['digest'];
 
-    // F5: Reusing accepted replan alias k-commit-a-replan-2 for proposal B must conflict.
+    // Reusing accepted replan alias k-commit-a-replan-2 for proposal B must conflict.
     $reuseAlias = $port->call('office_commit', [
         'resource_id' => $fixture->node->id,
         'proposal_id' => $proposalB,
@@ -303,7 +303,7 @@ test('ConfirmedWrite blocks command_id reuse across proposals, reader downgrade 
     expect($reuseAlias->isError())->toBeTrue()
         ->and($reuseAlias->error?->code)->toBe('vaulter.conflict.idempotency_conflict');
 
-    // F1 (part 1): Submitting proposal B with proposal A's command_id must conflict and never return A's receipt.
+    // command_id reuse: submitting proposal B with proposal A's command_id must conflict and never return A's receipt.
     $reuseCmd = $port->call('office_commit', [
         'resource_id' => $fixture->node->id,
         'proposal_id' => $proposalB,
@@ -316,7 +316,7 @@ test('ConfirmedWrite blocks command_id reuse across proposals, reader downgrade 
     $owner = $this->app->make(VaulterDatabase::class)->connection();
     expect($owner->table('v_ai_text_commands')->count())->toBe(1);
 
-    // F1 (part 2): Downgrade original writer to Reader (retains View, loses Edit) -> commit replay must fail closed.
+    // Reader downgrade: downgrade original writer to Reader (retains View, loses Edit) -> commit replay must fail closed.
     $fixture->revoke();
     $fixture->drive->access()->grant($fixture->drive->root()->id, new GrantInput(Subject::ofModel($fixture->actor), RoleRegistry::READER));
 
@@ -345,7 +345,7 @@ test('ConfirmedWrite blocks command_id reuse across proposals, reader downgrade 
         ->and($standaloneDowngraded->error?->code)->toBe('vaulter.not_found.resource_unavailable');
 });
 
-test('ConfirmedWrite allows valid human approval after an earlier wrong-digest commit attempt (F4)', function (): void {
+test('ConfirmedWrite allows valid human approval after an earlier wrong-digest commit attempt', function (): void {
     $fixture = new TextCommandFixture($this->app, automatic: false);
     Config::set('vaulter-ai.profiles.documents', [
         'executor' => 'agentools',
@@ -355,7 +355,7 @@ test('ConfirmedWrite allows valid human approval after an earlier wrong-digest c
         'revision' => 'rev-human-f4',
     ]);
 
-    $approverActor = TestActor::query()->create(['name' => 'Reviewer F4', 'email' => 'revf4@example.test']);
+    $approverActor = TestActor::query()->create(['name' => 'Reviewer', 'email' => 'reviewer@example.test']);
     $fixture->drive->access()->grant($fixture->drive->root()->id, new GrantInput(Subject::ofModel($approverActor), RoleRegistry::WRITER));
     $approverContext = new CallContext(
         $fixture->context->tenantId,

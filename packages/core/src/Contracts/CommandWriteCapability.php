@@ -9,7 +9,7 @@ use Vaulter\Ai\Core\Data\CommandDescriptor;
 use Vaulter\Ai\Core\Data\ResourceEntry;
 
 /**
- * Evaluates domain write readiness for a resource/command (for example 3.5 strict-profile journal checks).
+ * Evaluates domain write readiness for a resource/command (for example the strict-profile live journal checks).
  */
 interface CommandWriteCapability
 {

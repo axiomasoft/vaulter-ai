@@ -203,7 +203,7 @@ test('ScenarioRunner drives OfficeToolPort through read->prepare->commit->verify
         ->and($runs->findCommitStepByProposal($fixture->context, $run->runId, (string) $result->stepResults['prepare']['proposal_id'])?->operation)->toBe(OfficeOperation::Commit);
 });
 
-test('AgenToolsOfficeExecutor preserves awaiting_approval and resumes the same run through verify after approval (F6)', function (bool $objectArguments): void {
+test('AgenToolsOfficeExecutor preserves awaiting_approval and resumes the same run through verify after approval', function (bool $objectArguments): void {
     $fixture = new TextCommandFixture($this->app, automatic: false);
     Config::set('vaulter-ai.profiles.documents', [
         'executor' => 'agentools',

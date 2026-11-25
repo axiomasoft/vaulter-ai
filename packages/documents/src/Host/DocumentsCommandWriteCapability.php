@@ -19,7 +19,7 @@ use Vaulter\Documents\Contracts\LockedDocumentMutation;
 use Vaulter\Drive\Exceptions\Nodes\NodeNotFoundException;
 
 /**
- * Enforces 3.5 strict-profile journal readiness before exposing or executing text write tools
+ * Enforces strict-profile journal readiness before exposing or executing text write tools
  * against resources operating in live journal mode.
  */
 final readonly class DocumentsCommandWriteCapability implements CommandWriteCapability
