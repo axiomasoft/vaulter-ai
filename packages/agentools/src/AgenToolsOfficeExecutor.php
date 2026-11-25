@@ -7,6 +7,7 @@ namespace Vaulter\Ai\AgenTools;
 use AgenTools\Scenario\ScenarioOutcome;
 use AgenTools\Scenario\ScenarioResult;
 use AgenTools\Scenario\ScenarioRunner;
+use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Throwable;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\OfficeExecutor;
@@ -22,11 +23,14 @@ final readonly class AgenToolsOfficeExecutor implements OfficeExecutor
 {
     public const string KEY = 'agentools';
 
+    private const int DEFAULT_LEASE_SECONDS = 90;
+
     public function __construct(
         private OfficeToolPort $port,
         private HostPolicy $policy,
         private Runs $runs,
         private RunStateReducer $stateReducer,
+        private ConfigRepository $config,
         private ScenarioRunner $runner = new ScenarioRunner,
     ) {}
 
@@ -47,7 +51,7 @@ final readonly class AgenToolsOfficeExecutor implements OfficeExecutor
 
         $channel = is_string($payload['channel'] ?? null) && $payload['channel'] !== ''
             ? $payload['channel']
-            : 'agentools';
+            : $this->defaultChannel();
         $sourceEventId = is_string($payload['source_event_id'] ?? null) && $payload['source_event_id'] !== ''
             ? $payload['source_event_id']
             : 'event-'.bin2hex(random_bytes(8));
@@ -89,7 +93,7 @@ final readonly class AgenToolsOfficeExecutor implements OfficeExecutor
             ],
         );
 
-        $lease = $this->runs->claimLease($context, $run->runId);
+        $lease = $this->runs->claimLease($context, $run->runId, $this->leaseSeconds());
         if ($lease === null) {
             throw OfficeException::temporarilyUnavailable();
         }
@@ -111,5 +115,23 @@ final readonly class AgenToolsOfficeExecutor implements OfficeExecutor
 
             throw $failure;
         }
+    }
+
+    private function defaultChannel(): string
+    {
+        $channel = $this->config->get('vaulter-ai-agentools.channel');
+
+        return is_string($channel) && $channel !== '' ? $channel : self::KEY;
+    }
+
+    /**
+     * Lease that keeps a second worker from picking up the same run. It must outlast the slowest
+     * scenario step, so operators tune it with VAULTER_AI_AGENTOOLS_LEASE_SECONDS.
+     */
+    private function leaseSeconds(): int
+    {
+        $seconds = $this->config->get('vaulter-ai-agentools.lease_seconds');
+
+        return is_int($seconds) && $seconds > 0 ? $seconds : self::DEFAULT_LEASE_SECONDS;
     }
 }
