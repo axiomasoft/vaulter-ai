@@ -130,7 +130,40 @@ final class SheetResourceDirectory implements ResourceDirectory
             return null;
         }
 
-        foreach ($this->candidateDrives($context, $actor) as $drive) {
+        return $this->findIn($this->candidateDrives($context, $actor), $actor, $resourceId, $permission);
+    }
+
+    /**
+     * @param  list<string>  $resourceIds
+     * @return array<string, ResourceEntry>
+     */
+    public function filterAccessible(
+        CallContext $context,
+        array $resourceIds,
+        string $permission = 'view',
+    ): array {
+        $actor = $context->actor;
+        if (! $actor instanceof Authorizable || $resourceIds === []) {
+            return [];
+        }
+
+        // Resolve the caller's drives once for the whole batch, not once per id.
+        $drives = $this->candidateDrives($context, $actor);
+        $result = [];
+        foreach ($resourceIds as $resourceId) {
+            $entry = $this->findIn($drives, $actor, $resourceId, $permission);
+            if ($entry !== null) {
+                $result[$resourceId] = $entry;
+            }
+        }
+
+        return $result;
+    }
+
+    /** @param  list<DriveHandle>  $drives */
+    private function findIn(array $drives, Authorizable $actor, string $resourceId, string $permission): ?ResourceEntry
+    {
+        foreach ($drives as $drive) {
             $acting = $drive->actingAs($actor);
 
             try {
@@ -155,26 +188,6 @@ final class SheetResourceDirectory implements ResourceDirectory
         }
 
         return null;
-    }
-
-    /**
-     * @param  list<string>  $resourceIds
-     * @return array<string, ResourceEntry>
-     */
-    public function filterAccessible(
-        CallContext $context,
-        array $resourceIds,
-        string $permission = 'view',
-    ): array {
-        $result = [];
-        foreach ($resourceIds as $resourceId) {
-            $entry = $this->findAccessible($context, $resourceId, $permission);
-            if ($entry !== null) {
-                $result[$resourceId] = $entry;
-            }
-        }
-
-        return $result;
     }
 
     /** @return list<DriveHandle> */
