@@ -135,8 +135,9 @@ const browserPort = vite.httpServer.address().port;
 const baseUrl = `http://127.0.0.1:${browserPort}`;
 
 let browser;
+let page;
+const errors = [];
 try {
-    const errors = [];
     browser = await chromium.launch({
         headless: true,
         timeout: 20_000,
@@ -148,7 +149,7 @@ try {
             ? { executablePath: process.env.SHEETS_CHROMIUM_EXECUTABLE }
             : { channel: 'chromium' }),
     });
-    const page = await browser.newPage();
+    page = await browser.newPage();
     page.setDefaultTimeout(15_000);
     page.on('pageerror', err => errors.push(`pageerror: ${err.message}`));
     page.on('response', res => {
@@ -206,6 +207,13 @@ try {
     if (errors.length > 0) {
         throw new Error(`Browser errors during reopen: ${errors.join(' | ')}`);
     }
+} catch (error) {
+    // A bare locator timeout says nothing about why the grid never rendered; the page
+    // errors, failed requests and visible text collected so far usually do.
+    const bodyText = page ? await page.locator('body').innerText({ timeout: 2_000 }).catch(() => '') : '';
+    console.error(`Browser errors: ${errors.length > 0 ? errors.join(' | ') : '(none)'}`);
+    console.error(`Visible text: ${bodyText.slice(0, 2_000) || '(empty)'}`);
+    throw error;
 } finally {
     await browser?.close();
     await vite.close();
