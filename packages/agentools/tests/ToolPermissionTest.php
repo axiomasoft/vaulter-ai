@@ -107,3 +107,19 @@ test('a commit tool call without its proposal reference is rejected as invalid i
     expect(toolPermissionCode($port->call('office_commit', ['resource_id' => $fixture->node->id, 'digest' => 'd'], 'k-commit')))
         ->toBe('vaulter.validation.invalid_input');
 });
+
+test('replaying a prepared step under its key for another command is an idempotency conflict', function (): void {
+    $fixture = new TextCommandFixture($this->app, automatic: false);
+    Config::set('vaulter-ai.profiles.documents.commands', ['text.replace_exact@1', 'text.delete_block@1']);
+    $run = $this->app->make(Runs::class)->createOrFind($fixture->context, 'agentools', 'evt-replay-other', 'rev-1', ['prompt' => '']);
+    $port = $this->app->make(OfficeToolPort::class)->forContext($fixture->context, $run->runId);
+    $id = $fixture->node->id;
+    $read = $port->call('office_read', ['resource_id' => $id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p42']], 'k-read');
+    $arguments = ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'];
+    $prepare = fn (string $command): ToolExecutionResult => $port->call('office_prepare', [
+        'resource_id' => $id, 'command' => $command, 'read_token' => (string) $read->value['read_token'], 'arguments' => $arguments,
+    ], 'k-prepare');
+
+    expect(toolPermissionCode($prepare('text.replace_exact@1')))->toBeNull()
+        ->and(toolPermissionCode($prepare('text.delete_block@1')))->toBe('vaulter.conflict.idempotency_conflict');
+});
