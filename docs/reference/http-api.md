@@ -68,7 +68,11 @@ Event types include `assistant.delta`, `assistant.interrupted`,
 
 A stream lasts about 25 seconds, sends a `: keep-alive` comment every 12
 seconds and then ends; `EventSource` reconnects on its own with
-`Last-Event-ID`. The caller is re-authorized on every poll, so revoking access
-stops the stream within one poll interval (200 ms). Each open stream holds one
-PHP worker, so size the web server pool for the number of concurrently open
-chat panels.
+`Last-Event-ID`. The server polls the session's events every 200 ms while they
+arrive; each poll that finds nothing doubles the wait, up to 2 seconds, and the
+next event resets it to 200 ms (`Vaulter\Ai\Core\Http\IdlePollBackoff`, not
+configurable). An idle stream therefore makes about 15 polls instead of 125.
+The caller is re-authorized on every poll, so revoking access stops the stream
+within one poll interval: 200 ms on an active stream, at most 2 seconds on an
+idle one. Each open stream holds one PHP worker, so size the web server pool
+for the number of concurrently open chat panels.

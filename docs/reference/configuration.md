@@ -29,12 +29,16 @@ Each package merges its own file; publish one with
 | `secret_store.connections.office_model.key` | `VAULTER_AI_PROVIDER_KEY`, then `OPENAI_API_KEY` | — | Provider API key |
 | `secret_store.connections.office_model.model` | `VAULTER_AI_MODEL` | — | Model |
 | `secret_store.connections.office_model.url` | `VAULTER_AI_PROVIDER_URL`, then `OPENAI_BASE_URL` | — | Custom endpoint |
-| `chat.max_tool_calls` | — | 32 | Tool calls per chat run |
-| `chat.max_output_bytes` | — | 65536 | Assistant output per run |
+| `chat.max_tool_calls` | — | 32 | Tool calls per chat run, clamped to 1–32 |
+| `chat.max_output_bytes` | — | 65536 | Assistant output per run, clamped to 1024–65536 bytes |
 | `chat.delta_batch_bytes` / `chat.delta_batch_ms` | — | 512 / 100 (not in the published file) | How assistant text is batched into `assistant.delta` events |
 
 Retries and request timeouts of model calls are executor settings; see the
-`chat.*` keys of the executor packages below. The profile comes from
+`chat.*` keys of the executor packages below. The published core file also
+carries `chat.max_retries`, `chat.retry_backoff_ms`,
+`chat.request_timeout_seconds` and `default_profile`
+(`VAULTER_AI_DEFAULT_PROFILE`); no code reads them, so changing them has no
+effect. The profile comes from
 `CallContext::$profile`, which your `CallContextResolver` sets.
 
 ### Profiles
@@ -89,7 +93,10 @@ Rebuild projections with
 | `backoff_seconds` | — | `[5, 15, 30]` | Delay between attempts |
 | `default_model` | `VAULTER_AI_MODEL` | — | Model |
 | `provider_connections.office_model` | `VAULTER_AI_PROVIDER` | `openai` | Laravel AI provider per connection |
-| `chat.*` | `VAULTER_AI_CHAT_MAX_RETRIES`, `..._RETRY_BACKOFF_MS`, `..._REQUEST_TIMEOUT`, `..._MAX_OUTPUT_BYTES`, `..._MAX_TOOL_CALLS` | as core | Chat limits for this executor |
+| `chat.max_retries` | `VAULTER_AI_CHAT_MAX_RETRIES` | 2 | Retries of a failed model call, clamped to 0–5 |
+| `chat.retry_backoff_ms` | `VAULTER_AI_CHAT_RETRY_BACKOFF_MS` | 100 | Base delay between retries, clamped to 0–5000 ms |
+| `chat.request_timeout_seconds` | `VAULTER_AI_CHAT_REQUEST_TIMEOUT` | 30 | Timeout of one model call, clamped to 1–120 s |
+| `chat.max_output_bytes` / `chat.max_tool_calls` | `VAULTER_AI_CHAT_MAX_OUTPUT_BYTES` / `VAULTER_AI_CHAT_MAX_TOOL_CALLS` | 65536 / 32 | Limits this executor enforces itself (clamped to 1024–262144 / 1–64); the core per-run limits above also apply |
 
 ## `vaulter-ai-agentools` (tag `vaulter-ai-agentools-config`)
 
@@ -97,8 +104,8 @@ Rebuild projections with
 | --- | --- | --- | --- |
 | `channel` | `VAULTER_AI_AGENTOOLS_CHANNEL` | `agentools` | Run channel when the dispatch payload names none |
 | `lease_seconds` | `VAULTER_AI_AGENTOOLS_LEASE_SECONDS` | 90 | How long a worker owns a claimed run; must exceed the slowest scenario |
-| `chat.*` | same variables as laravel-ai | as core | Chat limits for this executor |
-| `chat.max_tokens` | — | 4096 (not in the published file) | Output token cap per model call |
+| `chat.*` | same variables, defaults and bounds as laravel-ai | — | Chat limits for this executor |
+| `chat.max_tokens` | — | 4096 (not in the published file) | Output token cap per model call, clamped to 1–65536 |
 | `providers.<connection>.format` | — | inferred | Wire format of a provider connection: `responses`, `chat_completions` or `anthropic`. Without it the format is inferred from the connection URL, then defaults to `responses` |
 
 `APP_KEY` is not needed to boot the providers; it is needed as soon as a
