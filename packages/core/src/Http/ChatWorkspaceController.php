@@ -153,7 +153,7 @@ final readonly class ChatWorkspaceController
                     $keepAlive += 12_000_000_000;
                 }
                 // Never sleep past the connection cap: the client reconnects with Last-Event-ID.
-                $delay = min($backoff->after(count($batch)), intdiv(max(0, $deadline - hrtime(true)), 1000));
+                $delay = min($backoff->after(count($batch)), (int) floor(max(0, $deadline - hrtime(true)) / 1000));
                 if ($delay > 0) {
                     usleep($delay);
                 }
