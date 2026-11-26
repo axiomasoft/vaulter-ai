@@ -20,7 +20,7 @@ function removeMatrixTree(string $path): void
     rmdir($path);
 }
 
-function packZipFromDirectory(string $sourceDir, string $zipPath, string $version, array $rewriteConstraints = []): void
+function packZipFromDirectory(string $sourceDir, string $zipPath, string $version): void
 {
     $zip = new ZipArchive;
     expect($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE))->toBeTrue("Cannot open {$zipPath}");
@@ -55,11 +55,6 @@ function packZipFromDirectory(string $sourceDir, string $zipPath, string $versio
             $manifest = json_decode((string) file_get_contents($entry->getPathname()), true, 512, JSON_THROW_ON_ERROR);
             $manifest['version'] = $version;
             unset($manifest['repositories']);
-            foreach ($rewriteConstraints as $dep => $ver) {
-                if (isset($manifest['require'][$dep])) {
-                    $manifest['require'][$dep] = $ver;
-                }
-            }
             $zip->addFromString('composer.json', json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)."\n");
         } else {
             $bytes = file_get_contents($entry->getPathname());
@@ -81,84 +76,27 @@ test('isolated Composer artifact installs verify core+documents, documents+colla
     try {
         // Pack first-party and local SDK ZIP dist archives without symlinks (offline Composer artifact repository).
         $localArchives = [
-            [$root.'/packages/core', 'axiomasoft-vaulter-ai-core-1.0.0.zip', '1.0.0', []],
-            [$root.'/packages/documents', 'axiomasoft-vaulter-ai-documents-1.0.0.zip', '1.0.0', [
-                'axiomasoft/vaulter-ai-core' => '^1.0',
-                'axiomasoft/vaulter-core' => '^1.0',
-                'axiomasoft/vaulter-documents' => '^1.0',
-                'axiomasoft/vaulter-drive' => '^1.0',
-            ]],
-            [$root.'/packages/collaboration', 'axiomasoft-vaulter-ai-collaboration-1.0.0.zip', '1.0.0', [
-                'axiomasoft/vaulter-ai-core' => '^1.0',
-                'axiomasoft/vaulter-ai-documents' => '^1.0',
-                'axiomasoft/vaulter-collaboration' => '^1.0',
-                'axiomasoft/vaulter-core' => '^1.0',
-            ]],
-            [$root.'/packages/sheets', 'axiomasoft-vaulter-ai-sheets-1.0.0.zip', '1.0.0', [
-                'axiomasoft/vaulter-ai-core' => '^1.0',
-                'axiomasoft/vaulter-sheets' => '^1.0',
-                'axiomasoft/vaulter-core' => '^1.0',
-                'axiomasoft/vaulter-documents' => '^1.0',
-                'axiomasoft/vaulter-drive' => '^1.0',
-                'axiomasoft/packman-plugins' => '0.1.1',
-            ]],
-            [$root.'/packages/laravel-ai', 'axiomasoft-vaulter-ai-laravel-ai-1.0.0.zip', '1.0.0', [
-                'axiomasoft/vaulter-ai-core' => '^1.0',
-            ]],
-            [$root.'/packages/agentools', 'axiomasoft-vaulter-ai-agentools-1.0.0.zip', '1.0.0', [
-                'axiomasoft/vaulter-ai-core' => '^1.0',
-                'agentools/sdk' => '^1.0',
-            ]],
-            [$parentDir.'/agentools/php', 'agentools-sdk-1.0.0.zip', '1.0.0', []],
-            [$parentDir.'/vaulter-sheets/packages/sheets', 'axiomasoft-vaulter-sheets-1.0.0.zip', '1.0.0', [
-                'axiomasoft/vaulter-core' => '1.0.0',
-                'axiomasoft/vaulter-media' => '1.0.0',
-                'axiomasoft/vaulter-drive' => '1.0.0',
-                'axiomasoft/vaulter-documents' => '1.0.0',
-                'axiomasoft/packman' => '0.1.1',
-                'axiomasoft/packman-plugins' => '0.1.1',
-            ]],
-            [$parentDir.'/vaulter/packages/core', 'axiomasoft-vaulter-core-1.0.0.zip', '1.0.0', [
-                'axiomasoft/packman' => '0.1.1',
-                'axiomasoft/packman-plugins' => '0.1.1',
-                'axiomasoft/packman-schema' => '0.1.1',
-            ]],
-            [$parentDir.'/vaulter/packages/media', 'axiomasoft-vaulter-media-1.0.0.zip', '1.0.0', [
-                'axiomasoft/vaulter-core' => '1.0.0',
-                'axiomasoft/packman' => '0.1.1',
-                'axiomasoft/packman-plugins' => '0.1.1',
-                'axiomasoft/packman-schema' => '0.1.1',
-            ]],
-            [$parentDir.'/vaulter/packages/drive', 'axiomasoft-vaulter-drive-1.0.0.zip', '1.0.0', [
-                'axiomasoft/vaulter-core' => '1.0.0',
-                'axiomasoft/vaulter-media' => '1.0.0',
-                'axiomasoft/packman' => '0.1.1',
-                'axiomasoft/packman-plugins' => '0.1.1',
-                'axiomasoft/packman-schema' => '0.1.1',
-            ]],
-            [$parentDir.'/vaulter/packages/documents', 'axiomasoft-vaulter-documents-1.0.0.zip', '1.0.0', [
-                'axiomasoft/vaulter-core' => '1.0.0',
-                'axiomasoft/vaulter-drive' => '1.0.0',
-                'axiomasoft/packman' => '0.1.1',
-                'axiomasoft/packman-plugins' => '0.1.1',
-                'axiomasoft/packman-schema' => '0.1.1',
-            ]],
-            [$parentDir.'/vaulter-collaboration/packages/collaboration', 'axiomasoft-vaulter-collaboration-1.0.0.zip', '1.0.0', [
-                'axiomasoft/vaulter-core' => '1.0.0',
-                'axiomasoft/vaulter-documents' => '1.0.0',
-                'axiomasoft/vaulter-drive' => '1.0.0',
-                'axiomasoft/packman' => '0.1.1',
-                'axiomasoft/packman-plugins' => '0.1.1',
-                'axiomasoft/packman-schema' => '0.1.1',
-            ]],
-            [$parentDir.'/packman/packages/core', 'axiomasoft-packman-0.1.1.zip', '0.1.1', []],
-            [$parentDir.'/packman/packages/plugins', 'axiomasoft-packman-plugins-0.1.1.zip', '0.1.1', ['axiomasoft/packman' => '0.1.1']],
-            [$parentDir.'/packman/packages/schema', 'axiomasoft-packman-schema-0.1.1.zip', '0.1.1', ['axiomasoft/packman' => '0.1.1']],
+            [$root.'/packages/core', 'axiomasoft-vaulter-ai-core-1.0.0.zip', '1.0.0'],
+            [$root.'/packages/documents', 'axiomasoft-vaulter-ai-documents-1.0.0.zip', '1.0.0'],
+            [$root.'/packages/collaboration', 'axiomasoft-vaulter-ai-collaboration-1.0.0.zip', '1.0.0'],
+            [$root.'/packages/sheets', 'axiomasoft-vaulter-ai-sheets-1.0.0.zip', '1.0.0'],
+            [$root.'/packages/laravel-ai', 'axiomasoft-vaulter-ai-laravel-ai-1.0.0.zip', '1.0.0'],
+            [$root.'/packages/agentools', 'axiomasoft-vaulter-ai-agentools-1.0.0.zip', '1.0.0'],
+            [$parentDir.'/agentools/php', 'agentools-sdk-1.0.0.zip', '1.0.0'],
+            [$parentDir.'/vaulter-sheets/packages/sheets', 'axiomasoft-vaulter-sheets-1.0.0.zip', '1.0.0'],
+            [$parentDir.'/vaulter/packages/core', 'axiomasoft-vaulter-core-1.0.0.zip', '1.0.0'],
+            [$parentDir.'/vaulter/packages/media', 'axiomasoft-vaulter-media-1.0.0.zip', '1.0.0'],
+            [$parentDir.'/vaulter/packages/drive', 'axiomasoft-vaulter-drive-1.0.0.zip', '1.0.0'],
+            [$parentDir.'/vaulter/packages/documents', 'axiomasoft-vaulter-documents-1.0.0.zip', '1.0.0'],
+            [$parentDir.'/vaulter-collaboration/packages/collaboration', 'axiomasoft-vaulter-collaboration-1.0.0.zip', '1.0.0'],
+            [$parentDir.'/packman/packages/core', 'axiomasoft-packman-0.1.1.zip', '0.1.1'],
+            [$parentDir.'/packman/packages/plugins', 'axiomasoft-packman-plugins-0.1.1.zip', '0.1.1'],
+            [$parentDir.'/packman/packages/schema', 'axiomasoft-packman-schema-0.1.1.zip', '0.1.1'],
         ];
 
-        foreach ($localArchives as [$srcDir, $zipName, $ver, $rewrites]) {
+        foreach ($localArchives as [$srcDir, $zipName, $ver]) {
             expect(is_dir($srcDir))->toBeTrue("Missing source package directory {$srcDir}");
-            packZipFromDirectory($srcDir, $artifactsDir.'/'.$zipName, $ver, $rewrites);
+            packZipFromDirectory($srcDir, $artifactsDir.'/'.$zipName, $ver);
         }
 
         // Build offline path repository map for third-party vendor dependencies already locked in vendor/composer/installed.json.
