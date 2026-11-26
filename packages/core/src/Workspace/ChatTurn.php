@@ -12,6 +12,7 @@ use Vaulter\Ai\Core\Contracts\LlmPort;
 use Vaulter\Ai\Core\Contracts\ProviderSecretStore;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Enums\ErrorCode;
+use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\Runs;
@@ -26,6 +27,10 @@ final readonly class ChatTurn
     private const int DEFAULT_DELTA_BATCH_BYTES = 512;
 
     private const int DEFAULT_DELTA_BATCH_MS = 100;
+
+    private const int SQLITE_CANCEL_POLL_NS = 100_000_000;
+
+    private const int TRANSACTIONAL_CANCEL_POLL_NS = 1_000_000_000;
 
     public function __construct(
         private OfficeDatabase $db,
@@ -44,7 +49,7 @@ final readonly class ChatTurn
         $run = $this->runs->find($context, $runId) ?? throw OfficeException::resourceUnavailable();
         $session = $run->input['session_id'] ?? null;
         if ($run->channel !== 'chat' || ! is_string($session) || ($run->input['profile'] ?? null) !== $context->profile
-            || in_array($run->state, ['completed', 'rejected'], true)) {
+            || in_array($run->state, ['completed', 'rejected', 'cancelled'], true)) {
             return null;
         }
         $lease = $this->runs->claimLease($context, $runId, ToolCallLedger::LEASE_SECONDS);
@@ -66,13 +71,23 @@ final readonly class ChatTurn
             if ($input['selection'] !== null) {
                 $userMessage['selection'] = $input['selection'];
             }
-            $messages = [$userMessage];
+            $messages = [...$this->chat->history($context, $session, $runId, $scope), $userMessage];
+            if ($this->chat->cancellationRequested($context, $runId)) {
+                $this->finish($context, $session, $runId, $lease, '', $scope);
+
+                return null;
+            }
             $calls = $this->ledger->calls($context, $runId, $lease);
             foreach ($calls as $call) {
+                if ($this->chat->cancellationRequested($context, $runId)) {
+                    $this->finish($context, $session, $runId, $lease, '', $scope);
+
+                    return null;
+                }
                 $tool = $this->tools->deliver($context, $session, $runId, $lease, $call, $scope);
-                $delay = $this->waitForTool($context, $runId, $lease, $tool['state']);
+                $delay = $this->waitForTool($context, $session, $runId, $lease, $tool['state'], $scope);
                 if ($delay !== null) {
-                    return $delay;
+                    return $delay === 0 ? null : $delay;
                 }
                 $messages[] = $tool['message'];
             }
@@ -82,19 +97,30 @@ final readonly class ChatTurn
 
             return $this->generate($llm, $context, $session, $runId, $lease, $messages, $scope, $calls);
         } catch (OfficeException $exception) {
+            if (in_array($exception->errorCode, [ErrorCode::CursorExpired, ErrorCode::ResourceUnavailable], true)) {
+                $this->runs->finishRun($context, $runId, $lease, 'rejected');
+
+                return null;
+            }
+            if ($this->chat->cancellationRequested($context, $runId)) {
+                $this->finish($context, $session, $runId, $lease, '', $scope);
+
+                return null;
+            }
             if ($exception->errorCode === ErrorCode::TemporarilyUnavailable) {
                 $this->runs->releaseLease($context, $runId, $lease);
 
                 return 5;
             }
-            if (in_array($exception->errorCode, [ErrorCode::CursorExpired, ErrorCode::ResourceUnavailable], true)) {
-                $this->runs->finishRun($context, $runId, $lease, 'rejected');
-            } else {
-                $this->finish($context, $session, $runId, $lease, '', $scope, $exception->errorCode);
-            }
+            $this->finish($context, $session, $runId, $lease, '', $scope, $exception->errorCode);
 
             return null;
         } catch (Throwable $exception) {
+            if ($this->chat->cancellationRequested($context, $runId)) {
+                $this->finish($context, $session, $runId, $lease, '', $scope);
+
+                return null;
+            }
             $this->runs->releaseLease($context, $runId, $lease);
             if ($this->secretStore !== null) {
                 $masked = $this->secretStore->maskText($exception->getMessage());
@@ -121,6 +147,20 @@ final readonly class ChatTurn
         $text = '';
         $outputBytes = 0;
         $profile = $this->policy->profile($context);
+        $budgeted = $profile->maxTokens !== null || $profile->maxCostMicros !== null;
+        $inputTokens = 0;
+        $outputTokens = 0;
+        if ($budgeted) {
+            foreach ($this->runs->listSteps($context, $runId) as $step) {
+                $inputTokens += min(PHP_INT_MAX - $inputTokens, $step->inputTokens ?? 0);
+                $outputTokens += min(PHP_INT_MAX - $outputTokens, $step->outputTokens ?? 0);
+            }
+            if ($profile->exceedsUsageBudget($inputTokens, $outputTokens)) {
+                $this->finish($context, $session, $runId, $lease, '', $scope, 'budget_exceeded');
+
+                return null;
+            }
+        }
         $connection = $profile->providerConnection ?? 'office_model';
         $key = $this->secretStore?->status($connection)['configured'] === true
             ? $this->secretStore->resolve($connection)->apiKey()
@@ -135,12 +175,60 @@ final readonly class ChatTurn
         $deltaBufferStartedNs = null;
 
         $deadline = hrtime(true) + 70_000_000_000;
-        $cancelled = static fn (): bool => hrtime(true) >= $deadline;
+        $nextCancelCheck = 0;
+        $cancelPollNs = $this->db->driver() === 'sqlite' ? self::SQLITE_CANCEL_POLL_NS : self::TRANSACTIONAL_CANCEL_POLL_NS;
+        $requested = false;
+        $cancelled = function () use ($deadline, $context, $runId, $cancelPollNs, &$nextCancelCheck, &$requested): bool {
+            $now = hrtime(true);
+            if ($now >= $deadline) {
+                return true;
+            }
+            if (! $requested && $now >= $nextCancelCheck) {
+                $requested = $this->chat->cancellationRequested($context, $runId);
+                $nextCancelCheck = $now + $cancelPollNs;
+            }
+
+            return $requested;
+        };
         while (! $cancelled()) {
+            $hasUsage = false;
             $stream = $llm->stream($messages, $this->tools->catalog($context, $scope), $profile, $cancelled);
             foreach ($stream as $event) {
                 if ($cancelled()) {
                     throw OfficeException::temporarilyUnavailable();
+                }
+                if ($event['type'] === 'toolInputStart' || $event['type'] === 'toolInputDelta') {
+                    continue;
+                }
+                if ($event['type'] === 'usage') {
+                    if ($hasUsage || $event['inputTokens'] < 0 || $event['outputTokens'] < 0) {
+                        throw OfficeException::invalidInput();
+                    }
+                    $hasUsage = true;
+                    $this->db->transaction(function () use ($context, $runId, $lease, $event): void {
+                        $this->ledger->lockRun($context, $runId, $lease);
+                        $this->runs->recordStep($context, $runId, OfficeOperation::Status, 'finished',
+                            inputTokens: $event['inputTokens'], outputTokens: $event['outputTokens']);
+                    }, $context->tenantId);
+                    $inputTokens += min(PHP_INT_MAX - $inputTokens, $event['inputTokens']);
+                    $outputTokens += min(PHP_INT_MAX - $outputTokens, $event['outputTokens']);
+                    if ($profile->exceedsUsageBudget($inputTokens, $outputTokens)) {
+                        $this->finish($context, $session, $runId, $lease, '', $scope, 'budget_exceeded');
+
+                        return null;
+                    }
+
+                    continue;
+                }
+                if ($event['type'] === 'error') {
+                    throw new OfficeException($event['code']);
+                }
+                if ($event['type'] === 'finish' || $event['type'] === 'toolInputComplete') {
+                    if ($budgeted && ! $hasUsage) {
+                        $this->finish($context, $session, $runId, $lease, '', $scope, 'usage_unavailable');
+
+                        return null;
+                    }
                 }
                 if ($event['type'] === 'finish') {
                     $tail = $redactor->finish();
@@ -176,6 +264,11 @@ final readonly class ChatTurn
 
                     continue;
                 }
+                if ($this->chat->cancellationRequested($context, $runId)) {
+                    $this->finish($context, $session, $runId, $lease, '', $scope);
+
+                    return null;
+                }
                 $replay = $event['replayCallId'] ?? null;
                 if (++$deliveries > $maxToolCalls || ($replay === null && count($calls) >= $maxToolCalls)) {
                     throw new OfficeException(ErrorCode::LimitExceeded);
@@ -188,10 +281,15 @@ final readonly class ChatTurn
                 $this->tools->request($context, $session, $runId, $lease, $index + 1, $event['tool'], $event['input'], $scope);
                 $calls = $this->ledger->calls($context, $runId, $lease);
                 $call = $calls[$index];
+                if ($this->chat->cancellationRequested($context, $runId)) {
+                    $this->finish($context, $session, $runId, $lease, '', $scope);
+
+                    return null;
+                }
                 $tool = $this->tools->deliver($context, $session, $runId, $lease, $call, $scope);
-                $delay = $this->waitForTool($context, $runId, $lease, $tool['state']);
+                $delay = $this->waitForTool($context, $session, $runId, $lease, $tool['state'], $scope);
                 if ($delay !== null) {
-                    return $delay;
+                    return $delay === 0 ? null : $delay;
                 }
                 $messages[] = $tool['message'];
                 unset($stream);
@@ -225,20 +323,25 @@ final readonly class ChatTurn
         $startedNs = null;
     }
 
-    private function waitForTool(CallContext $context, string $runId, string $lease, string $state): ?int
+    /** @param list<string> $scope */
+    private function waitForTool(CallContext $context, string $session, string $runId, string $lease, string $state, array $scope): ?int
     {
-        if ($state === 'awaiting_approval') {
-            $this->runs->finishRun($context, $runId, $lease, 'awaiting_approval');
-
-            return 30;
-        }
-        if ($state === 'dispatched') {
-            $this->runs->finishRun($context, $runId, $lease, 'reconcile');
-
-            return 5;
+        if (! in_array($state, ['awaiting_approval', 'dispatched'], true)) {
+            return null;
         }
 
-        return null;
+        return $this->db->transaction(function () use ($context, $session, $runId, $lease, $state, $scope): int {
+            $this->ledger->lockRun($context, $runId, $lease);
+            if ($this->chat->cancellationRequested($context, $runId)) {
+                $this->finish($context, $session, $runId, $lease, '', $scope);
+
+                return 0;
+            }
+            $waiting = $state === 'awaiting_approval';
+            $this->runs->finishRun($context, $runId, $lease, $waiting ? 'awaiting_approval' : 'reconcile');
+
+            return $waiting ? 30 : 5;
+        }, $context->tenantId);
     }
 
     /**
@@ -255,16 +358,18 @@ final readonly class ChatTurn
 
     /** @param list<string> $scope */
     private function finish(
-        CallContext $context, string $session, string $runId, string $lease, string $text, array $scope, ?ErrorCode $error = null,
+        CallContext $context, string $session, string $runId, string $lease, string $text, array $scope, ErrorCode|string|null $error = null,
     ): void {
         $this->db->transaction(function () use ($context, $session, $runId, $lease, $text, $scope, $error): void {
             $this->ledger->lockRun($context, $runId, $lease);
-            $state = $error === null ? 'completed' : 'rejected';
-            if ($error === null && $text !== '') {
+            $cancelled = $this->chat->cancellationRequested($context, $runId);
+            $state = $cancelled ? 'cancelled' : ($error === null ? 'completed' : 'rejected');
+            if ($state === 'completed' && $text !== '') {
                 $this->chat->finishAssistantMessage($context, $session, $runId, $text, $scope);
             }
-            $this->chat->append($context, $session, $runId, 'run.finished', ['state' => $state, 'error' => $error?->value], $scope);
-            if (! $this->runs->finishRun($context, $runId, $lease, $state)) {
+            $errorCode = $error instanceof ErrorCode ? $error->value : $error;
+            $this->chat->append($context, $session, $runId, 'run.finished', ['state' => $state, 'error' => $cancelled ? null : $errorCode], $scope);
+            if (! $this->runs->finishRun($context, $runId, $lease, $state === 'cancelled' ? 'rejected' : $state)) {
                 throw OfficeException::temporarilyUnavailable();
             }
         }, $context->tenantId);

@@ -28,7 +28,13 @@ use Vaulter\Ai\Core\Protocol\ProposalDigest;
 
 final readonly class ChatWorkspace
 {
-    private const int PAGE_SIZE = 100;
+    public const int PAGE_SIZE = 100;
+
+    private const int SNAPSHOT_EVENTS = 512;
+
+    private const int HISTORY_TURNS = 12;
+
+    private const int HISTORY_BYTES = 32768;
 
     private const int MAX_SELECTION_EXCERPT_BYTES = 2048;
 
@@ -45,6 +51,7 @@ final readonly class ChatWorkspace
         private HostPolicy $policy,
         private Dispatcher $dispatcher,
         private ?ProviderSecretStore $secretStore = null,
+        private ?ChatEventWakeup $wakeup = null,
     ) {}
 
     /** Host entry point for opening a chat in an already authenticated workspace. */
@@ -119,14 +126,149 @@ final readonly class ChatWorkspace
                 $this->sessionQuery($context, $sessionId)->update(['updated_at' => $this->db->utcTimestamp($now)]);
             }
 
-            if (! in_array($run->state, ['completed', 'rejected'], true)) {
-                $this->db->afterCommit(function () use ($context, $run): void {
-                    $this->dispatcher->dispatch(new ExecuteChatRun($context->tenantId, $run->runId));
-                });
+            if (! in_array($run->state, ['completed', 'rejected', 'cancelled'], true)) {
+                $this->dispatch($context, $run->runId);
             }
 
             return $run->runId;
         }, $context->tenantId);
+    }
+
+    /** @return array{sessions:list<array{session_id:string,state:string,last_seq:int}>, next_cursor:?string} */
+    public function sessions(CallContext $context, ?string $cursor): array
+    {
+        if ($cursor !== null && (! Str::isUuid($cursor) || $cursor !== strtolower($cursor))) {
+            throw OfficeException::invalidInput();
+        }
+
+        return $this->db->transaction(function () use ($context, $cursor): array {
+            $query = $this->db->query('ai_chat_sessions')->where([
+                'tenant_id' => $context->tenantId,
+                'project_scope' => $context->projectScope,
+                'owner_subject' => $context->effectiveSubject,
+            ])->where('retention_until', '>', $this->db->utcTimestamp($this->db->clockNow($this->clock)));
+            if ($cursor !== null) {
+                $query->where('session_id', '<', $cursor);
+            }
+            $sessions = [];
+            $rows = $query->orderByDesc('session_id')->limit(self::PAGE_SIZE + 1)->get();
+            foreach ($rows->take(self::PAGE_SIZE) as $row) {
+                $sessions[] = [
+                    'session_id' => QueryRecord::str($row, 'session_id'),
+                    'state' => QueryRecord::str($row, 'state'),
+                    'last_seq' => QueryRecord::int($row, 'last_seq'),
+                ];
+            }
+
+            return [
+                'sessions' => $sessions,
+                'next_cursor' => $rows->count() > self::PAGE_SIZE ? ($sessions[self::PAGE_SIZE - 1]['session_id'] ?? null) : null,
+            ];
+        }, $context->tenantId);
+    }
+
+    public function archive(CallContext $context, string $sessionId): void
+    {
+        $this->db->transaction(function () use ($context, $sessionId): void {
+            $this->session($context, $sessionId, lock: true);
+            $this->sessionQuery($context, $sessionId)->update(['state' => 'archived']);
+        }, $context->tenantId);
+    }
+
+    public function cancel(CallContext $context, string $sessionId, string $runId): string
+    {
+        return $this->db->transaction(function () use ($context, $sessionId, $runId): string {
+            $query = $this->ownedChatRun($context, $runId);
+            if ($this->db->driver() !== 'pgsql') {
+                (clone $query)->update(['cancel_requested' => $this->db->connection()->raw('cancel_requested')]);
+            }
+            $run = $query->lockForUpdate()->first() ?? throw OfficeException::resourceUnavailable();
+            $this->session($context, $sessionId, lock: true);
+            $scope = $this->storedScope($this->runMessage($sessionId, $runId) ?? throw OfficeException::resourceUnavailable());
+            if (! $this->canRead($scope, $this->accessible($context, $scope))) {
+                throw OfficeException::resourceUnavailable();
+            }
+
+            $state = QueryRecord::str($run, 'state');
+            if (in_array($state, ['completed', 'rejected'], true)) {
+                return QueryRecord::bool($run, 'cancel_requested') ? 'cancelled' : $state;
+            }
+            $now = $this->db->clockNow($this->clock);
+            $fields = ['cancel_requested' => true, 'updated_at' => $this->db->utcTimestamp($now)];
+            if ($this->db->parseUtcTimestamp(QueryRecord::raw($run, 'lease_until')) > $now) {
+                $query->update($fields);
+
+                return 'cancelling';
+            }
+            $query->update($fields + ['state' => 'rejected', 'lease_token' => null, 'lease_until' => null]);
+            $this->append($context, $sessionId, $runId, 'run.finished', ['state' => 'cancelled', 'error' => null], $scope);
+
+            return 'cancelled';
+        }, $context->tenantId);
+    }
+
+    /** @phpstan-impure */
+    public function cancellationRequested(CallContext $context, string $runId): bool
+    {
+        $read = fn (): bool => $this->ownedChatRun($context, $runId)->where('cancel_requested', true)->exists();
+
+        // PostgreSQL tenant policies can depend on the transaction-local tenant setting.
+        return $this->db->driver() === 'sqlite' ? $read() : $this->db->transaction($read, $context->tenantId);
+    }
+
+    public function retry(CallContext $context, string $sessionId, string $runId): string
+    {
+        return $this->db->transaction(function () use ($context, $sessionId, $runId): string {
+            $session = $this->session($context, $sessionId, lock: true);
+            $run = $this->runs->find($context, $runId) ?? throw OfficeException::resourceUnavailable();
+            if ($run->channel !== 'chat' || ($run->input['session_id'] ?? null) !== $sessionId
+                || ($run->input['profile'] ?? null) !== $context->profile) {
+                throw OfficeException::resourceUnavailable();
+            }
+            if (! in_array($run->state, ['cancelled', 'rejected'], true)) {
+                throw OfficeException::preconditionFailed();
+            }
+            $input = $this->turnInput($context, $sessionId, $runId);
+            $source = $this->runMessage($sessionId, $runId) ?? throw OfficeException::resourceUnavailable();
+            $now = $this->db->clockNow($this->clock);
+            $until = $this->db->parseUtcTimestamp(QueryRecord::raw($session, 'retention_until'));
+            $retry = $this->runs->createOrFind($context, 'chat', hash('sha256', 'retry:'.$runId),
+                QueryRecord::str($session, 'profile_revision'),
+                ['session_id' => $sessionId, 'profile' => $context->profile, 'retry_of' => $runId],
+                max(1, ($until?->getTimestamp() ?? 0) - $now->getTimestamp()));
+            if ($this->runMessage($sessionId, $retry->runId) === null) {
+                $this->insertMessage($context, $sessionId, $this->db->newUuid(), $retry->runId, 'user',
+                    $input['content'], $input['resource_ids'], $this->db->decodeBinary(QueryRecord::raw($source, 'content_digest')), $input['selection']);
+                $this->sessionQuery($context, $sessionId)->update(['updated_at' => $this->db->utcTimestamp($now)]);
+            }
+            if (! in_array($retry->state, ['completed', 'rejected', 'cancelled'], true)) {
+                $this->dispatch($context, $retry->runId);
+            }
+
+            return $retry->runId;
+        }, $context->tenantId);
+    }
+
+    private function ownedChatRun(CallContext $context, string $runId): Builder
+    {
+        if (! Str::isUuid($runId) || $runId !== strtolower($runId)) {
+            throw OfficeException::resourceUnavailable();
+        }
+
+        return $this->db->query('ai_runs')->useWritePdo()->where([
+            'run_id' => $runId,
+            'channel' => 'chat',
+            'tenant_id' => $context->tenantId,
+            'project_scope' => $context->projectScope,
+            'effective_subject' => $context->effectiveSubject,
+        ]);
+    }
+
+    private function dispatch(CallContext $context, string $runId): void
+    {
+        $this->db->afterCommit(function () use ($context, $runId): void {
+            $this->dispatcher->dispatch(new ExecuteChatRun($context->tenantId, $runId));
+        });
     }
 
     /**
@@ -253,6 +395,7 @@ final readonly class ChatWorkspace
                 $fields['event_id'] = $this->db->newUuid();
             }
             $this->db->query('ai_chat_events')->insert($fields);
+            $this->wakeup?->notify($sessionId);
 
             return $seq;
         }, $context->tenantId);
@@ -293,10 +436,10 @@ final readonly class ChatWorkspace
         return [$scope, $normalizedSelection, $digest];
     }
 
-    /** @return array{session_id:string, state:string, profile_revision:string, last_seq:int, provider:array{configured:bool, connection:string, driver:?string, model:?string, hint:?string}, runs:list<array<string,mixed>>, tool_calls:list<array<string,mixed>>, messages:list<array<string,mixed>>, live_fragments:list<array{run_id:?string, seqs:list<int>, text:string, interrupted:bool, hidden:bool}>} */
-    public function show(CallContext $context, string $sessionId): array
+    /** @return array{session_id:string, state:string, profile_revision:string, last_seq:int, provider:array{configured:bool, connection:string, driver:?string, model:?string, hint:?string}, runs:list<array<string,mixed>>, tool_calls:list<array<string,mixed>>, messages:list<array<string,mixed>>, next_before:?string, live_fragments:list<array{run_id:?string, seqs:list<int>, text:string, interrupted:bool, hidden:bool}>} */
+    public function show(CallContext $context, string $sessionId, ?string $before = null): array
     {
-        return $this->db->transaction(function () use ($context, $sessionId): array {
+        return $this->db->transaction(function () use ($context, $sessionId, $before): array {
             $session = $this->session($context, $sessionId);
             $lastSeq = QueryRecord::int($session, 'last_seq');
             $messages = [];
@@ -305,8 +448,24 @@ final readonly class ChatWorkspace
             $callsOut = [];
             $profile = $this->policy->profile($context);
 
-            $rows = $this->db->query('ai_chat_messages')->where('session_id', $sessionId)
-                ->orderByDesc('created_at')->orderByDesc('message_id')->limit(self::PAGE_SIZE)->get();
+            $query = $this->db->query('ai_chat_messages')->where('session_id', $sessionId);
+            if ($before !== null) {
+                if (! $this->isValidBoundedToken($before, 255)) {
+                    throw OfficeException::invalidInput();
+                }
+                $bookmark = (clone $query)->where('message_id', $before)->first(['created_at'])
+                    ?? throw new OfficeException(ErrorCode::CursorExpired);
+                $created = QueryRecord::str($bookmark, 'created_at');
+                $query->where(static function (Builder $older) use ($created, $before): void {
+                    $older->where('created_at', '<', $created)->orWhere(static function (Builder $sameTime) use ($created, $before): void {
+                        $sameTime->where('created_at', $created)->where('message_id', '<', $before);
+                    });
+                });
+            }
+            $rows = $query->orderByDesc('created_at')->orderByDesc('message_id')->limit(self::PAGE_SIZE + 1)->get();
+            $hasOlder = $rows->count() > self::PAGE_SIZE;
+            $rows = $rows->take(self::PAGE_SIZE);
+            $oldest = $rows->last();
             $allScopeIds = $this->collectScope($rows);
             $runIds = [];
             /** @var array<string, list<string>> $runScopeByRunId */
@@ -446,6 +605,7 @@ final readonly class ChatWorkspace
                 'runs' => $runsOut,
                 'tool_calls' => [...$callsOut, ...$this->externalToolCalls($context, $sessionId, $lastSeq, $externalRuns, $steps, $allowed)],
                 'messages' => $messages,
+                'next_before' => $hasOlder && $oldest !== null ? QueryRecord::str($oldest, 'message_id') : null,
                 'live_fragments' => $this->liveFragments($context, $sessionId, $lastSeq, array_values($runIds), $completedAssistantRuns, $allowed),
             ];
         }, $context->tenantId);
@@ -489,6 +649,53 @@ final readonly class ChatWorkspace
     }
 
     /**
+     * @param  list<string>  $currentScope
+     * @return list<array{role:string, content:string}>
+     */
+    public function history(CallContext $context, string $sessionId, string $runId, array $currentScope): array
+    {
+        return $this->db->transaction(function () use ($context, $sessionId, $runId, $currentScope): array {
+            $this->session($context, $sessionId);
+            $runs = $this->db->table('ai_runs');
+            $priorRuns = $this->db->query('ai_chat_messages')->where('session_id', $sessionId)
+                ->join($runs.' as history_run', 'history_run.run_id', '=', $this->db->table('ai_chat_messages').'.run_id')
+                ->where('role', 'user')->where('history_run.run_id', '<', $runId)
+                ->where('history_run.state', 'completed')->orderByDesc('history_run.run_id')->limit(self::HISTORY_TURNS)
+                ->pluck('history_run.run_id');
+            $rows = $this->db->query('ai_chat_messages')->where('session_id', $sessionId)
+                ->whereIn('run_id', $priorRuns)->whereIn('role', ['user', 'assistant'])
+                ->orderBy('run_id')->orderByDesc('role')->orderBy('created_at')->orderBy('message_id')->get();
+            $allowed = $this->accessible($context, $currentScope);
+            $turns = [];
+            foreach ($rows as $row) {
+                $turns[QueryRecord::str($row, 'run_id')][] = $row;
+            }
+            $history = [];
+            $bytesLeft = self::HISTORY_BYTES;
+            foreach (array_reverse($turns) as $turn) {
+                $messages = [];
+                $bytes = 0;
+                foreach ($turn as $row) {
+                    $scope = $this->storedScope($row);
+                    if (array_diff($scope, $currentScope) !== [] || ! $this->canRead($scope, $allowed)) {
+                        continue 2;
+                    }
+                    $message = $this->messagePayload($context, $sessionId, $row, $scope);
+                    $messages[] = ['role' => QueryRecord::str($row, 'role'), 'content' => $message['content']];
+                    $bytes += strlen($message['content']);
+                }
+                if ($bytes > $bytesLeft) {
+                    break;
+                }
+                $bytesLeft -= $bytes;
+                $history = [...$messages, ...$history];
+            }
+
+            return $history;
+        }, $context->tenantId);
+    }
+
+    /**
      * @param  array<string,mixed>  $payload
      * @param  list<string>  $scope
      */
@@ -518,6 +725,7 @@ final readonly class ChatWorkspace
                 $fields['event_id'] = $this->db->newUuid();
             }
             $this->db->query('ai_chat_events')->insert($fields);
+            $this->wakeup?->notify($sessionId);
 
             return $seq;
         }, $context->tenantId);
@@ -572,7 +780,7 @@ final readonly class ChatWorkspace
                         $deltas->where('event_type', 'assistant.delta')
                             ->whereNotIn('run_id', array_keys($completedAssistantRuns));
                     });
-            })->orderBy('seq')->cursor();
+            })->orderByDesc('seq')->limit(self::SNAPSHOT_EVENTS)->get()->reverse();
         $fragments = [];
         $fragment = null;
         foreach ($rows as $row) {
@@ -629,7 +837,7 @@ final readonly class ChatWorkspace
         $rows = $this->db->query('ai_chat_events')->useWritePdo()->where('session_id', $sessionId)
             ->whereIn('run_id', array_keys($runStates))->where('seq', '<=', $lastSeq)
             ->whereIn('event_type', ['tool.requested', 'approval.required', 'tool.committed', 'tool.verified'])
-            ->orderBy('seq')->cursor();
+            ->orderByDesc('seq')->limit(self::SNAPSHOT_EVENTS)->get()->reverse();
         $calls = [];
         $settledProposals = [];
         foreach ($rows as $row) {

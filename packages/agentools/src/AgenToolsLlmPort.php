@@ -28,6 +28,8 @@ use Vaulter\Ai\Core\Registry\OfficeRegistry;
  * Optional AgenTools streaming adapter implementing Core LlmPort.
  * Delegates to a bound AgenTools SDK LlmPort when present or uses server-side ProviderSecretStore
  * over OpenAI-compatible HTTP SSE without depending on laravel/ai.
+ *
+ * @phpstan-import-type LlmEvent from LlmPort
  */
 final readonly class AgenToolsLlmPort implements LlmPort
 {
@@ -44,11 +46,7 @@ final readonly class AgenToolsLlmPort implements LlmPort
      * @param  list<array<string, mixed>>  $messages
      * @param  array<string, array<string, mixed>>  $tools
      * @param  Closure(): bool  $cancelled
-     * @return iterable<
-     *     array{type:'textDelta', text:string}
-     *     |array{type:'toolInputComplete', tool:string, input:string, providerToolCallId?:string, replayCallId?:string}
-     *     |array{type:'finish'}
-     * >
+     * @return iterable<LlmEvent>
      */
     public function stream(array $messages, array $tools, HostProfile $profile, Closure $cancelled): iterable
     {
@@ -94,11 +92,7 @@ final readonly class AgenToolsLlmPort implements LlmPort
      * @param  array<string, array<string, mixed>>  $tools
      * @param  Closure(): bool  $cancelled
      * @param  list<?string>  $priorToolCalls
-     * @return iterable<
-     *     array{type:'textDelta', text:string}
-     *     |array{type:'toolInputComplete', tool:string, input:string, providerToolCallId?:string, replayCallId?:string}
-     *     |array{type:'finish'}
-     * >
+     * @return iterable<LlmEvent>
      */
     private function streamViaSdkPort(
         AgenToolsSdkLlmPort $sdkPort,
@@ -157,6 +151,12 @@ final readonly class AgenToolsLlmPort implements LlmPort
                     yield ['type' => 'textDelta', 'text' => $chunk];
                 }
 
+                $usage = $response['usage'] ?? null;
+                if (is_array($usage) && is_int($usage['input_tokens'] ?? null) && is_int($usage['output_tokens'] ?? null)) {
+                    $yielded = true;
+                    yield ['type' => 'usage', 'inputTokens' => $usage['input_tokens'], 'outputTokens' => $usage['output_tokens']];
+                }
+
                 if (is_array($response['tool_call'] ?? null)) {
                     $tc = $response['tool_call'];
                     $replayCallId = $tc['replayCallId'] ?? null;
@@ -211,11 +211,7 @@ final readonly class AgenToolsLlmPort implements LlmPort
      * @param  list<array<string, mixed>>  $messages
      * @param  array<string, array<string, mixed>>  $tools
      * @param  Closure(): bool  $cancelled
-     * @return iterable<
-     *     array{type:'textDelta', text:string}
-     *     |array{type:'toolInputComplete', tool:string, input:string, providerToolCallId?:string, replayCallId?:string}
-     *     |array{type:'finish'}
-     * >
+     * @return iterable<LlmEvent>
      */
     private function streamViaHttp(
         array $messages,
@@ -253,6 +249,8 @@ final readonly class AgenToolsLlmPort implements LlmPort
                 /** @var array{pendingToolCalls: array<string, array{id: string, name: string, arguments: string}>} $state */
                 $state = ['pendingToolCalls' => []];
                 $buffer = '';
+                $terminal = null;
+                $inputTokens = $outputTokens = null;
 
                 while (! $stream->eof()) {
                     $this->assertNotCancelled($cancelled);
@@ -269,6 +267,21 @@ final readonly class AgenToolsLlmPort implements LlmPort
                         if ($parsed === null) {
                             continue;
                         }
+                        $data = $parsed['data'];
+                        $type = $data['type'] ?? $parsed['event'];
+                        [$inputTokens, $outputTokens] = $this->readUsage($format, $data, $inputTokens, $outputTokens);
+                        if (isset($data['error']) || in_array($type, ['error', 'response.failed', 'response.incomplete', 'response.cancelled'], true)) {
+                            $terminal = ['type' => 'error', 'code' => ErrorCode::TemporarilyUnavailable];
+
+                            break 2;
+                        }
+                        if ($terminal !== null) {
+                            if (in_array($type, ['response.completed', 'message_stop', '[DONE]'], true)) {
+                                break 2;
+                            }
+
+                            continue;
+                        }
 
                         $step = $this->handleSseEvent(
                             $format,
@@ -281,16 +294,30 @@ final readonly class AgenToolsLlmPort implements LlmPort
                             $canRequestTool,
                         );
                         foreach ($step['events'] as $event) {
+                            if ($event['type'] !== 'textDelta') {
+                                $terminal = $event;
+
+                                continue;
+                            }
                             $yielded = true;
                             yield $event;
                         }
-                        if ($step['done']) {
-                            return;
+                        if ($step['done'] && in_array($type, ['response.completed', 'message_stop', '[DONE]'], true)) {
+                            break 2;
                         }
                     }
                 }
 
-                throw OfficeException::temporarilyUnavailable();
+                if ($terminal === null) {
+                    throw OfficeException::temporarilyUnavailable();
+                }
+                $this->assertNotCancelled($cancelled);
+                if ($inputTokens !== null && $outputTokens !== null) {
+                    yield ['type' => 'usage', 'inputTokens' => $inputTokens, 'outputTokens' => $outputTokens];
+                }
+                yield $terminal;
+
+                return;
             } catch (OfficeException $officeFailure) {
                 throw $officeFailure;
             } catch (Throwable $failure) {
@@ -309,6 +336,34 @@ final readonly class AgenToolsLlmPort implements LlmPort
                 throw OfficeException::temporarilyUnavailable($masked);
             }
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array{?int, ?int}
+     */
+    private function readUsage(string $format, array $data, ?int $input, ?int $output): array
+    {
+        $envelope = match ($format) {
+            'anthropic' => is_array($data['message'] ?? null) ? $data['message'] : $data,
+            'responses' => is_array($data['response'] ?? null) ? $data['response'] : $data,
+            default => $data,
+        };
+        $usage = $envelope['usage'] ?? null;
+        if (! is_array($usage)) {
+            return [$input, $output];
+        }
+        $reportedInput = $usage[$format === 'chat_completions' ? 'prompt_tokens' : 'input_tokens'] ?? null;
+        $reportedOutput = $usage[$format === 'chat_completions' ? 'completion_tokens' : 'output_tokens'] ?? null;
+        if ($format === 'anthropic' && is_int($reportedInput)) {
+            foreach (['cache_creation_input_tokens', 'cache_read_input_tokens'] as $key) {
+                if (is_int($usage[$key] ?? null) && $usage[$key] >= 0 && $reportedInput <= PHP_INT_MAX - $usage[$key]) {
+                    $reportedInput += $usage[$key];
+                }
+            }
+        }
+
+        return [is_int($reportedInput) ? $reportedInput : $input, is_int($reportedOutput) ? $reportedOutput : $output];
     }
 
     private function resolveWireFormat(string $connection, ProviderSecret $secret): string
@@ -430,7 +485,11 @@ final readonly class AgenToolsLlmPort implements LlmPort
                 'model' => $model,
                 'messages' => $this->mapChatCompletionsMessages($messages, $instructions),
                 'stream' => true,
+                'stream_options' => ['include_usage' => true],
             ];
+            if ($profile->maxTokens !== null) {
+                $payload['max_completion_tokens'] = $profile->maxTokens;
+            }
             if ($toolSpecs !== []) {
                 $payload['tools'] = $toolSpecs;
             }
@@ -454,7 +513,7 @@ final readonly class AgenToolsLlmPort implements LlmPort
 
             $payload = [
                 'model' => $model,
-                'max_tokens' => $this->intConfig('vaulter-ai-agentools.chat.max_tokens', 4096, 1, 65536),
+                'max_tokens' => min($profile->maxTokens ?? PHP_INT_MAX, $this->intConfig('vaulter-ai-agentools.chat.max_tokens', 4096, 1, 65536)),
                 'system' => $instructions,
                 'messages' => $this->mapAnthropicMessages($messages),
                 'stream' => true,
@@ -486,7 +545,7 @@ final readonly class AgenToolsLlmPort implements LlmPort
             'input' => $this->mapHttpInput($messages),
             'tools' => $toolSpecs,
             'stream' => true,
-        ];
+        ] + ($profile->maxTokens === null ? [] : ['max_output_tokens' => $profile->maxTokens]);
     }
 
     /**
@@ -869,6 +928,11 @@ final readonly class AgenToolsLlmPort implements LlmPort
         $input = [];
         foreach ($messages as $item) {
             $role = $item['role'] ?? null;
+            if ($role === 'assistant' && is_string($item['content'] ?? null)) {
+                $input[] = ['role' => 'assistant', 'content' => $item['content']];
+
+                continue;
+            }
             if ($role === 'user') {
                 $text = is_string($item['content'] ?? null) ? $item['content'] : '';
                 if (is_array($item['selection'] ?? null)) {
@@ -906,8 +970,8 @@ final readonly class AgenToolsLlmPort implements LlmPort
 
         foreach ($messages as $item) {
             $role = $item['role'] ?? null;
-            if ($role === 'user') {
-                $out[] = ['role' => 'user', 'content' => $this->formatUserText($item)];
+            if ($role === 'user' || $role === 'assistant') {
+                $out[] = ['role' => $role, 'content' => $this->formatUserText($item)];
 
                 continue;
             }
@@ -947,8 +1011,8 @@ final readonly class AgenToolsLlmPort implements LlmPort
         $out = [];
         foreach ($messages as $item) {
             $role = $item['role'] ?? null;
-            if ($role === 'user') {
-                $out[] = ['role' => 'user', 'content' => $this->formatUserText($item)];
+            if ($role === 'user' || $role === 'assistant') {
+                $out[] = ['role' => $role, 'content' => $this->formatUserText($item)];
 
                 continue;
             }

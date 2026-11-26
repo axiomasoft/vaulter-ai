@@ -10,6 +10,7 @@ use Illuminate\Contracts\Routing\ResponseFactory;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use JsonException;
+use PDOException;
 use stdClass;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
@@ -17,6 +18,7 @@ use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Protocol\WireErrorMapper;
+use Vaulter\Ai\Core\Workspace\ChatEventWakeup;
 use Vaulter\Ai\Core\Workspace\ChatWorkspace;
 
 final readonly class ChatWorkspaceController
@@ -58,8 +60,63 @@ final readonly class ChatWorkspaceController
     {
         try {
             $context = $this->context($request, $resolver);
+            $before = $request->query('before');
+            if ($before !== null && ! is_string($before)) {
+                throw OfficeException::invalidInput();
+            }
 
-            return new JsonResponse(['data' => $container->make(ChatWorkspace::class)->show($context, $id)]);
+            return new JsonResponse(['data' => $container->make(ChatWorkspace::class)->show($context, $id, $before)]);
+        } catch (OfficeException $exception) {
+            return $this->error($exception);
+        }
+    }
+
+    public function index(Request $request, CallContextResolver $resolver, Container $container): JsonResponse
+    {
+        try {
+            $context = $this->context($request, $resolver);
+            $cursor = $request->query('cursor');
+            if ($cursor !== null && ! is_string($cursor)) {
+                throw OfficeException::invalidInput();
+            }
+
+            return new JsonResponse(['data' => $container->make(ChatWorkspace::class)->sessions($context, $cursor)]);
+        } catch (OfficeException $exception) {
+            return $this->error($exception);
+        }
+    }
+
+    public function archive(Request $request, CallContextResolver $resolver, Container $container, string $id): JsonResponse
+    {
+        try {
+            $context = $this->context($request, $resolver);
+            $container->make(ChatWorkspace::class)->archive($context, $id);
+
+            return new JsonResponse(['data' => ['session_id' => $id, 'state' => 'archived']]);
+        } catch (OfficeException $exception) {
+            return $this->error($exception);
+        }
+    }
+
+    public function cancel(Request $request, CallContextResolver $resolver, Container $container, string $id, string $runId): JsonResponse
+    {
+        try {
+            $context = $this->context($request, $resolver);
+            $state = $container->make(ChatWorkspace::class)->cancel($context, $id, $runId);
+
+            return new JsonResponse(['data' => ['run_id' => $runId, 'state' => $state]], $state === 'cancelling' ? 202 : 200);
+        } catch (OfficeException $exception) {
+            return $this->error($exception);
+        }
+    }
+
+    public function retry(Request $request, CallContextResolver $resolver, Container $container, string $id, string $runId): JsonResponse
+    {
+        try {
+            $context = $this->context($request, $resolver);
+            $retry = $container->make(ChatWorkspace::class)->retry($context, $id, $runId);
+
+            return new JsonResponse(['data' => ['run_id' => $retry]], 202);
         } catch (OfficeException $exception) {
             return $this->error($exception);
         }
@@ -107,7 +164,7 @@ final readonly class ChatWorkspaceController
         }
     }
 
-    public function events(Request $request, CallContextResolver $resolver, Container $container, ResponseFactory $responses, string $id): StreamedResponse|JsonResponse
+    public function events(Request $request, CallContextResolver $resolver, Container $container, ChatEventWakeup $wakeup, ResponseFactory $responses, string $id): StreamedResponse|JsonResponse
     {
         try {
             $context = $this->context($request, $resolver);
@@ -118,17 +175,27 @@ final readonly class ChatWorkspaceController
                 throw OfficeException::invalidInput();
             }
             $chat = $container->make(ChatWorkspace::class);
-            $chat->events($context, $id, $cursor);
+            $page = $chat->events($context, $id, $cursor);
+            if ($request->wantsJson()) {
+                $next = $page === [] ? $cursor : $page[array_key_last($page)]['seq'];
+
+                return new JsonResponse(['data' => $page, 'next_cursor' => $next]);
+            }
         } catch (OfficeException $exception) {
             return $this->error($exception);
         }
 
         /** @return Generator<int, string> */
-        $frames = function () use ($request, $resolver, $chat, $id, $cursor): Generator {
+        $frames = function () use ($request, $resolver, $chat, $wakeup, $id, $cursor): Generator {
             $start = hrtime(true);
             $deadline = $start + 25_000_000_000;
             $keepAlive = $start + 12_000_000_000;
-            $backoff = new IdlePollBackoff;
+            // Subscribe before the first read so a commit between that read and the wait cannot be lost.
+            try {
+                $wait = $wakeup->subscribe($id);
+            } catch (OfficeException|PDOException) {
+                return;
+            }
             yield ": connected\n\n";
             while (hrtime(true) < $deadline && connection_aborted() === 0) {
                 try {
@@ -152,10 +219,22 @@ final readonly class ChatWorkspaceController
                     yield ": keep-alive\n\n";
                     $keepAlive += 12_000_000_000;
                 }
-                // Never sleep past the connection cap: the client reconnects with Last-Event-ID.
-                $delay = min($backoff->after(count($batch)), (int) floor(max(0, $deadline - hrtime(true)) / 1000));
-                if ($delay > 0) {
-                    usleep($delay);
+                if ($batch !== []) {
+                    continue;
+                }
+                while (hrtime(true) < $deadline && connection_aborted() === 0) {
+                    $delay = (int) ceil(max(1, min($keepAlive, $deadline) - hrtime(true)) / 1_000_000);
+                    try {
+                        if ($wait($delay)) {
+                            break;
+                        }
+                    } catch (OfficeException|PDOException) {
+                        return;
+                    }
+                    if (hrtime(true) >= $keepAlive && hrtime(true) < $deadline) {
+                        yield ": keep-alive\n\n";
+                        $keepAlive += 12_000_000_000;
+                    }
                 }
             }
         };

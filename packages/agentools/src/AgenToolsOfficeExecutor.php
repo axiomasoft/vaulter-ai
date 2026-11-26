@@ -10,16 +10,19 @@ use AgenTools\Scenario\ScenarioRunner;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Throwable;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
-use Vaulter\Ai\Core\Contracts\OfficeExecutor;
+use Vaulter\Ai\Core\Contracts\ResumableOfficeExecutor;
 use Vaulter\Ai\Core\Data\CallContext;
+use Vaulter\Ai\Core\Data\OfficeRun;
+use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Operations\RunStateReducer;
+use Vaulter\Ai\Core\Operations\StepCommitCoordinator;
 use Vaulter\Ai\Core\Persistence\Runs;
 
 /**
  * OfficeExecutor implementation for AgenTools ScenarioRunner / ToolPort execution.
  */
-final readonly class AgenToolsOfficeExecutor implements OfficeExecutor
+final readonly class AgenToolsOfficeExecutor implements ResumableOfficeExecutor
 {
     public const string KEY = 'agentools';
 
@@ -32,6 +35,7 @@ final readonly class AgenToolsOfficeExecutor implements OfficeExecutor
         private RunStateReducer $stateReducer,
         private ConfigRepository $config,
         private ScenarioRunner $runner = new ScenarioRunner,
+        private ?StepCommitCoordinator $commits = null,
     ) {}
 
     public function key(): string
@@ -90,6 +94,9 @@ final readonly class AgenToolsOfficeExecutor implements OfficeExecutor
             inputPayload: [
                 'scenario_id' => $scenario['scenario_id'] ?? 'office',
                 'profile' => $profile->name,
+                'executor' => self::KEY,
+                'scenario' => $scenario,
+                'scenario_context' => $scenarioContext,
             ],
         );
 
@@ -98,20 +105,76 @@ final readonly class AgenToolsOfficeExecutor implements OfficeExecutor
             throw OfficeException::temporarilyUnavailable();
         }
 
-        try {
-            $scopedPort = $this->port->forContext($context, $run->runId);
-            $result = $this->runner->run($scenario, $scenarioContext, $scopedPort, runId: $run->runId);
+        $saved = $run->input['scenario'] ?? null;
+        $savedContext = $run->input['scenario_context'] ?? null;
 
-            $steps = $this->runs->listSteps($context, $run->runId);
+        return $this->executeScenario($context, $run->runId, $lease,
+            is_array($saved) ? $saved : $scenario, is_array($savedContext) ? $savedContext : $scenarioContext);
+    }
+
+    public function executeRun(CallContext $context, string $runId): OfficeRun
+    {
+        $run = $this->runs->find($context, $runId) ?? throw OfficeException::resourceUnavailable();
+        $profile = $this->policy->profile($context);
+        if (($run->input['profile'] ?? null) !== $profile->name || $run->profileRevision !== $profile->revision
+            || ($run->input['executor'] ?? self::KEY) !== self::KEY) {
+            throw OfficeException::preconditionFailed();
+        }
+        $lease = $this->runs->claimLease($context, $runId, $this->leaseSeconds());
+        if ($lease === null) {
+            return $this->runs->find($context, $runId) ?? $run;
+        }
+
+        $scenario = $run->input['scenario'] ?? null;
+        $scenarioContext = $run->input['scenario_context'] ?? null;
+        if (is_array($scenario) && is_array($scenarioContext)) {
+            $this->executeScenario($context, $runId, $lease, $scenario, $scenarioContext);
+        } else {
+            // Older runs have no replayable scenario. Reconcile their durable commit steps.
+            try {
+                $steps = $this->runs->listSteps($context, $runId);
+                foreach ($steps as $step) {
+                    if ($step->operation === OfficeOperation::Commit && in_array($step->state, ['waiting', 'dispatched'], true)) {
+                        $this->commits?->resumeStep($context, $runId, $step->stepId);
+                    }
+                }
+                $state = $this->stateReducer->reduce($this->runs->listSteps($context, $runId), executionFailed: true);
+                $this->runs->finishRun($context, $runId, $lease, $state);
+            } catch (Throwable $failure) {
+                $this->runs->releaseLease($context, $runId, $lease, 'reconcile');
+
+                throw $failure;
+            }
+        }
+
+        return $this->runs->find($context, $runId) ?? $run;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $scenario
+     * @param  array<array-key, mixed>  $scenarioContext
+     */
+    private function executeScenario(CallContext $context, string $runId, string $lease, array $scenario, array $scenarioContext): ScenarioResult
+    {
+        try {
+            $scopedPort = $this->port->forContext($context, $runId);
+            $result = $this->runner->run(
+                array_filter($scenario, is_string(...), ARRAY_FILTER_USE_KEY),
+                array_filter($scenarioContext, is_string(...), ARRAY_FILTER_USE_KEY),
+                $scopedPort,
+                runId: $runId,
+            );
+
+            $steps = $this->runs->listSteps($context, $runId);
             $nextState = $this->stateReducer->reduce(
                 $steps,
                 executionFailed: $result->outcome !== ScenarioOutcome::Completed,
             );
-            $this->runs->finishRun($context, $run->runId, $lease, $nextState);
+            $this->runs->finishRun($context, $runId, $lease, $nextState);
 
             return $result;
         } catch (Throwable $failure) {
-            $this->runs->releaseLease($context, $run->runId, $lease, 'reconcile');
+            $this->runs->releaseLease($context, $runId, $lease, 'reconcile');
 
             throw $failure;
         }

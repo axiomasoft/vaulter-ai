@@ -32,6 +32,7 @@ use Vaulter\Ai\Core\Contracts\LlmPort;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Data\HostProfile;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
+use Vaulter\Ai\Core\Workspace\ChatEventWakeup;
 use Vaulter\Ai\Core\Workspace\ChatTools;
 use Vaulter\Ai\Core\Workspace\ChatTurn;
 use Vaulter\Ai\Core\Workspace\ChatWorkspace;
@@ -2052,14 +2053,12 @@ JS;
             }
         } else {
             $streamingActive = true;
-            $resolveCalls = 0;
-            $app->instance(CallContextResolver::class, new class($fixture->context, $sseState, $resolveCalls, $streamingActive) implements CallContextResolver
+            $app->instance(CallContextResolver::class, new class($fixture->context, $sseState, $streamingActive) implements CallContextResolver
             {
                 /** @param array<string, mixed> $sseState */
                 public function __construct(
                     private readonly CallContext $context,
                     private array &$sseState,
-                    private int &$resolveCalls,
                     private bool &$streamingActive,
                 ) {}
 
@@ -2071,26 +2070,42 @@ JS;
                     if (! $request->is('office/chat/sessions/*/events')) {
                         return $this->context;
                     }
-                    $this->resolveCalls++;
-                    OfficeCostCompare::drainSseBufferPub($this->sseState);
-                    if ($this->resolveCalls === 1) {
-                        return $this->context;
-                    }
-                    if ($this->sseState['done'] === true || ! $this->streamingActive) {
-                        return null;
-                    }
-                    Fiber::suspend();
                     OfficeCostCompare::drainSseBufferPub($this->sseState);
 
                     return ($this->sseState['done'] === true || ! $this->streamingActive) ? null : $this->context;
                 }
             });
 
+            // The producer shares this thread with the consumer. Let commits resume the wait.
+            $wakeup = $app->make(ChatEventWakeup::class);
+            $app->instance(ChatEventWakeup::class, new class($wakeup) implements ChatEventWakeup
+            {
+                public function __construct(private readonly ChatEventWakeup $wakeup) {}
+
+                public function notify(string $sessionId): void
+                {
+                    $this->wakeup->notify($sessionId);
+                }
+
+                /** @return \Closure(int): bool */
+                public function subscribe(string $sessionId): \Closure
+                {
+                    return static function (int $timeout): bool {
+                        Fiber::suspend();
+
+                        return true;
+                    };
+                }
+            });
             $sseReq = Request::create($sseUrl, 'GET', server: [
                 'HTTP_ACCEPT' => 'text/event-stream',
                 'HTTP_AUTHORIZATION' => 'Bearer scenario-test-token',
             ]);
-            $sseResp = $kernel->handle($sseReq);
+            try {
+                $sseResp = $kernel->handle($sseReq);
+            } finally {
+                $app->instance(ChatEventWakeup::class, $wakeup);
+            }
             if (! $sseResp instanceof StreamedResponse || $sseResp->getStatusCode() !== 200) {
                 throw new RuntimeException('SSE HTTP endpoint returned HTTP '.$sseResp->getStatusCode());
             }
@@ -2128,19 +2143,13 @@ JS;
 
             try {
                 $phase = self::phase(static fn () => $turn->execute($fixture->context, $runId, $llm));
-                for ($i = 0; $i < 5 && ! $sseFiber->isTerminated() && $sseFiber->isSuspended(); $i++) {
-                    if ($sseState['done'] === true) {
-                        $streamingActive = false;
-                    }
-                    $sseFiber->resume();
-                    self::drainSseBuffer($sseState);
-                }
             } finally {
                 $listenerActive = false;
                 $streamingActive = false;
-                if (! $sseFiber->isTerminated() && $sseFiber->isSuspended()) {
+                if ($sseFiber->isSuspended()) {
                     $sseFiber->resume();
                 }
+                self::drainSseBuffer($sseState);
             }
             $consumerElapsedMs = round((hrtime(true) - $sseState['started_ns']) / 1_000_000, 3);
             $kernel->terminate($sseReq, $sseResp);
@@ -2155,6 +2164,9 @@ JS;
         }
         if ((string) $sseState['received_text'] !== $assistantText) {
             $errors[] = 'SSE consumer delta payload differed from generated assistant text';
+        }
+        if ($sseState['done'] !== true) {
+            $errors[] = 'SSE consumer did not receive the run.finished frame';
         }
 
         $encoding = (string) ($workload['model']['tokenizer'] ?? 'cl100k_base');
