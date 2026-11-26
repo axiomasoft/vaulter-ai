@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\Ai\Sheets;
 
+use Illuminate\Contracts\Container\Container;
 use Illuminate\Support\ServiceProvider;
 use Override;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
@@ -28,18 +29,18 @@ final class SheetsAiServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__.'/../config/vaulter-ai-sheets.php', 'vaulter-ai-sheets');
 
-        $this->app->singleton(SheetDocumentAccess::class);
-        $this->app->singleton(SheetResourceDirectory::class);
-        $this->app->singleton(SheetsTransactionRunner::class);
-        $this->app->singleton(SheetReader::class);
-        $this->app->singleton(FillFormula::class);
-        $this->app->singleton(SheetCommandOwner::class);
+        $this->app->scoped(SheetDocumentAccess::class);
+        $this->app->scoped(SheetResourceDirectory::class);
+        $this->app->scoped(SheetsTransactionRunner::class);
+        $this->app->scoped(SheetReader::class);
+        $this->app->scoped(FillFormula::class);
+        $this->app->scoped(SheetCommandOwner::class);
 
         // Keep VaulterResourceDirectory/VaulterTransactionRunner authoritative whenever vaulter-ai-documents is registered.
-        $this->app->singletonIf(ResourceDirectory::class, SheetResourceDirectory::class);
+        $this->app->scopedIf(ResourceDirectory::class, SheetResourceDirectory::class);
         $documentsTxClass = 'Vaulter\\Ai\\Documents\\Persistence\\VaulterTransactionRunner';
         if (! $this->app->bound($documentsTxClass)) {
-            $this->app->singleton(TransactionRunner::class, SheetsTransactionRunner::class);
+            $this->app->scoped(TransactionRunner::class, SheetsTransactionRunner::class);
         }
 
         if (class_exists(VaulterPluginRegistrar::class)) {
@@ -53,11 +54,13 @@ final class SheetsAiServiceProvider extends ServiceProvider
             __DIR__.'/../config/vaulter-ai-sheets.php' => $this->app->configPath('vaulter-ai-sheets.php'),
         ], 'vaulter-ai-sheets-config');
 
-        $registry = $this->app->make(OfficeRegistry::class);
-        if (! $registry->isFrozen()) {
-            $registry->registerReader($this->app->make(SheetReader::class));
-            $registry->registerCommand($this->app->make(FillFormula::class));
-            $registry->registerOwner(FillFormula::COMMAND, 'snapshot', $this->app->make(SheetCommandOwner::class));
-        }
+        $this->callAfterResolving(OfficeRegistry::class, static function (OfficeRegistry $registry, Container $app): void {
+            if ($registry->isFrozen()) {
+                return;
+            }
+            $registry->registerReader($app->make(SheetReader::class));
+            $registry->registerCommand($app->make(FillFormula::class));
+            $registry->registerOwner(FillFormula::COMMAND, 'snapshot', $app->make(SheetCommandOwner::class));
+        });
     }
 }

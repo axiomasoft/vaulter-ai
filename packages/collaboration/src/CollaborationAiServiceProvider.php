@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\Ai\Collaboration;
 
+use Illuminate\Contracts\Container\Container;
 use Illuminate\Support\ServiceProvider;
 use Override;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
@@ -15,14 +16,19 @@ final class CollaborationAiServiceProvider extends ServiceProvider
     #[Override]
     public function register(): void
     {
-        $this->app->singleton(LiveTextCommandOwner::class);
+        $this->app->scoped(LiveTextCommandOwner::class);
     }
 
     public function boot(): void
     {
-        $registry = $this->app->make(OfficeRegistry::class);
-        if (! $registry->isFrozen() && $this->app->make(Kernel::class)->isActive('collaboration')) {
-            $registry->registerOwner(ReplaceExact::COMMAND, 'journal', $this->app->make(LiveTextCommandOwner::class));
-        }
+        $this->callAfterResolving(OfficeRegistry::class, static function (OfficeRegistry $registry, Container $app): void {
+            if ($registry->isFrozen()) {
+                return;
+            }
+            if (! $app->make(Kernel::class)->isActive('collaboration')) {
+                return;
+            }
+            $registry->registerOwner(ReplaceExact::COMMAND, 'journal', $app->make(LiveTextCommandOwner::class));
+        });
     }
 }

@@ -54,7 +54,7 @@ use Vaulter\Ai\Core\Workspace\ProposalDiffBuilder;
 
 /**
  * Service provider for axiomasoft/vaulter-ai-core.
- * Keeps singletons free of request/actor/tenant state for Octane safety.
+ * Registers Office services for the current request or queue job.
  */
 final class OfficeServiceProvider extends ServiceProvider
 {
@@ -63,54 +63,54 @@ final class OfficeServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__.'/../config/vaulter-ai.php', 'vaulter-ai');
 
-        $this->app->singleton(Clock::class, SystemClock::class);
-        $this->app->singleton(WireValidator::class);
-        $this->app->singleton(WireErrorMapper::class);
-        $this->app->singleton(OfficeRegistry::class);
+        $this->app->scoped(Clock::class, SystemClock::class);
+        $this->app->scoped(WireValidator::class);
+        $this->app->scoped(WireErrorMapper::class);
+        $this->app->scoped(OfficeRegistry::class);
 
-        $this->app->singletonIf(DefaultTransactionRunner::class);
-        $this->app->singletonIf(TransactionRunner::class, DefaultTransactionRunner::class);
+        $this->app->scopedIf(DefaultTransactionRunner::class);
+        $this->app->scopedIf(TransactionRunner::class, DefaultTransactionRunner::class);
 
-        $this->app->singleton(OfficeDatabase::class, static fn (Container $app): OfficeDatabase => new OfficeDatabase(
+        $this->app->scoped(OfficeDatabase::class, static fn (Container $app): OfficeDatabase => new OfficeDatabase(
             $app->make(DatabaseManager::class),
             $app->make(ConfigRepository::class),
             $app->make(TransactionRunner::class),
         ));
 
-        $this->app->singleton(PayloadCipher::class, static fn (Container $app): PayloadCipher => new PayloadCipher(
+        $this->app->scoped(PayloadCipher::class, static fn (Container $app): PayloadCipher => new PayloadCipher(
             $app->make(ConfigRepository::class),
         ));
 
-        $this->app->singleton(OfficeCoreSchema::class);
-        $this->app->singleton(SearchPages::class);
-        $this->app->singleton(ReadTokens::class);
-        $this->app->singleton(Proposals::class);
-        $this->app->singleton(OwnerRoutes::class);
-        $this->app->singleton(Runs::class);
+        $this->app->scoped(OfficeCoreSchema::class);
+        $this->app->scoped(SearchPages::class);
+        $this->app->scoped(ReadTokens::class);
+        $this->app->scoped(Proposals::class);
+        $this->app->scoped(OwnerRoutes::class);
+        $this->app->scoped(Runs::class);
 
-        $this->app->singleton(HostPolicy::class, ConfigHostPolicy::class);
-        $this->app->singletonIf(ProposalApprovalPolicy::class, DefaultProposalApprovalPolicy::class);
-        $this->app->singletonIf(ConfigProviderSecretStore::class);
-        $this->app->singletonIf(DatabaseProviderSecretStore::class);
-        $this->app->singletonIf(ProviderSecretStore::class, DatabaseProviderSecretStore::class);
-        $this->app->singletonIf(RegistryCommandWriteCapability::class);
-        $this->app->singletonIf(CommandWriteCapability::class, RegistryCommandWriteCapability::class);
-        $this->app->singleton(CallContextResolver::class, NullCallContextResolver::class);
+        $this->app->scoped(HostPolicy::class, ConfigHostPolicy::class);
+        $this->app->scopedIf(ProposalApprovalPolicy::class, DefaultProposalApprovalPolicy::class);
+        $this->app->scopedIf(ConfigProviderSecretStore::class);
+        $this->app->scopedIf(DatabaseProviderSecretStore::class);
+        $this->app->scopedIf(ProviderSecretStore::class, DatabaseProviderSecretStore::class);
+        $this->app->scopedIf(RegistryCommandWriteCapability::class);
+        $this->app->scopedIf(CommandWriteCapability::class, RegistryCommandWriteCapability::class);
+        $this->app->scoped(CallContextResolver::class, NullCallContextResolver::class);
 
-        $this->app->singleton(Search::class);
-        $this->app->singleton(Read::class);
-        $this->app->singleton(Describe::class);
-        $this->app->singleton(Office::class, DispatchOfficeOperation::class);
-        $this->app->singleton(RunStateReducer::class);
-        $this->app->singleton(StepCommitCoordinator::class);
-        $this->app->singleton(ProposalDiffBuilder::class);
-        $this->app->singleton(ResolveProposal::class);
-        $this->app->singleton(OfficeWorkspaceService::class);
-        $this->app->singleton(ToolCallLedger::class);
-        $this->app->singleton(ChatWorkspace::class);
-        $this->app->singleton(ChatTools::class);
-        $this->app->singleton(ChatTurn::class);
-        $this->app->singleton(ChannelChatBridge::class);
+        $this->app->scoped(Search::class);
+        $this->app->scoped(Read::class);
+        $this->app->scoped(Describe::class);
+        $this->app->scoped(Office::class, DispatchOfficeOperation::class);
+        $this->app->scoped(RunStateReducer::class);
+        $this->app->scoped(StepCommitCoordinator::class);
+        $this->app->scoped(ProposalDiffBuilder::class);
+        $this->app->scoped(ResolveProposal::class);
+        $this->app->scoped(OfficeWorkspaceService::class);
+        $this->app->scoped(ToolCallLedger::class);
+        $this->app->scoped(ChatWorkspace::class);
+        $this->app->scoped(ChatTools::class);
+        $this->app->scoped(ChatTurn::class);
+        $this->app->scoped(ChannelChatBridge::class);
     }
 
     public function boot(): void
@@ -128,7 +128,7 @@ final class OfficeServiceProvider extends ServiceProvider
         }
 
         $this->app->booted(function (): void {
-            $this->app->make(OfficeRegistry::class)->freeze();
+            $this->callAfterResolving(OfficeRegistry::class, static fn (OfficeRegistry $registry) => $registry->freeze());
         });
     }
 }

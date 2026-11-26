@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Vaulter\Ai\Documents;
 
-use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Support\ServiceProvider;
@@ -51,32 +50,32 @@ final class DocumentsAiServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__.'/../config/vaulter-ai-documents.php', 'vaulter-ai-documents');
 
-        $this->app->singleton(RichTextBlockExtractor::class);
-        $this->app->singleton(DefaultDocumentScopeResolver::class);
-        $this->app->singleton(ProposalSuggestionBridge::class);
-        $this->app->singleton(ProposalSuggestionPort::class, ProposalSuggestionBridge::class);
-        $this->app->singleton(DocumentScopeResolver::class, DefaultDocumentScopeResolver::class);
+        $this->app->scoped(RichTextBlockExtractor::class);
+        $this->app->scoped(DefaultDocumentScopeResolver::class);
+        $this->app->scoped(ProposalSuggestionBridge::class);
+        $this->app->scoped(ProposalSuggestionPort::class, ProposalSuggestionBridge::class);
+        $this->app->scoped(DocumentScopeResolver::class, DefaultDocumentScopeResolver::class);
 
-        $this->app->singleton(AiDocumentsSchema::class);
-        $this->app->singleton(VaulterTransactionRunner::class);
-        $this->app->singleton(TransactionRunner::class, VaulterTransactionRunner::class);
-        $this->app->singleton(TextCommands::class);
-        $this->app->singleton(IndexText::class);
-        $this->app->singleton(TextProjectionOutboxConsumer::class);
-        $this->app->singleton(TextProjectionReader::class);
-        $this->app->singleton(TextReader::class);
-        $this->app->singleton(ReplaceExact::class);
-        $this->app->singleton(InsertBlock::class);
-        $this->app->singleton(DeleteBlock::class);
+        $this->app->scoped(AiDocumentsSchema::class);
+        $this->app->scoped(VaulterTransactionRunner::class);
+        $this->app->scoped(TransactionRunner::class, VaulterTransactionRunner::class);
+        $this->app->scoped(TextCommands::class);
+        $this->app->scoped(IndexText::class);
+        $this->app->scoped(TextProjectionOutboxConsumer::class);
+        $this->app->scoped(TextProjectionReader::class);
+        $this->app->scoped(TextReader::class);
+        $this->app->scoped(ReplaceExact::class);
+        $this->app->scoped(InsertBlock::class);
+        $this->app->scoped(DeleteBlock::class);
 
-        $this->app->singleton(ResourceDirectory::class, VaulterResourceDirectory::class);
-        $this->app->singleton(DocumentsCommandWriteCapability::class, static fn (Container $app): DocumentsCommandWriteCapability => new DocumentsCommandWriteCapability(
+        $this->app->scoped(ResourceDirectory::class, VaulterResourceDirectory::class);
+        $this->app->scoped(DocumentsCommandWriteCapability::class, static fn (Container $app): DocumentsCommandWriteCapability => new DocumentsCommandWriteCapability(
             registry: $app->make(OfficeRegistry::class),
             access: $app->make(TextDocumentAccess::class),
             fallback: $app->make(RegistryCommandWriteCapability::class),
             directory: $app->make(ResourceDirectory::class),
         ));
-        $this->app->singleton(CommandWriteCapability::class, DocumentsCommandWriteCapability::class);
+        $this->app->scoped(CommandWriteCapability::class, DocumentsCommandWriteCapability::class);
 
         if (class_exists(VaulterPluginRegistrar::class)) {
             VaulterPluginRegistrar::register($this->app, AiDocumentsModule::class, dirname(__DIR__).'/composer.json');
@@ -97,17 +96,19 @@ final class DocumentsAiServiceProvider extends ServiceProvider
 
         $this->app->make(AiDocumentsSchema::class)->assertSameConnectionAsCore();
 
-        $registry = $this->app->make(OfficeRegistry::class);
-        if (! $registry->isFrozen()) {
-            $singleTextOwner = $this->app->make(SingleTextOwner::class);
-            $registry->registerReader($this->app->make(TextReader::class));
-            $registry->registerCommand($this->app->make(ReplaceExact::class));
-            $registry->registerCommand($this->app->make(InsertBlock::class));
-            $registry->registerCommand($this->app->make(DeleteBlock::class));
+        $this->callAfterResolving(OfficeRegistry::class, static function (OfficeRegistry $registry, Container $app): void {
+            if ($registry->isFrozen()) {
+                return;
+            }
+            $singleTextOwner = $app->make(SingleTextOwner::class);
+            $registry->registerReader($app->make(TextReader::class));
+            $registry->registerCommand($app->make(ReplaceExact::class));
+            $registry->registerCommand($app->make(InsertBlock::class));
+            $registry->registerCommand($app->make(DeleteBlock::class));
             $registry->registerOwner(ReplaceExact::COMMAND, 'snapshot', $singleTextOwner);
             $registry->registerOwner(InsertBlock::COMMAND, 'snapshot', $singleTextOwner);
             $registry->registerOwner(DeleteBlock::COMMAND, 'snapshot', $singleTextOwner);
-        }
+        });
 
         $this->registerProjectionListeners();
     }
@@ -115,33 +116,8 @@ final class DocumentsAiServiceProvider extends ServiceProvider
     private function registerProjectionListeners(): void
     {
         $events = $this->app->make(Dispatcher::class);
-        $indexer = $this->app->make(IndexText::class);
-        $config = $this->app->make(ConfigRepository::class);
-
-        $autoEnabled = static fn (): bool => (bool) $config->get('vaulter-ai-documents.projection.auto_index', true);
-
-        $events->listen(DocumentCreated::class, static function (DocumentCreated $event) use ($indexer, $autoEnabled): void {
-            if ($autoEnabled()) {
-                $indexer->handleDocumentCreated($event);
-            }
-        });
-
-        $events->listen(DocumentContentUpdated::class, static function (DocumentContentUpdated $event) use ($indexer, $autoEnabled): void {
-            if ($autoEnabled()) {
-                $indexer->handleDocumentContentUpdated($event);
-            }
-        });
-
-        $events->listen(DocumentRestored::class, static function (DocumentRestored $event) use ($indexer, $autoEnabled): void {
-            if ($autoEnabled()) {
-                $indexer->handleDocumentRestored($event);
-            }
-        });
-
-        $events->listen(NodeRestored::class, static function (NodeRestored $event) use ($indexer, $autoEnabled): void {
-            if ($autoEnabled()) {
-                $indexer->handleNodeRestored($event);
-            }
-        });
+        foreach ([DocumentCreated::class, DocumentContentUpdated::class, DocumentRestored::class, NodeRestored::class] as $event) {
+            $events->listen($event, IndexText::class);
+        }
     }
 }

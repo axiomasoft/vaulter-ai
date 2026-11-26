@@ -42,3 +42,15 @@ test('writer activation is refused when the documents connection differs from Of
         ->toThrow(RuntimeException::class, 'OfficeDatabase connection [office_split]');
     expect($registry->ownerFor('text.replace_exact@1', 'snapshot'))->toBeNull();
 });
+
+test('a new scope rebuilds the frozen document registry and its owners', function (): void {
+    $first = $this->app->make(OfficeRegistry::class);
+    $firstOwner = $first->ownerFor('text.replace_exact@1', 'snapshot');
+    $this->app->forgetScopedInstances();
+    $second = $this->app->make(OfficeRegistry::class);
+
+    expect($firstOwner)->not->toBeNull()
+        ->and($second)->not->toBe($first)
+        ->and($second->isFrozen())->toBeTrue()
+        ->and($second->ownerFor('text.replace_exact@1', 'snapshot'))->not->toBeNull()->not->toBe($firstOwner);
+});

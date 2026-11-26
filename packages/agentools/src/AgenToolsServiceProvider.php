@@ -6,6 +6,7 @@ namespace Vaulter\Ai\AgenTools;
 
 use AgenTools\Contracts\ToolDescriptorRegistry;
 use AgenTools\Contracts\ToolPort;
+use Illuminate\Contracts\Container\Container;
 use Illuminate\Support\ServiceProvider;
 use Override;
 use Vaulter\Ai\Core\Contracts\LlmPort;
@@ -22,14 +23,14 @@ final class AgenToolsServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__.'/../config/vaulter-ai-agentools.php', 'vaulter-ai-agentools');
 
-        $this->app->singleton(OfficeToolDescriptorRegistry::class);
-        $this->app->singleton(ToolDescriptorRegistry::class, OfficeToolDescriptorRegistry::class);
-        $this->app->singleton(ActionKeyMap::class);
-        $this->app->singleton(OfficeToolPort::class);
-        $this->app->singleton(ToolPort::class, OfficeToolPort::class);
-        $this->app->singleton(AgenToolsOfficeExecutor::class);
-        $this->app->singleton(AgenToolsLlmPort::class);
-        $this->app->singletonIf(LlmPort::class, AgenToolsLlmPort::class);
+        $this->app->scoped(OfficeToolDescriptorRegistry::class);
+        $this->app->scoped(ToolDescriptorRegistry::class, OfficeToolDescriptorRegistry::class);
+        $this->app->scoped(ActionKeyMap::class);
+        $this->app->scoped(OfficeToolPort::class);
+        $this->app->scoped(ToolPort::class, OfficeToolPort::class);
+        $this->app->scoped(AgenToolsOfficeExecutor::class);
+        $this->app->scoped(AgenToolsLlmPort::class);
+        $this->app->scopedIf(LlmPort::class, AgenToolsLlmPort::class);
     }
 
     public function boot(): void
@@ -38,12 +39,14 @@ final class AgenToolsServiceProvider extends ServiceProvider
             __DIR__.'/../config/vaulter-ai-agentools.php' => $this->app->configPath('vaulter-ai-agentools.php'),
         ], 'vaulter-ai-agentools-config');
 
-        $registry = $this->app->make(OfficeRegistry::class);
-        if (! $registry->isFrozen()) {
+        $this->callAfterResolving(OfficeRegistry::class, static function (OfficeRegistry $registry, Container $app): void {
+            if ($registry->isFrozen()) {
+                return;
+            }
             $registry->registerLazyExecutor(
                 AgenToolsOfficeExecutor::KEY,
-                fn (): AgenToolsOfficeExecutor => $this->app->make(AgenToolsOfficeExecutor::class),
+                static fn (): AgenToolsOfficeExecutor => $app->make(AgenToolsOfficeExecutor::class),
             );
-        }
+        });
     }
 }

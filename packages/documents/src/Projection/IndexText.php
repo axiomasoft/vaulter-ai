@@ -54,6 +54,20 @@ final readonly class IndexText
         private ConfigRepository $config,
     ) {}
 
+    public function handle(DocumentCreated|DocumentContentUpdated|DocumentRestored|NodeRestored $event): void
+    {
+        if (! (bool) $this->config->get('vaulter-ai-documents.projection.auto_index', true)) {
+            return;
+        }
+
+        match (true) {
+            $event instanceof DocumentCreated => $this->handleDocumentCreated($event),
+            $event instanceof DocumentContentUpdated => $this->handleDocumentContentUpdated($event),
+            $event instanceof DocumentRestored => $this->handleDocumentRestored($event),
+            $event instanceof NodeRestored => $this->handleNodeRestored($event),
+        };
+    }
+
     public function handleDocumentCreated(DocumentCreated $event): void
     {
         $scope = $this->scopes->forDriveEvent($event->scope()->tenantId, $event->node->driveId);

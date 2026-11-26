@@ -35,6 +35,8 @@ when installed alone.
 
 Owners register their pieces during `boot()`:
 
+Custom providers should register extensions with `callAfterResolving(OfficeRegistry::class, ...)` in `boot()`. The callback receives each fresh registry before it freezes. This keeps readers, owners, and executors within the request or queue job that uses them.
+
 | Registration | Contract | Example |
 | --- | --- | --- |
 | `registerReader()` | `ResourceReader` — bounded reads for one `ResourceType` | `TextReader`, `SheetReader` |

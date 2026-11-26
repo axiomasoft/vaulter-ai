@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vaulter\Ai\LaravelAi;
 
+use Illuminate\Contracts\Container\Container;
 use Illuminate\Support\ServiceProvider;
 use Override;
 use Vaulter\Ai\Core\Contracts\LlmPort;
@@ -20,9 +21,9 @@ final class LaravelAiServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__.'/../config/vaulter-ai-laravel-ai.php', 'vaulter-ai-laravel-ai');
 
-        $this->app->singleton(LaravelOfficeExecutor::class);
-        $this->app->singleton(LaravelAiLlmPort::class);
-        $this->app->singletonIf(LlmPort::class, LaravelAiLlmPort::class);
+        $this->app->scoped(LaravelOfficeExecutor::class);
+        $this->app->scoped(LaravelAiLlmPort::class);
+        $this->app->scopedIf(LlmPort::class, LaravelAiLlmPort::class);
     }
 
     public function boot(): void
@@ -31,12 +32,14 @@ final class LaravelAiServiceProvider extends ServiceProvider
             __DIR__.'/../config/vaulter-ai-laravel-ai.php' => $this->app->configPath('vaulter-ai-laravel-ai.php'),
         ], 'vaulter-ai-laravel-ai-config');
 
-        $registry = $this->app->make(OfficeRegistry::class);
-        if (! $registry->isFrozen()) {
+        $this->callAfterResolving(OfficeRegistry::class, static function (OfficeRegistry $registry, Container $app): void {
+            if ($registry->isFrozen()) {
+                return;
+            }
             $registry->registerLazyExecutor(
                 LaravelOfficeExecutor::KEY,
-                fn (): LaravelOfficeExecutor => $this->app->make(LaravelOfficeExecutor::class),
+                static fn (): LaravelOfficeExecutor => $app->make(LaravelOfficeExecutor::class),
             );
-        }
+        });
     }
 }
