@@ -28,6 +28,13 @@ Route::get('/_fixture/readyz', static function (OfficeRegistry $registry): JsonR
     }
 
     $profile = config('stand.profile');
+    if ($profile === 'ai-sheets' && ! Schema::hasTable('v_sheets_commands')) {
+        return response()->json(['status' => 'not_ready'], 503);
+    }
+    if ($profile === 'ai-collaboration' && ! Schema::hasTable('v_collaboration_commands')) {
+        return response()->json(['status' => 'not_ready'], 503);
+    }
+
     $expectedExecutor = $profile === 'ai-agentools' ? 'agentools' : 'laravel-ai';
     if ($registry->executor($expectedExecutor) === null) {
         return response()->json(['status' => 'not_ready'], 503);
@@ -90,8 +97,18 @@ Route::get('/office/workspace', $renderWorkspacePanel)->name('stand.proposals.wo
 Route::get('/stand/proposals', $renderWorkspacePanel)->name('stand.proposals.index');
 
 Route::get('/_stand-assets/vue.esm-browser.prod.js', static function (): Response {
-    $path = dirname(__DIR__, 5).'/node_modules/vue/dist/vue.esm-browser.prod.js';
-    if (! is_file($path)) {
+    $candidates = [
+        public_path('_stand-assets/vue.esm-browser.prod.js'),
+        dirname(__DIR__, 5).'/node_modules/vue/dist/vue.esm-browser.prod.js',
+    ];
+    $path = null;
+    foreach ($candidates as $candidate) {
+        if (is_file($candidate)) {
+            $path = $candidate;
+            break;
+        }
+    }
+    if ($path === null) {
         abort(404);
     }
 
@@ -102,10 +119,35 @@ Route::get('/_stand-assets/vue.esm-browser.prod.js', static function (): Respons
 });
 
 Route::get('/_stand-assets/vaulter-ai-vue.js', static function (): Response {
-    $path = dirname(__DIR__, 5).'/packages/vue/dist/vaulter-ai-vue.js';
-    if (! is_file($path)) {
+    $bundled = public_path('_stand-assets/vaulter-ai-vue.js');
+    if (is_file($bundled)) {
+        return response((string) file_get_contents($bundled), 200, [
+            'Content-Type' => 'application/javascript; charset=utf-8',
+            'Cache-Control' => 'no-store',
+        ]);
+    }
+
+    $repoRoot = dirname(__DIR__, 5);
+    $src = $repoRoot.'/packages/vue/dist/vaulter-ai-vue.js';
+    if (! is_file($src)) {
         abort(404);
     }
+
+    $cached = sys_get_temp_dir().'/vaulter-stand-ai-vue-'.md5((string) filemtime($src)).'.js';
+    $esbuild = $repoRoot.'/node_modules/.bin/esbuild';
+    if (! is_file($cached) && is_file($esbuild)) {
+        $nodePath = $repoRoot.'/node_modules:'.$repoRoot.'/packages/vue/node_modules';
+        $cmd = sprintf(
+            'NODE_PATH=%s %s %s --bundle --format=esm --platform=browser --external:vue --outfile=%s 2>/dev/null',
+            escapeshellarg($nodePath),
+            escapeshellarg($esbuild),
+            escapeshellarg($src),
+            escapeshellarg($cached),
+        );
+        @exec($cmd, $out, $code);
+    }
+
+    $path = is_file($cached) ? $cached : $src;
 
     return response((string) file_get_contents($path), 200, [
         'Content-Type' => 'application/javascript; charset=utf-8',

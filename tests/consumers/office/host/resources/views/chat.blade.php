@@ -3,6 +3,7 @@
 <head>
     <meta charset="utf-8">
     <title>Vaulter AI — Чат с документом</title>
+    <link rel="icon" href="data:,">
     <script type="importmap">
         {
             "imports": {
@@ -29,10 +30,15 @@
     const initialSessionId = @json($sessionId);
     const blockId = @json($blockId);
     const excerpt = @json($excerpt);
+    const searchParams = new URLSearchParams(window.location.search);
+    const sheetId = searchParams.get('sheet_id') || '';
+    const tableId = searchParams.get('table_id') || '';
 
-    const selection = resourceId && blockId
-        ? { kind: 'text_block', resource_id: resourceId, block_id: blockId, ...(excerpt ? { excerpt } : {}) }
-        : null;
+    const selection = resourceId && sheetId
+        ? { kind: 'sheet_table', resource_id: resourceId, sheet_id: sheetId, ...(tableId ? { table_id: tableId } : {}) }
+        : (resourceId && blockId
+            ? { kind: 'text_block', resource_id: resourceId, block_id: blockId, ...(excerpt ? { excerpt } : {}) }
+            : null);
 
     const client = createOfficeWorkspaceClient({
         baseUrl: window.location.origin,

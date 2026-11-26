@@ -11,7 +11,7 @@
     "model": {
         "id": "fake-office-scripted",
         "mode": "fake",
-        "tokenizer": null
+        "tokenizer": "cl100k_base"
     },
     "engine": {
         "calculator": "vaulter-sheets",
@@ -39,9 +39,28 @@
             "r-fees": {"plan": 10, "actual": 20, "delta": 77, "untouched": true}
         }
     },
+    "text_assignment": {
+        "command": "text.replace_exact@1",
+        "block_id": "p-payment",
+        "expected": "15",
+        "replacement": "30"
+    },
+    "live_journal": {
+        "spec_section": "3.5-E",
+        "command": "documents.live_text@1",
+        "baseline_command": "documents.single_text@1"
+    },
+    "chat_stream": {
+        "delta_chunks": 64,
+        "delta_batch_bytes": 256,
+        "delta_batch_ms": 50
+    },
     "scales": [
         {"id": "1x", "multiplier": 1, "contract_blocks": 11, "sheet_rows": 3},
         {"id": "10x", "multiplier": 10, "contract_blocks": 110, "sheet_rows": 30}
+    ],
+    "extended_scales": [
+        {"id": "100x", "multiplier": 100, "contract_blocks": 1100, "sheet_rows": 300}
     ],
     "iterations": {"warmup": 1, "measured": 5}
 }

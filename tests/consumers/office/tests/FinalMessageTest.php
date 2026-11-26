@@ -40,6 +40,34 @@ if (! class_exists(StandServiceProvider::class)) {
  */
 function bootFinalMessageHost(string $sqliteFile, string $runtimeTmpDir): Application
 {
+    if (getenv('STAND_PG_ASYNC') === '1' || getenv('DB_CONNECTION') === 'pgsql') {
+        if (is_file('/app/bootstrap/app.php')) {
+            file_put_contents($runtimeTmpDir.'/.env', "APP_ENV=testing\n");
+            putenv('VAULTER_AI_STAND_APPROVAL=human');
+            $_ENV['VAULTER_AI_STAND_APPROVAL'] = 'human';
+            $_SERVER['VAULTER_AI_STAND_APPROVAL'] = 'human';
+
+            /** @var Application $app */
+            $app = require '/app/bootstrap/app.php';
+            $app->useEnvironmentPath($runtimeTmpDir);
+            $kernel = $app->make(HttpKernel::class);
+            $kernel->bootstrap();
+            restore_error_handler();
+            restore_exception_handler();
+
+            $app['config']->set('stand.approval', 'human');
+            $app['config']->set('vaulter-ai.profiles.documents.approval', 'human');
+            $app['config']->set('vaulter-ai.profiles.documents_human.approval', 'human');
+            $app['config']->set('vaulter-ai.profiles.sheets.approval', 'human');
+            $app['config']->set('vaulter-ai.profiles.sheets_human.approval', 'human');
+            if (is_dir($runtimeTmpDir.'/views')) {
+                $app['config']->set('view.compiled', $runtimeTmpDir.'/views');
+            }
+
+            return $app;
+        }
+    }
+
     putenv('APP_ENV=testing');
     putenv('DB_CONNECTION=sqlite');
     putenv('DB_DATABASE='.$sqliteFile);
@@ -176,24 +204,38 @@ test('channel emulator keeps a partial unpublished, dedupes the final message, a
     touch($dbPath);
 
     try {
+        $asyncPg = getenv('STAND_PG_ASYNC') === '1' || getenv('DB_CONNECTION') === 'pgsql';
+        $fixtureToken = getenv('FIXTURE_TOKEN') ?: 'stand-test-fixture-token';
         $app = bootFinalMessageHost($dbPath, $runtimeDir);
-        Artisan::call('migrate', ['--force' => true, '--no-interaction' => true]);
+        if (! $asyncPg) {
+            Artisan::call('migrate', ['--force' => true, '--no-interaction' => true]);
+        }
 
-        $seedResp = finalMessageRequest($app, 'POST', '/_fixture/seed', '', [], [
-            'X-Fixture-Token' => 'stand-test-fixture-token',
+        $seedResp = finalMessageRequest($app, 'POST', '/_fixture/seed', '', ['approval' => 'human'], [
+            'X-Fixture-Token' => $fixtureToken,
+            'Content-Type' => 'application/json',
             'Accept' => 'application/json',
         ]);
         expect($seedResp->getStatusCode())->toBe(200);
         $seed = json_decode((string) $seedResp->getContent(), true, 512, JSON_THROW_ON_ERROR);
         $doc = (string) $seed['resource_id'];
+        $writerSubject = 'user/'.(string) $seed['writer_user_id'];
         $writerToken = (string) $seed['writer_token'];
         $reviewerToken = (string) $seed['reviewer_token'];
         $readerToken = (string) $seed['reader_token'];
         $foreignToken = (string) $seed['foreign_token'];
 
+        $suffix = bin2hex(random_bytes(4));
+        $channelSession = 'session-'.$suffix;
+        $sessionReader = 'session-reader-'.$suffix;
+        $eventPartial = 'event-2-'.$suffix;
+        $eventFinal = 'event-3-'.$suffix;
+        $eventHijack = 'event-4-'.$suffix;
+        $eventReaderFinal = 'event-9-'.$suffix;
+
         $partial = postChannelEvent($app, $writerToken, [
-            'session_id' => 'session-1',
-            'event_id' => 'event-2',
+            'session_id' => $channelSession,
+            'event_id' => $eventPartial,
             'phase' => 'partial',
             'resource_id' => $doc,
         ]);
@@ -202,23 +244,23 @@ test('channel emulator keeps a partial unpublished, dedupes the final message, a
             ->and($partial['json']['run_id'])->toBeNull()
             ->and($partial['json']['run_count'])->toBe(0)
             ->and($partial['json']['channel'])->toBe('laravel-ai')
-            ->and(DB::table('v_ai_runs')->count())->toBe(0)
+            ->and(DB::table('v_ai_runs')->where('effective_subject', $writerSubject)->count())->toBe(0)
             ->and(DB::table('v_ai_text_commands')->where('resource_id', $doc)->count())->toBe(0)
             ->and(DB::table('v_outbox')->where('aggregate_id', $doc)->where('type', 'office.text_command_committed')->count())->toBe(0);
 
         $again = postChannelEvent($app, $writerToken, [
-            'session_id' => 'session-1',
-            'event_id' => 'event-2',
+            'session_id' => $channelSession,
+            'event_id' => $eventPartial,
             'phase' => 'partial',
             'resource_id' => $doc,
         ]);
         expect($again['status'])->toBe(200, $again['raw'])
             ->and($again['json']['published'])->toBeFalse()
-            ->and(DB::table('v_ai_runs')->count())->toBe(0);
+            ->and(DB::table('v_ai_runs')->where('effective_subject', $writerSubject)->count())->toBe(0);
 
         $final = postChannelEvent($app, $writerToken, [
-            'session_id' => 'session-1',
-            'event_id' => 'event-3',
+            'session_id' => $channelSession,
+            'event_id' => $eventFinal,
             'phase' => 'final',
             'resource_id' => $doc,
         ]);
@@ -226,18 +268,28 @@ test('channel emulator keeps a partial unpublished, dedupes the final message, a
             ->and($final['json']['published'])->toBeTrue()
             ->and($final['json']['duplicate'])->toBeFalse()
             ->and($final['json']['channel'])->toBe('laravel-ai')
-            ->and($final['json']['source_event_id'])->toBe('event-3')
+            ->and($final['json']['source_event_id'])->toBe($eventFinal)
             ->and($final['json']['run_count'])->toBe(1);
         $runId = (string) $final['json']['run_id'];
         expect($runId)->not->toBe('')
-            ->and(DB::table('v_ai_runs')->count())->toBe(1)
-            ->and(DB::table('v_ai_runs')->where('run_id', $runId)->value('source_event_id'))->toBe('event-3')
-            ->and(DB::table('v_ai_runs')->where('run_id', $runId)->value('state'))->toBe('awaiting_approval')
+            ->and(DB::table('v_ai_runs')->where('effective_subject', $writerSubject)->count())->toBe(1)
+            ->and(DB::table('v_ai_runs')->where('run_id', $runId)->value('source_event_id'))->toBe($eventFinal);
+
+        if ($asyncPg) {
+            $deadline = microtime(true) + 25.0;
+            while (microtime(true) < $deadline) {
+                if (DB::table('v_ai_runs')->where('run_id', $runId)->value('state') === 'awaiting_approval') {
+                    break;
+                }
+                usleep(200_000);
+            }
+        }
+        expect(DB::table('v_ai_runs')->where('run_id', $runId)->value('state'))->toBe('awaiting_approval')
             ->and(DB::table('v_ai_text_commands')->where('resource_id', $doc)->count())->toBe(0);
 
         $duplicate = postChannelEvent($app, $writerToken, [
-            'session_id' => 'session-1',
-            'event_id' => 'event-3',
+            'session_id' => $channelSession,
+            'event_id' => $eventFinal,
             'phase' => 'final',
             'resource_id' => $doc,
         ]);
@@ -245,27 +297,27 @@ test('channel emulator keeps a partial unpublished, dedupes the final message, a
             ->and($duplicate['json']['duplicate'])->toBeTrue()
             ->and($duplicate['json']['run_id'])->toBe($runId)
             ->and($duplicate['json']['run_count'])->toBe(1)
-            ->and(DB::table('v_ai_runs')->count())->toBe(1)
+            ->and(DB::table('v_ai_runs')->where('effective_subject', $writerSubject)->count())->toBe(1)
             ->and(DB::table('v_ai_text_commands')->where('resource_id', $doc)->count())->toBe(0);
 
         $hijack = postChannelEvent($app, $readerToken, [
-            'session_id' => 'session-1',
-            'event_id' => 'event-4',
+            'session_id' => $channelSession,
+            'event_id' => $eventHijack,
             'phase' => 'partial',
             'resource_id' => $doc,
         ]);
         expect($hijack['status'])->toBe(404, $hijack['raw'])
             ->and($hijack['json']['error']['code'])->toBe('resource_unavailable')
-            ->and(DB::table('v_ai_runs')->count())->toBe(1);
+            ->and(DB::table('v_ai_runs')->where('effective_subject', $writerSubject)->count())->toBe(1);
 
         $readerFinal = postChannelEvent($app, $readerToken, [
-            'session_id' => 'session-reader',
-            'event_id' => 'event-9',
+            'session_id' => $sessionReader,
+            'event_id' => $eventReaderFinal,
             'phase' => 'final',
             'resource_id' => $doc,
         ]);
         expect($readerFinal['status'])->toBe(404, $readerFinal['raw'])
-            ->and(DB::table('v_ai_runs')->count())->toBe(1);
+            ->and(DB::table('v_ai_runs')->where('effective_subject', $writerSubject)->count())->toBe(1);
 
         $before = finalMessageRequest($app, 'GET', '/office/workspace?run_id='.$runId, $writerToken);
         expect($before->getStatusCode())->toBe(200, (string) $before->getContent());
@@ -286,19 +338,29 @@ test('channel emulator keeps a partial unpublished, dedupes the final message, a
             'digest' => $digest,
             'approved' => true,
         ], ['Content-Type' => 'application/json', 'Accept' => 'application/json']);
-        expect($decided->getStatusCode())->toBe(200, (string) $decided->getContent())
-            ->and(DB::table('v_ai_text_commands')->where('resource_id', $doc)->count())->toBe(1)
+        expect($decided->getStatusCode())->toBe(200, (string) $decided->getContent());
+        if ($asyncPg) {
+            $deadline = microtime(true) + 25.0;
+            while (microtime(true) < $deadline) {
+                if (DB::table('v_ai_text_commands')->where('resource_id', $doc)->count() === 1
+                    && DB::table('v_outbox')->where('aggregate_id', $doc)->where('type', 'office.text_command_committed')->count() === 1) {
+                    break;
+                }
+                usleep(200_000);
+            }
+        }
+        expect(DB::table('v_ai_text_commands')->where('resource_id', $doc)->count())->toBe(1)
             ->and(DB::table('v_outbox')->where('aggregate_id', $doc)->where('type', 'office.text_command_committed')->count())->toBe(1);
 
         $afterDuplicate = postChannelEvent($app, $writerToken, [
-            'session_id' => 'session-1',
-            'event_id' => 'event-3',
+            'session_id' => $channelSession,
+            'event_id' => $eventFinal,
             'phase' => 'final',
             'resource_id' => $doc,
         ]);
         expect($afterDuplicate['json']['run_id'])->toBe($runId)
             ->and($afterDuplicate['json']['run_count'])->toBe(1)
-            ->and(DB::table('v_ai_runs')->count())->toBe(1)
+            ->and(DB::table('v_ai_runs')->where('effective_subject', $writerSubject)->count())->toBe(1)
             ->and(DB::table('v_ai_text_commands')->where('resource_id', $doc)->count())->toBe(1);
 
         $reconnect = finalMessageRequest($app, 'GET', '/office/runs/'.$runId, $writerToken, [], [
@@ -357,7 +419,7 @@ test('channel emulator keeps a partial unpublished, dedupes the final message, a
             ->and($foreignStatusBody['error']['code'])->toBe('resource_unavailable')
             ->and((string) $foreignStatus->getContent())->not->toContain($receiptId);
 
-        $driveOwner = StandOwner::query()->firstOrFail();
+        $driveOwner = StandOwner::query()->findOrFail($seed['owner_id']);
         $writerActor = StandActor::query()->findOrFail($seed['writer_user_id']);
         $drive = Vaulter::drive($driveOwner)->asSystem('revoke-writer');
         foreach ($drive->access()->grants($drive->root()->id) as $grant) {

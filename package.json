@@ -10,5 +10,8 @@
   },
   "workspaces": [
     "packages/vue"
-  ]
+  ],
+  "devDependencies": {
+    "gpt-tokenizer": "^4.1.2"
+  }
 }
