@@ -91,12 +91,9 @@ The client has no runtime dependencies; keep it that way.
 
 ## CI
 
-`.github/workflows/ci.yml` validates every `composer.json`, asserts the Node.js
-version, runs the suites on PostgreSQL 18.7 and 19.0, replays all migrations,
-applies the unindexed-foreign-key gate (`scripts/ci/unindexed-fks.sql`) and
-fails when a dependency or a source file trips the SQL stop-rail
-(`scripts/ci/VaulterAiSqlStopRail.php`). A negative fixture proves the gate
-still fails on a forbidden package or a banned call.
+The quality job validates the workspace and package Composer manifests, runs Pint and PHPStan on PHP 8.4, checks workflow definitions, and exercises the license and source rules against their negative fixtures.
+
+After it passes, PHP 8.4 and 8.5 run the schema and package suites on PostgreSQL 18.7 and 19.0 and SQLite. The matrix also checks PHP 8.5 types. Parallel Node and Python jobs cover the Vue build, office client tests and static checks. Branch protection requires the final `CI gate` check.
 
 ## Conventions
 

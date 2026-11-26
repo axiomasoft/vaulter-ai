@@ -1,27 +1,5 @@
 name: CI
 
-# PHP 8.4 and 8.5 with PostgreSQL 18.7 and 19.0. Migrations of the Vaulter
-# modules and every vaulter-ai package run before unindexed-fks.sql (0 unindexed
-# foreign keys). The PHP job then drops and recreates vaulter_ai_test so
-# composer test migrates a clean database. It also installs Node 26.13.1, builds
-# ../vaulter-sheets runtime and vue, and installs Playwright Chromium. The same
-# matrix runs composer phpstan, pint --test, and composer test on SQLite and on
-# PostgreSQL. Node 26.13.1 runs the Vue package. Python 3.12 runs the office
-# client unit tests inside a virtualenv.
-# Stop-cranes from engineering-standards §2, enforced before review:
-# Zero-Royalty denylist (0 forbidden packages, no UNLICENSED, no SEE LICENSE,
-# no GPL/AGPL/SSPL), 64-bit hashtextextended locks, no session pg_advisory_lock,
-# no DEFERRABLE INITIALLY DEFERRED, no raw DB::transaction(), no
-# set_config(..., false), no parse_url(), no ZipArchive::extractTo(), no
-# CURLOPT_RESOLVE, no unindexed FK, no Helpers/Utils/Common/Misc/Traits
-# directories, no @phpstan-ignore, no @psalm-suppress, no test ->skip(), no
-# Eloquent Model on an #[Api] surface, no libclamav linkage, no
-# registry.tiptap.dev.
-# The embedded checker carries a negative fixture (--self-test) that must fail
-# when a forbidden package, a banned call, or a forbidden license is introduced.
-# Private sibling checkouts use secrets.VAULTER_READ_TOKEN when GitHub's default
-# token cannot read axiomasoft/vaulter, vaulter-sheets, vaulter-collaboration,
-# agentools, and packman. A checkout that already has those siblings is reused.
 
 on:
   push:
@@ -47,25 +25,39 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node.js 26.13.1
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Setup Node.js
+        uses: $/.github/actions/setup-node
         with:
-          node-version: "26.13.1"
+          install: "false"
 
       - name: Assert Node.js >=26.13.1
         run: |
           node -e 'const parts = process.versions.node.split(".").map(Number); const ok = parts[0] > 26 || (parts[0] === 26 && (parts[1] > 13 || (parts[1] === 13 && parts[2] >= 1))); if (!ok) { console.error(process.versions.node); process.exit(1); }'
           node -e 'const engines = require("./package.json").engines || {}; if (engines.node !== ">=26.13.1") { console.error(engines); process.exit(1); }'
 
-      - name: Setup PHP
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2.40.0
-        with:
-          php-version: "8.4"
-          coverage: none
-          tools: composer:v2
+      - name: Checkout sibling repositories
+        env:
+          VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: bash scripts/ci/checkout-ecosystem.sh
 
-      - name: Validate composer.json
-        run: composer validate --strict --no-interaction
+      - name: Install PHP dependencies
+        uses: $/.github/actions/setup-php
+
+      - name: Validate Composer manifests
+        run: |
+          composer validate --strict --no-interaction
+          for manifest in packages/*/composer.json; do
+            composer validate --strict --no-check-publish --no-check-lock "$manifest"
+          done
+
+      - name: Check PHP style and types
+        run: |
+          composer lint:check
+          composer phpstan
+
+      - name: Check GitHub Actions workflows
+        uses: $/.github/actions/lint-workflows
 
       - name: License and source stop-cranes
         run: |
@@ -120,13 +112,14 @@ jobs:
           GIT_TERMINAL_PROMPT: "0"
         run: bash scripts/ci/checkout-ecosystem.sh
 
-      - name: Setup PHP ${{ matrix.php }}
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2.40.0
+      - name: Install PHP dependencies
+        uses: $/.github/actions/setup-php
         with:
           php-version: ${{ matrix.php }}
-          extensions: mbstring, pdo, pdo_pgsql, pgsql, pdo_sqlite, sqlite3, pcntl, posix
-          coverage: none
-          tools: composer:v2
+
+      - name: Check types on PHP 8.5
+        if: matrix.php == '8.5' && matrix.postgres == '18.7'
+        run: composer phpstan
 
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client libatomic1
@@ -142,13 +135,10 @@ jobs:
             *) echo "expected PostgreSQL ${expected}, got ${ver}" >&2; exit 1 ;;
           esac
 
-      - name: Install Composer dependencies
-        run: composer install --prefer-dist --no-interaction --no-progress
-
-      - name: Setup Node.js 26.13.1
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Setup Node.js
+        uses: $/.github/actions/setup-node
         with:
-          node-version: "26.13.1"
+          install: "false"
 
       - name: Build vaulter-sheets runtime and vue, install Playwright Chromium
         run: |
@@ -188,12 +178,6 @@ jobs:
           fi
           grep -q "Unindexed foreign keys detected" "$RUNNER_TEMP/fk-negative.log"
 
-      - name: composer phpstan
-        run: composer phpstan
-
-      - name: pint --test
-        run: vendor/bin/pint --test
-
       - name: composer test (SQLite)
         run: composer test
 
@@ -224,15 +208,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node.js 26.13.1
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "26.13.1"
-          cache: npm
+      - name: Install Node dependencies
+        uses: $/.github/actions/setup-node
 
-      - name: npm ci, vitest, vue-tsc and vite build
+      - name: Vitest, vue-tsc and vite build
         run: |
-          npm ci
           npm --prefix packages/vue test
           npm --prefix packages/vue run build
 
@@ -268,6 +248,7 @@ jobs:
     name: CI gate
     if: always()
     needs: [quality, php, vue, python]
+    timeout-minutes: 5
     runs-on: ubuntu-24.04
     steps:
       - name: Require all lanes to pass
