@@ -40,9 +40,6 @@ final class AgenToolsServiceProvider extends ServiceProvider
         ], 'vaulter-ai-agentools-config');
 
         $this->callAfterResolving(OfficeRegistry::class, static function (OfficeRegistry $registry, Container $app): void {
-            if ($registry->isFrozen()) {
-                return;
-            }
             $registry->registerLazyExecutor(
                 AgenToolsOfficeExecutor::KEY,
                 static fn (): AgenToolsOfficeExecutor => $app->make(AgenToolsOfficeExecutor::class),

@@ -33,9 +33,6 @@ final class LaravelAiServiceProvider extends ServiceProvider
         ], 'vaulter-ai-laravel-ai-config');
 
         $this->callAfterResolving(OfficeRegistry::class, static function (OfficeRegistry $registry, Container $app): void {
-            if ($registry->isFrozen()) {
-                return;
-            }
             $registry->registerLazyExecutor(
                 LaravelOfficeExecutor::KEY,
                 static fn (): LaravelOfficeExecutor => $app->make(LaravelOfficeExecutor::class),

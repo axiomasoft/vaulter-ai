@@ -35,7 +35,7 @@ when installed alone.
 
 Owners register their pieces during `boot()`:
 
-Custom providers should register extensions with `callAfterResolving(OfficeRegistry::class, ...)` in `boot()`. The callback receives each fresh registry before it freezes. This keeps readers, owners, and executors within the request or queue job that uses them.
+Custom providers should register extensions with `callAfterResolving(OfficeRegistry::class, ...)` in `boot()`. Register this callback during provider boot. The application’s `booted` callbacks freeze the first registry and install the freeze callback for future scopes. A late registration throws `OfficeRegistryException`. This keeps readers, owners, and executors within the request or queue job that uses them.
 
 | Registration | Contract | Example |
 | --- | --- | --- |

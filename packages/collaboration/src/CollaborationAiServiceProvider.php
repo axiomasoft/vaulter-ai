@@ -22,9 +22,6 @@ final class CollaborationAiServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->callAfterResolving(OfficeRegistry::class, static function (OfficeRegistry $registry, Container $app): void {
-            if ($registry->isFrozen()) {
-                return;
-            }
             if (! $app->make(Kernel::class)->isActive('collaboration')) {
                 return;
             }

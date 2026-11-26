@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Vaulter\Ai\Core\Exceptions\OfficeRegistryException;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
 use Vaulter\Ai\Documents\DocumentsAiServiceProvider;
@@ -53,4 +54,10 @@ test('a new scope rebuilds the frozen document registry and its owners', functio
         ->and($second)->not->toBe($first)
         ->and($second->isFrozen())->toBeTrue()
         ->and($second->ownerFor('text.replace_exact@1', 'snapshot'))->not->toBeNull()->not->toBe($firstOwner);
+});
+
+test('a document extension registered after the registry freezes fails explicitly', function (): void {
+    expect($this->app->make(OfficeRegistry::class)->isFrozen())->toBeTrue();
+    expect(fn () => (new DocumentsAiServiceProvider($this->app))->boot())
+        ->toThrow(OfficeRegistryException::class);
 });

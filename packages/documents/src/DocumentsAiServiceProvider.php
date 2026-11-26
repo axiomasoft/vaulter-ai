@@ -97,9 +97,6 @@ final class DocumentsAiServiceProvider extends ServiceProvider
         $this->app->make(AiDocumentsSchema::class)->assertSameConnectionAsCore();
 
         $this->callAfterResolving(OfficeRegistry::class, static function (OfficeRegistry $registry, Container $app): void {
-            if ($registry->isFrozen()) {
-                return;
-            }
             $singleTextOwner = $app->make(SingleTextOwner::class);
             $registry->registerReader($app->make(TextReader::class));
             $registry->registerCommand($app->make(ReplaceExact::class));

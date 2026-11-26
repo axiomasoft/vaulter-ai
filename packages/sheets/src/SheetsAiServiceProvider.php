@@ -55,9 +55,6 @@ final class SheetsAiServiceProvider extends ServiceProvider
         ], 'vaulter-ai-sheets-config');
 
         $this->callAfterResolving(OfficeRegistry::class, static function (OfficeRegistry $registry, Container $app): void {
-            if ($registry->isFrozen()) {
-                return;
-            }
             $registry->registerReader($app->make(SheetReader::class));
             $registry->registerCommand($app->make(FillFormula::class));
             $registry->registerOwner(FillFormula::COMMAND, 'snapshot', $app->make(SheetCommandOwner::class));
