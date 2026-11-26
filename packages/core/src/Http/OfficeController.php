@@ -28,7 +28,15 @@ final readonly class OfficeController
 
     public function __invoke(Request $request, Container $container, WireValidator $validator): JsonResponse
     {
-        $body = stream_get_contents($request->getContent(asResource: true), WireValidator::MAX_HTTP_BODY_BYTES + 1);
+        $declared = $request->headers->get('Content-Length');
+        if ($declared !== null && ctype_digit($declared) && (int) $declared > WireValidator::MAX_HTTP_BODY_BYTES) {
+            return self::requestTooLarge();
+        }
+        // Laravel materializes JSON when it creates the request. Asking for a
+        // stream here would copy that string to a new temporary file.
+        $body = $request->isJson()
+            ? $request->getContent()
+            : stream_get_contents($request->getContent(asResource: true), WireValidator::MAX_HTTP_BODY_BYTES + 1);
         if ($body === false) {
             throw new RuntimeException('Unable to read the Office request body.');
         }
@@ -36,7 +44,7 @@ final readonly class OfficeController
 
         if (! $parsed['ok']) {
             if ($parsed['kind'] === 'too_large') {
-                return new JsonResponse(['error' => 'request_too_large'], 413, options: OfficeResponse::WIRE_JSON_OPTIONS);
+                return self::requestTooLarge();
             }
             if ($parsed['kind'] === 'invalid_request') {
                 return new JsonResponse(['error' => 'invalid_request'], 400, options: OfficeResponse::WIRE_JSON_OPTIONS);
@@ -82,5 +90,10 @@ final readonly class OfficeController
             data: $response->toJson(),
             status: $status,
         );
+    }
+
+    private static function requestTooLarge(): JsonResponse
+    {
+        return new JsonResponse(['error' => 'request_too_large'], 413, options: OfficeResponse::WIRE_JSON_OPTIONS);
     }
 }

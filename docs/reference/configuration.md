@@ -115,6 +115,6 @@ provider secret is decrypted or a payload is encrypted.
 
 The operations endpoint accepts up to 1,048,576 bytes. A larger request receives HTTP 413 with
 `{"error":"request_too_large"}`. The limit applies to the entire encoded envelope, including inserted
-text. Enforce the same limit at ingress to bound memory before Laravel creates the JSON request.
+text. Laravel materializes a JSON request before route middleware and the controller run. Enforce the limit at ingress to bound memory at that point, including for chunked transfer. The controller checks both the declared length and the actual encoded body size.
 For Nginx set `client_max_body_size 1m;` in the location serving the operations route. Configure
 its 413 error response if clients require the Office JSON error body at that boundary.

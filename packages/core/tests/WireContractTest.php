@@ -256,6 +256,10 @@ test('HTTP enforces all three transport boundaries and rejects body authority in
     $search = json_encode(['version' => 1, 'operation' => 'office.search', 'input' => ['query' => 'alpha']], JSON_THROW_ON_ERROR);
     $post = fn (string $raw) => $this->call('POST', '/api/vaulter-ai/v1/operations', [], [], [], ['CONTENT_TYPE' => 'application/json'], $raw);
     $post(str_pad($search, WireValidator::MAX_HTTP_BODY_BYTES))->assertStatus(401);
+    $this->call('POST', '/api/vaulter-ai/v1/operations', [], [], [], [
+        'CONTENT_TYPE' => 'application/json',
+        'CONTENT_LENGTH' => (string) (WireValidator::MAX_HTTP_BODY_BYTES + 1),
+    ], $search)->assertStatus(413);
     $tooLarge = $post(str_pad($search, WireValidator::MAX_HTTP_BODY_BYTES + 1));
     $tooLarge->assertStatus(413);
     expect($tooLarge->json())->toBe(['error' => 'request_too_large']);
