@@ -12,7 +12,7 @@
 
 Vaulter AI is a private channel. Packages are published as ZIP (Composer) and
 tgz (npm) artifacts listed in `release/packages.json`; configure the private
-repository your organisation uses before requiring them.
+repository your organisation uses before requiring them. Publish each Vaulter family dependency at the same version as the AI adapter that requires it. The Composer manifests use `self.version`, so a missing matching core, documents, sheets or collaboration release prevents installation.
 
 ## Choose packages
 
