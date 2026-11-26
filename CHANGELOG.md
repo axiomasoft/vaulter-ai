@@ -9,6 +9,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Resource-limited AgenTools ports now restrict both tool calls and descriptors. Pass an empty list to disable all tools or omit the list to use the caller’s authorized scope.
+- Idle chat event streams poll with backoff up to two seconds, which also bounds the interval between authorization checks.
+
 - Office services, including executor instances, are scoped to a request or job. Host extensions that register Office commands should register them for each resolution of the registry.
 - Composer dependencies on other Vaulter packages require the same version across the Vaulter family. The private registry must contain matching versions of each required adapter, core and host package.
 

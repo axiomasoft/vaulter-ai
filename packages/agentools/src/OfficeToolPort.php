@@ -29,7 +29,7 @@ use Vaulter\Ai\Core\Registry\OfficeRegistry;
 
 /**
  * AgenTools ToolPort adapter invoking Office SDK operations within a trusted CallContext.
- * Keeps singletons free of caller state; bind a scoped instance per request/run via forContext().
+ * Bind a caller to the port for one request or run with forContext().
  */
 final readonly class OfficeToolPort implements ToolPort
 {
@@ -47,17 +47,17 @@ final readonly class OfficeToolPort implements ToolPort
         private ?string $runId = null,
         private ?OfficeRegistry $officeRegistry = null,
         private ?CommandWriteCapability $writeCapability = null,
-        /** @var list<string> Resource ids a scoped port may touch; empty means the caller's whole access. */
-        private array $scopedResourceIds = [],
+        /** @var list<string>|null A null scope delegates to the caller’s current authorization. */
+        private ?array $scopedResourceIds = null,
     ) {}
 
-    /** @param list<ResourceEntry> $resources */
-    public function forContext(CallContext $context, ?string $runId = null, array $resources = []): self
+    /** @param list<ResourceEntry>|null $resources */
+    public function forContext(CallContext $context, ?string $runId = null, ?array $resources = null): self
     {
         return new self(
             office: $this->office,
             policy: $this->policy,
-            descriptors: $resources === []
+            descriptors: $resources === null
                 ? $this->descriptors->forContext($context)
                 : $this->descriptors->forScope($context, $resources),
             actionKeyMap: $this->actionKeyMap,
@@ -70,7 +70,7 @@ final readonly class OfficeToolPort implements ToolPort
             runId: $runId,
             officeRegistry: $this->officeRegistry,
             writeCapability: $this->writeCapability,
-            scopedResourceIds: array_map(static fn (ResourceEntry $entry): string => $entry->resourceId, $resources),
+            scopedResourceIds: $resources === null ? null : array_map(static fn (ResourceEntry $entry): string => $entry->resourceId, $resources),
         );
     }
 
@@ -126,7 +126,7 @@ final readonly class OfficeToolPort implements ToolPort
 
         // A port scoped to resources must not reach any other resource the caller can access,
         // and search could only surface such resources, so it is refused too.
-        if ($this->scopedResourceIds !== []) {
+        if ($this->scopedResourceIds !== null) {
             $resourceId = $arguments['resource_id'] ?? null;
             if ($operation === OfficeOperation::Search || ! is_string($resourceId)
                 || ! in_array($resourceId, $this->scopedResourceIds, true)) {

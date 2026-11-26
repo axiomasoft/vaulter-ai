@@ -18,7 +18,7 @@ use Vaulter\Ai\Core\Registry\OfficeRegistry;
 
 /**
  * Exposes validated AgenTools ToolDescriptor metadata for the seven Office SDK v1 operations,
- * scoped by HostPolicy, installed command versions, live resource permissions, and 3.5 journal readiness.
+ * scoped by HostPolicy, installed command versions, live resource permissions, and journal readiness.
  */
 final readonly class OfficeToolDescriptorRegistry implements ToolDescriptorRegistry
 {
@@ -26,7 +26,7 @@ final readonly class OfficeToolDescriptorRegistry implements ToolDescriptorRegis
     private array $descriptors;
 
     /**
-     * @param  list<ResourceEntry>  $scopedResources
+     * @param  list<ResourceEntry>|null  $scopedResources
      */
     public function __construct(
         private ?HostPolicy $policy = null,
@@ -35,7 +35,7 @@ final readonly class OfficeToolDescriptorRegistry implements ToolDescriptorRegis
         private ?OfficeRegistry $officeRegistry = null,
         private ?CommandWriteCapability $writeCapability = null,
         private ?ResourceDirectory $directory = null,
-        private array $scopedResources = [],
+        private ?array $scopedResources = null,
     ) {
         $this->descriptors = $this->buildDescriptors();
     }
@@ -49,7 +49,7 @@ final readonly class OfficeToolDescriptorRegistry implements ToolDescriptorRegis
             officeRegistry: $this->officeRegistry,
             writeCapability: $this->writeCapability,
             directory: $this->directory,
-            scopedResources: $resource !== null ? [$resource] : [],
+            scopedResources: $resource !== null ? [$resource] : null,
         );
     }
 
@@ -72,7 +72,11 @@ final readonly class OfficeToolDescriptorRegistry implements ToolDescriptorRegis
     public function descriptor(string $toolName): ?ToolDescriptor
     {
         $canonical = OfficeOperation::fromToolName($toolName);
-        if ($canonical === null) {
+        if ($canonical === null || $this->scopedResources === []) {
+            return null;
+        }
+
+        if ($canonical === OfficeOperation::Search && ($this->scopedResources !== null || $this->resource !== null)) {
             return null;
         }
 
@@ -138,9 +142,7 @@ final readonly class OfficeToolDescriptorRegistry implements ToolDescriptorRegis
             return true;
         }
 
-        $resources = $this->scopedResources !== []
-            ? $this->scopedResources
-            : ($this->resource !== null ? [$this->resource] : []);
+        $resources = $this->scopedResources ?? ($this->resource !== null ? [$this->resource] : []);
 
         if ($resources !== []) {
             foreach ($resources as $entry) {

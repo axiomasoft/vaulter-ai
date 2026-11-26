@@ -356,8 +356,13 @@ test('a port scoped to resources refuses tool calls on any other resource', func
         ->and($this->app->make(OfficeToolPort::class)->forContext($fixture->context)
             ->call('office_read', ['resource_id' => $outside->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p1']], 'k-unscoped')
             ->isError())->toBeFalse();
+    $empty = $this->app->make(OfficeToolPort::class)->forContext($fixture->context, resources: []);
+    $catalog = $this->app->make(OfficeToolDescriptorRegistry::class);
+    expect($catalog->forScope($fixture->context, [])->all())->toBeEmpty()
+        ->and($catalog->forScope($fixture->context, [$inScope])->descriptor('office_search'))->toBeNull();
     foreach ([
         $read($outside->id, 'p1', 'k-out'),
+        $empty->call('office_read', ['resource_id' => $fixture->node->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p42']], 'empty-scope'),
         $port->call('office_search', ['query' => 'scope'], 'k-search'),
     ] as $refused) {
         expect($refused->isError())->toBeTrue()
