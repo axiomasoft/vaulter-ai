@@ -564,6 +564,7 @@ jobs:
           (cd "${vaulter}/packages/vue" && npm run build)
           (cd "${sheets}" && npm ci --no-audit --no-fund)
           (cd "${sheets}" && npm run build --workspace @vaulter/sheets-runtime)
+          (cd "${sheets}" && npm run build --workspace @vaulter/sheets-realtime)
           (cd "${sheets}" && npm run build --workspace @vaulter/sheets-vue)
           (cd "${sheets}" && npx playwright install --with-deps chromium)
 
