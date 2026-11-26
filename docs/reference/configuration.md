@@ -110,3 +110,11 @@ Rebuild projections with
 
 `APP_KEY` is not needed to boot the providers; it is needed as soon as a
 provider secret is decrypted or a payload is encrypted.
+
+## Office HTTP request size
+
+The operations endpoint accepts up to 1,048,576 bytes. A larger request receives HTTP 413 with
+`{"error":"request_too_large"}`. The limit applies to the entire encoded envelope, including inserted
+text. Enforce the same limit at ingress to bound memory before Laravel creates the JSON request.
+For Nginx set `client_max_body_size 1m;` in the location serving the operations route. Configure
+its 413 error response if clients require the Office JSON error body at that boundary.

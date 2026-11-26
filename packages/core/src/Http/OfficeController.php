@@ -7,6 +7,7 @@ namespace Vaulter\Ai\Core\Http;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use RuntimeException;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Data\OfficeResponse;
@@ -29,7 +30,11 @@ final readonly class OfficeController
 
     public function __invoke(Request $request): JsonResponse
     {
-        $parsed = $this->validator->parseHttpPayload($request->getContent());
+        $body = stream_get_contents($request->getContent(asResource: true), WireValidator::MAX_HTTP_BODY_BYTES + 1);
+        if ($body === false) {
+            throw new RuntimeException('Unable to read the Office request body.');
+        }
+        $parsed = $this->validator->parseHttpPayload($body);
 
         if (! $parsed['ok']) {
             if ($parsed['kind'] === 'too_large') {
