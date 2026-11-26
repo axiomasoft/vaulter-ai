@@ -111,7 +111,7 @@ class LiveJournalWithoutCollabTestCase extends OfficeTestCase
 
 uses(LiveJournalWithoutCollabTestCase::class)->in(__FILE__);
 
-test('live journal mode without 3.5 collaboration excludes write tools and rejects describe/prepare while preserving reads', function (): void {
+test('live journal mode without the collaboration adapter excludes write tools and rejects describe/prepare while preserving reads', function (): void {
     $fixture = new TextCommandFixture($this->app);
     $office = $this->app->make(Office::class);
     $chatTools = $this->app->make(ChatTools::class);

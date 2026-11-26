@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Idle chat event streams poll with backoff up to two seconds. Active streams reset to 200 milliseconds.
+- Providers can use `OfficeRegistry::registerLazyExecutor()` to build an executor on its first lookup in the current scope.
+
 - Office services and custom registry extensions are scoped to a request or job. Register host extensions with the per-resolution hook in the architecture guide.
 - HTTP controllers receive their current dependencies through Laravel action injection, including when the route reuses a controller instance. Hosts that invoke controller methods directly must use the updated signatures.
 - `ConfigProviderSecretStore` depends on Laravel's `StringEncrypter` contract.
