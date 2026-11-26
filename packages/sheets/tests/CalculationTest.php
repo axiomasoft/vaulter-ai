@@ -31,7 +31,6 @@ use Vaulter\Sheets\Contracts\WorkbookRuntime;
 use Vaulter\Sheets\Data\WorkbookCommand;
 use Vaulter\Sheets\Data\WorkbookMarker;
 use Vaulter\Sheets\Data\WorkbookProblem;
-use Vaulter\Sheets\Runtime\NodeWorkbookRuntime;
 
 uses(LaravelAiTestCase::class);
 
@@ -183,6 +182,30 @@ test('verify adapter refuses all schema-valid spreadsheet proof negatives includ
 ]);
 
 test('corrupted cache 999 is recalculated on read/verify and literal constant replacement fails verify(current) while at_commit stays passed', function (): void {
+    $runtime = new class($this->app->make(WorkbookRuntime::class)) implements WorkbookRuntime
+    {
+        public bool $corruptRead = false;
+
+        public function __construct(private readonly WorkbookRuntime $inner) {}
+
+        public function exchange(stdClass $request): stdClass
+        {
+            $resp = $this->inner->exchange($request);
+            if ($this->corruptRead && ($request->operation ?? null) === 'read') {
+                foreach ($resp->data->ranges ?? [] as $r) {
+                    foreach ($r->cells ?? [] as $cell) {
+                        if ($cell->a1 === 'D2') {
+                            $cell->value = 999;
+                        }
+                    }
+                }
+            }
+
+            return $resp;
+        }
+    };
+    $this->app->instance(WorkbookRuntime::class, $runtime);
+
     // Seed workbook with pre-existing formula =C2-B2 and corrupted cache v = 999!
     $fixture = new SheetCommandFixture(
         $this->app,
@@ -251,33 +274,8 @@ test('corrupted cache 999 is recalculated on read/verify and literal constant re
         ->toBe('passed');
 
     // 3. Inject stale runtime cache 999 fault during current verification -> verify(current) detects value mismatch and returns outcome=failed.
-    $realRuntime = $this->app->make(NodeWorkbookRuntime::class);
-    $this->app->instance(WorkbookRuntime::class, new class($realRuntime) implements WorkbookRuntime
-    {
-        public bool $inject999 = true;
-
-        public function __construct(private readonly NodeWorkbookRuntime $inner) {}
-
-        public function exchange(stdClass $request): stdClass
-        {
-            $resp = $this->inner->exchange($request);
-            if ($this->inject999 && ($request->operation ?? null) === 'read') {
-                foreach ($resp->data->ranges ?? [] as $r) {
-                    foreach ($r->cells ?? [] as $cell) {
-                        if ($cell->a1 === 'D2') {
-                            $cell->value = 999;
-                        }
-                    }
-                }
-            }
-
-            return $resp;
-        }
-    });
-
     // Test on a workbook where D2 still holds the real formula:
     $freshForCache = new SheetCommandFixture($this->app, automatic: true);
-    $this->app->instance(WorkbookRuntime::class, $realRuntime);
     $r2 = $freshForCache->call(OfficeOperation::Read, [
         'selector' => (object) [
             'kind' => 'sheet_table',
@@ -304,27 +302,7 @@ test('corrupted cache 999 is recalculated on read/verify and literal constant re
         'digest' => $p2->digest,
     ]);
 
-    $this->app->instance(WorkbookRuntime::class, new class($realRuntime) implements WorkbookRuntime
-    {
-        public function __construct(private readonly NodeWorkbookRuntime $inner) {}
-
-        public function exchange(stdClass $request): stdClass
-        {
-            $resp = $this->inner->exchange($request);
-            if (($request->operation ?? null) === 'read') {
-                foreach ($resp->data->ranges ?? [] as $r) {
-                    foreach ($r->cells ?? [] as $cell) {
-                        if ($cell->a1 === 'D2') {
-                            $cell->value = 999;
-                        }
-                    }
-                }
-            }
-
-            return $resp;
-        }
-    });
-
+    $runtime->corruptRead = true;
     $cacheFail = $freshForCache->call(OfficeOperation::Verify, ['receipt_id' => $c2->result->receipt_id, 'mode' => 'current']);
     expect($cacheFail->ok)->toBeTrue()
         ->and($cacheFail->result->outcome)->toBe('failed');
@@ -335,6 +313,23 @@ test('corrupted cache 999 is recalculated on read/verify and literal constant re
 });
 
 test('runtime calculation timeout returns calculation_pending on commit without mutating workbook, recovers on retry, and rejects if inputs changed before retry', function (): void {
+    $runtime = new class($this->app->make(WorkbookRuntime::class)) implements WorkbookRuntime
+    {
+        public bool $timeout = false;
+
+        public function __construct(private readonly WorkbookRuntime $inner) {}
+
+        public function exchange(stdClass $request): stdClass
+        {
+            if ($this->timeout && ($request->operation ?? null) === 'apply') {
+                throw new WorkbookProblem('calculation_pending', 503);
+            }
+
+            return $this->inner->exchange($request);
+        }
+    };
+    $this->app->instance(WorkbookRuntime::class, $runtime);
+
     $fixture = new SheetCommandFixture($this->app, automatic: true);
     $fixture->authorizeHttp();
     $r = $fixture->call(OfficeOperation::Read, [
@@ -358,24 +353,7 @@ test('runtime calculation timeout returns calculation_pending on commit without 
         ],
     ])->result;
 
-    $realRuntime = $this->app->make(NodeWorkbookRuntime::class);
-    $faulty = new class($realRuntime) implements WorkbookRuntime
-    {
-        public bool $timeout = true;
-
-        public function __construct(private readonly NodeWorkbookRuntime $inner) {}
-
-        public function exchange(stdClass $request): stdClass
-        {
-            if ($this->timeout && ($request->operation ?? null) === 'apply') {
-                throw new WorkbookProblem('calculation_pending', 503);
-            }
-
-            return $this->inner->exchange($request);
-        }
-    };
-    $this->app->instance(WorkbookRuntime::class, $faulty);
-
+    $runtime->timeout = true;
     $beforeVersion = $fixture->snapshot()->stateVersion;
     $failed = $fixture->call(OfficeOperation::Commit, [
         'command_id' => 'cmd-timeout-1',
@@ -403,7 +381,7 @@ test('runtime calculation timeout returns calculation_pending on commit without 
         ->assertJsonPath('error.retryable', true)
         ->assertJsonPath('error.next_action', 'retry_read');
 
-    $faulty->timeout = false;
+    $runtime->timeout = false;
     $recovered = $fixture->call(OfficeOperation::Commit, [
         'command_id' => 'cmd-timeout-1',
         'proposal_id' => $p->proposal_id,
@@ -436,23 +414,7 @@ test('runtime calculation timeout returns calculation_pending on commit without 
         ],
     ])->result;
 
-    $faulty2 = new class($realRuntime) implements WorkbookRuntime
-    {
-        public bool $timeout = true;
-
-        public function __construct(private readonly NodeWorkbookRuntime $inner) {}
-
-        public function exchange(stdClass $request): stdClass
-        {
-            if ($this->timeout && ($request->operation ?? null) === 'apply') {
-                throw new WorkbookProblem('calculation_pending', 503);
-            }
-
-            return $this->inner->exchange($request);
-        }
-    };
-    $this->app->instance(WorkbookRuntime::class, $faulty2);
-
+    $runtime->timeout = true;
     $timedOut2 = $fixture2->call(OfficeOperation::Commit, [
         'command_id' => 'cmd-timeout-changed-input',
         'proposal_id' => $p2->proposal_id,
@@ -460,7 +422,7 @@ test('runtime calculation timeout returns calculation_pending on commit without 
     ]);
     expect($timedOut2->ok)->toBeFalse()->and($timedOut2->errorCode)->toBe(ErrorCode::CalculationPending);
 
-    $this->app->instance(WorkbookRuntime::class, $realRuntime);
+    $runtime->timeout = false;
     $fixture2->humanSetNumber('expenses', 2, 3, (object) ['number' => 120], 130);
 
     $retriedAfterEdit = $fixture2->call(OfficeOperation::Commit, [
