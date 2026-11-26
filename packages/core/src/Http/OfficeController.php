@@ -23,18 +23,16 @@ use Vaulter\Ai\Core\Protocol\WireValidator;
 final readonly class OfficeController
 {
     public function __construct(
-        private WireValidator $validator,
         private WireErrorMapper $errorMapper,
-        private Container $container,
     ) {}
 
-    public function __invoke(Request $request): JsonResponse
+    public function __invoke(Request $request, Container $container, WireValidator $validator): JsonResponse
     {
         $body = stream_get_contents($request->getContent(asResource: true), WireValidator::MAX_HTTP_BODY_BYTES + 1);
         if ($body === false) {
             throw new RuntimeException('Unable to read the Office request body.');
         }
-        $parsed = $this->validator->parseHttpPayload($body);
+        $parsed = $validator->parseHttpPayload($body);
 
         if (! $parsed['ok']) {
             if ($parsed['kind'] === 'too_large') {
@@ -57,7 +55,7 @@ final readonly class OfficeController
         }
 
         $officeRequest = $parsed['request'];
-        $resolver = $this->container->make(CallContextResolver::class);
+        $resolver = $container->make(CallContextResolver::class);
         $context = $resolver->resolve($request);
         if ($context === null) {
             $response = $this->errorMapper->toResponse(
@@ -72,7 +70,7 @@ final readonly class OfficeController
             );
         }
 
-        $office = $this->container->make(Office::class);
+        $office = $container->make(Office::class);
         $response = $office->handle($context, $officeRequest);
         $status = $this->errorMapper->httpStatus($response);
         if ($officeRequest->operation === OfficeOperation::Commit && $response->errorCode === ErrorCode::ApprovalRequired

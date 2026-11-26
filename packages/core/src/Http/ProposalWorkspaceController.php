@@ -9,7 +9,6 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
-use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
@@ -23,13 +22,12 @@ use Vaulter\Ai\Core\Workspace\OfficeWorkspaceService;
 final readonly class ProposalWorkspaceController
 {
     public function __construct(
-        private Container $container,
         private WireErrorMapper $errorMapper,
     ) {}
 
-    public function index(Request $request): JsonResponse
+    public function index(Request $request, CallContextResolver $resolver, Container $container): JsonResponse
     {
-        $context = $this->resolveContext($request);
+        $context = $resolver->resolve($request);
         if ($context === null) {
             return $this->errorJson(ErrorCode::AuthenticationRequired);
         }
@@ -38,7 +36,7 @@ final readonly class ProposalWorkspaceController
         $decision = is_string($request->query('decision')) ? $request->query('decision') : null;
 
         try {
-            $items = $this->workspace()->listProposals($context, $resourceId, $decision);
+            $items = $container->make(OfficeWorkspaceService::class)->listProposals($context, $resourceId, $decision);
 
             return new JsonResponse(['data' => $items], 200);
         } catch (OfficeException $e) {
@@ -46,15 +44,15 @@ final readonly class ProposalWorkspaceController
         }
     }
 
-    public function show(Request $request, string $id): JsonResponse
+    public function show(Request $request, CallContextResolver $resolver, Container $container, string $id): JsonResponse
     {
-        $context = $this->resolveContext($request);
+        $context = $resolver->resolve($request);
         if ($context === null) {
             return $this->errorJson(ErrorCode::AuthenticationRequired);
         }
 
         try {
-            $proposal = $this->workspace()->showProposal($context, $id);
+            $proposal = $container->make(OfficeWorkspaceService::class)->showProposal($context, $id);
 
             return new JsonResponse(['data' => $proposal], 200);
         } catch (OfficeException $e) {
@@ -62,9 +60,9 @@ final readonly class ProposalWorkspaceController
         }
     }
 
-    public function decide(Request $request, string $id): JsonResponse|RedirectResponse
+    public function decide(Request $request, CallContextResolver $resolver, Container $container, string $id): JsonResponse|RedirectResponse
     {
-        $context = $this->resolveContext($request);
+        $context = $resolver->resolve($request);
         if ($context === null) {
             return $this->errorJson(ErrorCode::AuthenticationRequired);
         }
@@ -87,7 +85,7 @@ final readonly class ProposalWorkspaceController
                 throw OfficeException::invalidInput('digest and boolean approved are required.');
             }
 
-            $result = $this->workspace()->decideProposal(
+            $result = $container->make(OfficeWorkspaceService::class)->decideProposal(
                 approver: $context,
                 proposalId: $id,
                 digest: $digest,
@@ -103,16 +101,6 @@ final readonly class ProposalWorkspaceController
         } catch (OfficeException $e) {
             return $this->errorJson($e->errorCode);
         }
-    }
-
-    private function resolveContext(Request $request): ?CallContext
-    {
-        return $this->container->make(CallContextResolver::class)->resolve($request);
-    }
-
-    private function workspace(): OfficeWorkspaceService
-    {
-        return $this->container->make(OfficeWorkspaceService::class);
     }
 
     private function errorJson(ErrorCode $code): JsonResponse

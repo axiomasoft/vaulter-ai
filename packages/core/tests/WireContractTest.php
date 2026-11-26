@@ -2,7 +2,11 @@
 
 declare(strict_types=1);
 
+use Illuminate\Container\Container;
+use Illuminate\Contracts\Container\Container as ContainerContract;
 use Illuminate\Http\Request;
+use Illuminate\Routing\ControllerDispatcher;
+use Illuminate\Routing\Route;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
 use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\Office;
@@ -22,6 +26,7 @@ use Vaulter\Ai\Core\Enums\ApprovalMode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Enums\ResourceType;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
+use Vaulter\Ai\Core\Http\OfficeController;
 use Vaulter\Ai\Core\Protocol\ProposalDigest;
 use Vaulter\Ai\Core\Protocol\RequestFingerprint;
 use Vaulter\Ai\Core\Protocol\WireValidator;
@@ -309,4 +314,29 @@ test('HTTP enforces all three transport boundaries and rejects body authority in
     );
     expect($validator->isValidMessage($phpSearch->toStdClass()))->toBeTrue();
     expect($phpSearch->toArray())->toBe($httpSearch->json());
+});
+
+test('a cached operations controller takes its authentication resolver from the dispatching scope', function (): void {
+    $controller = $this->app->make(OfficeController::class);
+    $request = Request::create('/operations', 'POST', content: '{"version":1,"operation":"office.search","input":{"query":"alpha"}}');
+    $route = (new Route('POST', '/operations', OfficeController::class))->bind($request);
+    foreach ([new Container, new Container] as $scope) {
+        $resolver = new class implements CallContextResolver
+        {
+            public int $calls = 0;
+
+            public function resolve(Request $request): ?CallContext
+            {
+                $this->calls++;
+
+                return null;
+            }
+        };
+        $scope->instance(Request::class, $request);
+        $scope->instance(ContainerContract::class, $scope);
+        $scope->instance(CallContextResolver::class, $resolver);
+        $response = (new ControllerDispatcher($scope))->dispatch($route, $controller, '__invoke');
+
+        expect($response->getStatusCode())->toBe(401)->and($resolver->calls)->toBe(1);
+    }
 });

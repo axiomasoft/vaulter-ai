@@ -9,7 +9,6 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
-use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Enums\ErrorCode;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
@@ -22,19 +21,18 @@ use Vaulter\Ai\Core\Workspace\OfficeWorkspaceService;
 final readonly class RunWorkspaceController
 {
     public function __construct(
-        private Container $container,
         private WireErrorMapper $errorMapper,
     ) {}
 
-    public function show(Request $request, string $id): JsonResponse
+    public function show(Request $request, CallContextResolver $resolver, Container $container, string $id): JsonResponse
     {
-        $context = $this->resolveContext($request);
+        $context = $resolver->resolve($request);
         if ($context === null) {
             return $this->errorJson(ErrorCode::AuthenticationRequired);
         }
 
         try {
-            $run = $this->workspace()->showRun($context, $id);
+            $run = $container->make(OfficeWorkspaceService::class)->showRun($context, $id);
 
             return new JsonResponse(['data' => $run], 200);
         } catch (OfficeException $e) {
@@ -42,9 +40,9 @@ final readonly class RunWorkspaceController
         }
     }
 
-    public function resume(Request $request, string $id): JsonResponse|RedirectResponse
+    public function resume(Request $request, CallContextResolver $resolver, Container $container, string $id): JsonResponse|RedirectResponse
     {
-        $context = $this->resolveContext($request);
+        $context = $resolver->resolve($request);
         if ($context === null) {
             return $this->errorJson(ErrorCode::AuthenticationRequired);
         }
@@ -62,7 +60,7 @@ final readonly class RunWorkspaceController
         $rereadOnly = $request->boolean('reread_only', false);
 
         try {
-            $run = $this->workspace()->resumeRun($context, $id, $argumentsByResource, $rereadOnly);
+            $run = $container->make(OfficeWorkspaceService::class)->resumeRun($context, $id, $argumentsByResource, $rereadOnly);
 
             if (! $request->expectsJson() && ! $request->isJson()) {
                 return LocalRedirect::after($request);
@@ -72,16 +70,6 @@ final readonly class RunWorkspaceController
         } catch (OfficeException $e) {
             return $this->errorJson($e->errorCode);
         }
-    }
-
-    private function resolveContext(Request $request): ?CallContext
-    {
-        return $this->container->make(CallContextResolver::class)->resolve($request);
-    }
-
-    private function workspace(): OfficeWorkspaceService
-    {
-        return $this->container->make(OfficeWorkspaceService::class);
     }
 
     private function errorJson(ErrorCode $code): JsonResponse

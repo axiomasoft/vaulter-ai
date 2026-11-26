@@ -22,15 +22,13 @@ use Vaulter\Ai\Core\Workspace\ChatWorkspace;
 final readonly class ChatWorkspaceController
 {
     public function __construct(
-        private Container $container,
         private WireErrorMapper $errors,
-        private ResponseFactory $responses,
     ) {}
 
-    public function open(Request $request): JsonResponse
+    public function open(Request $request, CallContextResolver $resolver, Container $container): JsonResponse
     {
         try {
-            $context = $this->context($request);
+            $context = $this->context($request, $resolver);
             $retention = 86400;
             $rawContent = $request->getContent();
             if ($request->isJson() && trim($rawContent) !== '') {
@@ -45,7 +43,7 @@ final readonly class ChatWorkspaceController
                     $retention = $body->retention_seconds;
                 }
             }
-            $chat = $this->workspace();
+            $chat = $container->make(ChatWorkspace::class);
             $sessionId = $chat->open($context, $retention);
 
             return new JsonResponse(['data' => $chat->show($context, $sessionId)], 201);
@@ -56,19 +54,21 @@ final readonly class ChatWorkspaceController
         }
     }
 
-    public function show(Request $request, string $id): JsonResponse
+    public function show(Request $request, CallContextResolver $resolver, Container $container, string $id): JsonResponse
     {
         try {
-            return new JsonResponse(['data' => $this->workspace()->show($this->context($request), $id)]);
+            $context = $this->context($request, $resolver);
+
+            return new JsonResponse(['data' => $container->make(ChatWorkspace::class)->show($context, $id)]);
         } catch (OfficeException $exception) {
             return $this->error($exception);
         }
     }
 
-    public function post(Request $request, string $id): JsonResponse
+    public function post(Request $request, CallContextResolver $resolver, Container $container, string $id): JsonResponse
     {
         try {
-            $context = $this->context($request);
+            $context = $this->context($request, $resolver);
             // Workspace middleware normalizes the parsed copy of the request body.
             $body = $request->isJson()
                 ? json_decode($request->getContent(), false, 512, JSON_THROW_ON_ERROR)
@@ -97,7 +97,7 @@ final readonly class ChatWorkspaceController
                 $selection = $decoded;
             }
 
-            $runId = $this->workspace()->post($context, $id, $message, $content, $resources, $selection);
+            $runId = $container->make(ChatWorkspace::class)->post($context, $id, $message, $content, $resources, $selection);
 
             return new JsonResponse(['data' => ['message_id' => $message, 'run_id' => $runId]], 202);
         } catch (JsonException) {
@@ -107,24 +107,24 @@ final readonly class ChatWorkspaceController
         }
     }
 
-    public function events(Request $request, string $id): StreamedResponse|JsonResponse
+    public function events(Request $request, CallContextResolver $resolver, Container $container, ResponseFactory $responses, string $id): StreamedResponse|JsonResponse
     {
         try {
-            $context = $this->context($request);
+            $context = $this->context($request, $resolver);
             $raw = $request->headers->get('Last-Event-ID') ?? $request->query('cursor', '0');
             $cursor = is_string($raw) && preg_match('/\A(?:0|[1-9][0-9]*)\z/', $raw) === 1
                 ? filter_var($raw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]) : false;
             if (! is_int($cursor)) {
                 throw OfficeException::invalidInput();
             }
-            $chat = $this->workspace();
+            $chat = $container->make(ChatWorkspace::class);
             $chat->events($context, $id, $cursor);
         } catch (OfficeException $exception) {
             return $this->error($exception);
         }
 
         /** @return Generator<int, string> */
-        $frames = function () use ($request, $chat, $id, $cursor): Generator {
+        $frames = function () use ($request, $resolver, $chat, $id, $cursor): Generator {
             $start = hrtime(true);
             $deadline = $start + 25_000_000_000;
             $keepAlive = $start + 12_000_000_000;
@@ -132,7 +132,7 @@ final readonly class ChatWorkspaceController
             yield ": connected\n\n";
             while (hrtime(true) < $deadline && connection_aborted() === 0) {
                 try {
-                    $batch = $chat->events($this->context($request), $id, $cursor);
+                    $batch = $chat->events($this->context($request, $resolver), $id, $cursor);
                 } catch (OfficeException $exception) {
                     if ($exception->errorCode === ErrorCode::CursorExpired) {
                         yield "event: reset\ndata: {}\n\n";
@@ -160,7 +160,7 @@ final readonly class ChatWorkspaceController
             }
         };
 
-        return $this->responses->stream($frames, 200, [
+        return $responses->stream($frames, 200, [
             'Content-Type' => 'text/event-stream',
             'Cache-Control' => 'private, no-cache, no-store, no-transform',
             'X-Accel-Buffering' => 'no',
@@ -168,15 +168,10 @@ final readonly class ChatWorkspaceController
         ]);
     }
 
-    private function context(Request $request): CallContext
+    private function context(Request $request, CallContextResolver $resolver): CallContext
     {
-        return $this->container->make(CallContextResolver::class)->resolve($request)
+        return $resolver->resolve($request)
             ?? throw new OfficeException(ErrorCode::AuthenticationRequired);
-    }
-
-    private function workspace(): ChatWorkspace
-    {
-        return $this->container->make(ChatWorkspace::class);
     }
 
     private function error(OfficeException $exception): JsonResponse
