@@ -25,7 +25,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'refactor/**', 'feat/**', 'fix/**']
   pull_request:
   workflow_dispatch:
 
@@ -37,8 +37,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  stop-cranes:
-    name: Stop-cranes / Node 26.13.1
+  quality:
+    name: Quality
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -69,390 +69,11 @@ jobs:
 
       - name: License and source stop-cranes
         run: |
-          cat > "$RUNNER_TEMP/stop-cranes.py" <<'PY'
-          #!/usr/bin/env python3
-          """Stop-cranes for the Vaulter AI repository.
-
-          Scans committed manifests and sources for the Zero-Royalty denylist and the
-          source bans in engineering-standards §2 that a text scan can see. Exit 0
-          means zero hits. ``--self-test`` proves a forbidden tree fails and an
-          allowed twin passes, including UNLICENSED and SEE LICENSE manifests.
-          """
-
-          from __future__ import annotations
-
-          import argparse
-          import json
-          import re
-          import sys
-          import tempfile
-          from pathlib import Path
-
-          FORBIDDEN_EXACT = frozenset(
-              {
-                  "handsontable",
-                  "hyperformula",
-                  "dunglas/mercure",
-                  "minio/minio",
-                  "exceljs",
-                  "unzipper",
-                  "mammoth",
-                  "xlsx",
-                  "libclamav",
-                  "@tiptap-pro",
-                  "@univerjs-pro",
-                  "@univer-cli",
-              }
-          )
-          FORBIDDEN_PREFIXES = ("@tiptap-pro/", "@univerjs-pro/", "@univer-cli/")
-          DEP_KEYS = frozenset(
-              {
-                  "require",
-                  "require-dev",
-                  "conflict",
-                  "dependencies",
-                  "devDependencies",
-                  "optionalDependencies",
-                  "peerDependencies",
-              }
-          )
-          SKIP_DIRS = frozenset(
-              {
-                  ".git",
-                  "vendor",
-                  "node_modules",
-                  "build",
-                  "dist",
-                  "coverage",
-                  ".github",
-                  ".phpunit.cache",
-              }
-          )
-          SOURCE_EXT = frozenset({".php", ".sql", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".vue"})
-          LOCK_NAMES = frozenset({"composer.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"})
-          LOCK_NEEDLES = (
-              "@tiptap-pro/",
-              "@univerjs-pro/",
-              "@univer-cli/",
-              "registry.tiptap.dev",
-              "handsontable",
-              "hyperformula",
-              "dunglas/mercure",
-              "minio/minio",
-              "exceljs",
-              "unzipper",
-              "mammoth",
-              "libclamav",
-              "xlsx@0.18.5",
-          )
-          BANNED = (
-              ("hashtext(", re.compile(r"\bhashtext\s*\(")),
-              ("session advisory lock", re.compile(r"\bpg_(?:try_)?advisory_lock\s*\(")),
-              ("DEFERRABLE INITIALLY DEFERRED", re.compile(r"DEFERRABLE\s+INITIALLY\s+DEFERRED", re.I)),
-              ("DB::transaction()", re.compile(r"\bDB::transaction\s*\(")),
-              ("set_config(..., false)", re.compile(r"\bset_config\s*\([^;]*\bfalse\b", re.I)),
-              ("parse_url()", re.compile(r"\bparse_url\s*\(")),
-              ("ZipArchive::extractTo()", re.compile(r"\bZipArchive::extractTo\s*\(")),
-              ("CURLOPT_RESOLVE", re.compile(r"\bCURLOPT_RESOLVE\b")),
-              ("@phpstan-ignore", re.compile(r"@phpstan-ignore\b")),
-              ("@psalm-suppress", re.compile(r"@psalm-suppress\b")),
-              ("REPACK (CONCURRENTLY)", re.compile(r"\bREPACK\s*\(\s*CONCURRENTLY\b", re.I)),
-              ("libclamav", re.compile(r"\blibclamav\b")),
-              ("registry.tiptap.dev", re.compile(r"registry\.tiptap\.dev")),
-          )
-          SKIP_CALL = re.compile(r"->skip\s*\(")
-          ELOQUENT = "Illuminate\\Database\\Eloquent\\Model"
-          FORBIDDEN_DIR_NAMES = frozenset({"Helpers", "Utils", "Common", "Misc", "Traits"})
-          COPYLEFT = re.compile(r"\b(?:AGPL|GPL|SSPL)(?:-|\b)", re.I)
-          UNLICENSED_LICENSE = re.compile(r"\bUNLICENSED\b", re.I)
-          SEE_LICENSE = re.compile(r"\bSEE\s+LICENSE\b", re.I)
-          PYPROJECT_LICENSE = re.compile(r"(?i)^\s*license\s*=")
-          MANIFEST_NAMES = frozenset({"composer.json", "package.json"})
-
-
-          def forbidden_name(name: str) -> str | None:
-              if name in FORBIDDEN_EXACT:
-                  return name
-              for prefix in FORBIDDEN_PREFIXES:
-                  if name.startswith(prefix):
-                      return name
-              return None
-
-
-          def forbidden_license(value: object) -> str | None:
-              if isinstance(value, str):
-                  if COPYLEFT.search(value) or UNLICENSED_LICENSE.search(value) or SEE_LICENSE.search(value):
-                      return value
-                  return None
-              if isinstance(value, dict):
-                  for item in value.values():
-                      found = forbidden_license(item)
-                      if found is not None:
-                          return found
-                  return None
-              if isinstance(value, list):
-                  for item in value:
-                      found = forbidden_license(item)
-                      if found is not None:
-                          return found
-              return None
-
-
-          def add(hits: list[str], path: Path, detail: str) -> None:
-              hits.append(f"{path}: {detail}")
-
-
-          def walk_deps(node: object, hits: list[str], path: Path) -> None:
-              if isinstance(node, dict):
-                  name = node.get("name")
-                  if isinstance(name, str):
-                      bad = forbidden_name(name)
-                      if bad is not None:
-                          add(hits, path, f"forbidden package {bad}")
-                  for license_key in ("license", "licenses"):
-                      if license_key not in node:
-                          continue
-                      bad_license = forbidden_license(node[license_key])
-                      if bad_license is not None:
-                          add(hits, path, f"forbidden license {bad_license}")
-                  for key, value in node.items():
-                      if key in DEP_KEYS and isinstance(value, dict):
-                          for dep in value:
-                              if isinstance(dep, str):
-                                  bad = forbidden_name(dep)
-                                  if bad is not None:
-                                      add(hits, path, f"forbidden dependency {bad}")
-                      else:
-                          walk_deps(value, hits, path)
-              elif isinstance(node, list):
-                  for item in node:
-                      walk_deps(item, hits, path)
-
-
-          def is_source(path: Path) -> bool:
-              return path.name == "Dockerfile" or path.name.startswith("Dockerfile.") or path.suffix in SOURCE_EXT
-
-
-          def is_test(path: Path) -> bool:
-              if path.name.endswith("Test.php") or ".test." in path.name:
-                  return True
-              return "tests" in path.parts
-
-
-          def skipped(path: Path) -> bool:
-              return any(part in SKIP_DIRS for part in path.parts)
-
-
-          def scan(root: Path) -> list[str]:
-              hits: list[str] = []
-              if not root.is_dir():
-                  return [f"{root}: not a directory"]
-
-              composer = root / "composer.json"
-              if not composer.is_file():
-                  hits.append(f"{composer}: missing")
-              else:
-                  try:
-                      data = json.loads(composer.read_text(encoding="utf-8"))
-                  except json.JSONDecodeError as exc:
-                      hits.append(f"{composer}: invalid JSON ({exc})")
-                      data = None
-                  if isinstance(data, dict):
-                      php = (data.get("require") or {}).get("php")
-                      if php != ">=8.4 <8.6":
-                          hits.append(f"{composer}: require.php must be >=8.4 <8.6, got {php!r}")
-
-              package = root / "package.json"
-              if not package.is_file():
-                  hits.append(f"{package}: missing")
-              else:
-                  try:
-                      data = json.loads(package.read_text(encoding="utf-8"))
-                  except json.JSONDecodeError as exc:
-                      hits.append(f"{package}: invalid JSON ({exc})")
-                      data = None
-                  if isinstance(data, dict):
-                      node = (data.get("engines") or {}).get("node")
-                      if node != ">=26.13.1":
-                          hits.append(f"{package}: engines.node must be >=26.13.1, got {node!r}")
-
-              for path in root.rglob("*"):
-                  if skipped(path):
-                      continue
-                  if path.is_dir():
-                      if path.name in FORBIDDEN_DIR_NAMES:
-                          add(hits, path, "forbidden directory name")
-                      continue
-                  if path.name in MANIFEST_NAMES or path.name in LOCK_NAMES and path.suffix == ".json":
-                      try:
-                          walk_deps(json.loads(path.read_text(encoding="utf-8")), hits, path)
-                      except json.JSONDecodeError as exc:
-                          add(hits, path, f"invalid JSON ({exc})")
-                  if path.name == "pyproject.toml":
-                      text = path.read_text(encoding="utf-8", errors="replace")
-                      for line in text.splitlines():
-                          if PYPROJECT_LICENSE.search(line) is None:
-                              continue
-                          bad_license = forbidden_license(line)
-                          if bad_license is not None:
-                              add(hits, path, f"forbidden license {bad_license}")
-                  if path.name in LOCK_NAMES:
-                      text = path.read_text(encoding="utf-8", errors="replace")
-                      for needle in LOCK_NEEDLES:
-                          if needle in text:
-                              add(hits, path, f"lockfile contains {needle}")
-                  if not is_source(path):
-                      continue
-                  text = path.read_text(encoding="utf-8", errors="replace")
-                  for label, pattern in BANNED:
-                      if pattern.search(text):
-                          add(hits, path, label)
-                  if is_test(path) and SKIP_CALL.search(text):
-                      add(hits, path, "->skip()")
-                  if "#[Api]" in text and ELOQUENT in text:
-                      add(hits, path, "Eloquent Model on an #[Api] surface")
-              return hits
-
-
-          def require_fail(label: str, root: Path) -> None:
-              hits = scan(root)
-              if not hits:
-                  raise SystemExit(f"self-test {label}: expected hits, found none")
-
-
-          def require_ok(label: str, root: Path) -> None:
-              hits = scan(root)
-              if hits:
-                  raise SystemExit("self-test " + label + ": expected clean, got " + "; ".join(hits))
-
-
-          def write_base(root: Path, node: str = ">=26.13.1", php: str = ">=8.4 <8.6") -> None:
-              root.mkdir()
-              (root / "composer.json").write_text(
-                  json.dumps({"require": {"php": php}}),
-                  encoding="utf-8",
-              )
-              (root / "package.json").write_text(
-                  json.dumps({"engines": {"node": node}}),
-                  encoding="utf-8",
-              )
-
-
-          def self_test() -> int:
-              with tempfile.TemporaryDirectory() as tmp:
-                  base = Path(tmp)
-
-                  clean = base / "clean"
-                  write_base(clean)
-                  (clean / "ok.php").write_text(
-                      "<?php pg_advisory_xact_lock(hashtextextended($k, 0));\n",
-                      encoding="utf-8",
-                  )
-                  (clean / "ok.sql").write_text("DEFERRABLE INITIALLY IMMEDIATE\n", encoding="utf-8")
-                  (clean / "package.json").write_text(
-                      json.dumps({"engines": {"node": ">=26.13.1"}, "license": "proprietary"}),
-                      encoding="utf-8",
-                  )
-                  (clean / "pyproject.toml").write_text('license = "Proprietary"\n', encoding="utf-8")
-                  require_ok("allowed calls", clean)
-
-                  bad_pkg = base / "pkg"
-                  write_base(bad_pkg)
-                  (bad_pkg / "composer.json").write_text(
-                      json.dumps({"require": {"php": ">=8.4 <8.6", "handsontable": "^1.0"}}),
-                      encoding="utf-8",
-                  )
-                  require_fail("handsontable", bad_pkg)
-
-                  bad_scope = base / "scope"
-                  write_base(bad_scope)
-                  (bad_scope / "package.json").write_text(
-                      json.dumps(
-                          {
-                              "engines": {"node": ">=26.13.1"},
-                              "dependencies": {"@tiptap-pro/extension-comments": "1.0.0"},
-                          }
-                      ),
-                      encoding="utf-8",
-                  )
-                  require_fail("@tiptap-pro", bad_scope)
-
-                  bad_hash = base / "hash"
-                  write_base(bad_hash)
-                  (bad_hash / "lock.php").write_text("<?php hashtext($k);\n", encoding="utf-8")
-                  require_fail("hashtext", bad_hash)
-
-                  bad_lock = base / "lock"
-                  write_base(bad_lock)
-                  (bad_lock / "session.php").write_text("<?php pg_advisory_lock($k);\n", encoding="utf-8")
-                  require_fail("pg_advisory_lock", bad_lock)
-
-                  bad_sql = base / "sql"
-                  write_base(bad_sql)
-                  (bad_sql / "hot.sql").write_text(
-                      "ALTER TABLE t ADD CONSTRAINT c FOREIGN KEY (id) REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED;\n",
-                      encoding="utf-8",
-                  )
-                  require_fail("INITIALLY DEFERRED", bad_sql)
-
-                  bad_dir = base / "dirs"
-                  write_base(bad_dir)
-                  (bad_dir / "Helpers").mkdir()
-                  require_fail("Helpers", bad_dir)
-
-                  bad_node = base / "node"
-                  write_base(bad_node, node=">=26")
-                  require_fail("engines.node", bad_node)
-
-                  bad_unlicensed = base / "unlicensed"
-                  write_base(bad_unlicensed)
-                  (bad_unlicensed / "package.json").write_text(
-                      json.dumps({"engines": {"node": ">=26.13.1"}, "license": "UNLICENSED"}),
-                      encoding="utf-8",
-                  )
-                  require_fail("UNLICENSED", bad_unlicensed)
-
-                  bad_see = base / "see-license"
-                  write_base(bad_see)
-                  (bad_see / "composer.json").write_text(
-                      json.dumps({"require": {"php": ">=8.4 <8.6"}, "license": "SEE LICENSE IN LICENSE"}),
-                      encoding="utf-8",
-                  )
-                  require_fail("SEE LICENSE", bad_see)
-
-                  bad_pyproject = base / "pyproject"
-                  write_base(bad_pyproject)
-                  (bad_pyproject / "pyproject.toml").write_text('license = "UNLICENSED"\n', encoding="utf-8")
-                  require_fail("pyproject UNLICENSED", bad_pyproject)
-
-              print("stop-crane self-test: pass")
-              return 0
-
-
-          def main(argv: list[str]) -> int:
-              parser = argparse.ArgumentParser()
-              parser.add_argument("--root", default=".")
-              parser.add_argument("--self-test", action="store_true")
-              args = parser.parse_args(argv)
-              if args.self_test:
-                  return self_test()
-              hits = scan(Path(args.root).resolve())
-              if hits:
-                  print(f"stop-cranes: {len(hits)} hit(s)")
-                  for hit in hits:
-                      print(hit)
-                  return 1
-              print("stop-cranes: 0 hits")
-              return 0
-
-
-          if __name__ == "__main__":
-              sys.exit(main(sys.argv[1:]))
-          PY
-          python3 "$RUNNER_TEMP/stop-cranes.py" --root "$GITHUB_WORKSPACE"
-          python3 "$RUNNER_TEMP/stop-cranes.py" --self-test
+          python3 scripts/ci/engineering-rails.py --self-test
+          python3 scripts/ci/engineering-rails.py --root .
 
   php:
+    needs: quality
     name: PHP ${{ matrix.php }} / PG ${{ matrix.postgres }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -497,32 +118,7 @@ jobs:
         env:
           VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
-        run: |
-          set -euo pipefail
-          root="$GITHUB_WORKSPACE"
-          workspace="$(dirname "$root")"
-          fetch_dependency() {
-            local directory="$1" url="$2" ref="$3"
-            local dest="$workspace/$directory"
-            if [ -e "$dest" ]; then
-              echo "sibling present: $dest"
-              return 0
-            fi
-            mkdir -p "$dest"
-            git -C "$dest" init -q
-            git -C "$dest" fetch --quiet --depth=1 "$url" "$ref"
-            git -C "$dest" checkout -q -b main FETCH_HEAD
-          }
-          if [ -n "${VAULTER_READ_TOKEN}" ]; then
-            base="https://x-access-token:${VAULTER_READ_TOKEN}@github.com/axiomasoft"
-          else
-            base="https://github.com/axiomasoft"
-          fi
-          fetch_dependency vaulter "$base/vaulter.git" refs/heads/main
-          fetch_dependency vaulter-sheets "$base/vaulter-sheets.git" refs/heads/main
-          fetch_dependency vaulter-collaboration "$base/vaulter-collaboration.git" refs/heads/main
-          fetch_dependency agentools "$base/agentools.git" refs/heads/main
-          fetch_dependency packman "$base/packman.git" refs/tags/v0.1.1
+        run: bash scripts/ci/checkout-ecosystem.sh
 
       - name: Setup PHP ${{ matrix.php }}
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2.40.0
@@ -618,6 +214,7 @@ jobs:
         run: composer test
 
   vue:
+    needs: quality
     name: Vue / Node 26.13.1
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -640,6 +237,7 @@ jobs:
           npm --prefix packages/vue run build
 
   python:
+    needs: quality
     name: Python office client
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -658,5 +256,21 @@ jobs:
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/office-client"
-          "$RUNNER_TEMP/office-client/bin/python" -m pip install --disable-pip-version-check -e clients/python
-          "$RUNNER_TEMP/office-client/bin/python" -m unittest discover -s clients/python/tests
+          cd clients/python
+          "$RUNNER_TEMP/office-client/bin/python" -m pip install --upgrade 'pip>=25.1'
+          "$RUNNER_TEMP/office-client/bin/python" -m pip install --group dev -e .
+          "$RUNNER_TEMP/office-client/bin/ruff" check .
+          "$RUNNER_TEMP/office-client/bin/ruff" format --check .
+          "$RUNNER_TEMP/office-client/bin/mypy"
+          "$RUNNER_TEMP/office-client/bin/python" -m unittest discover -s tests
+
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [quality, php, vue, python]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require all lanes to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: jq -e 'all(.[]; .result == "success")' <<< "$RESULTS"
