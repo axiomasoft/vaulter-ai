@@ -7,6 +7,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Office services, including executor instances, are scoped to a request or job. Host extensions that register Office commands should register them for each resolution of the registry.
+- Composer dependencies on other Vaulter packages require the same version.
+
 ### Fixed
 
 - `POST /operations` refuses a body above 1 MiB with `413 {"error":"request_too_large"}`

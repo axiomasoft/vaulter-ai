@@ -13,9 +13,9 @@
     "require": {
         "php": ">=8.4 <8.6",
         "axiomasoft/vaulter-ai-core": "self.version",
-        "axiomasoft/vaulter-core": "^1.0",
-        "axiomasoft/vaulter-documents": "^1.0",
-        "axiomasoft/vaulter-drive": "^1.0"
+        "axiomasoft/vaulter-core": "self.version",
+        "axiomasoft/vaulter-documents": "self.version",
+        "axiomasoft/vaulter-drive": "self.version"
     },
     "autoload": {
         "psr-4": {
