@@ -117,7 +117,7 @@ final readonly class LaravelOfficeExecutor implements ResumableOfficeExecutor
     /**
      * Create authorized OfficeTool instances for the active CallContext and current HostProfile.
      * When $resourceIds is supplied, write tools are omitted unless at least one scoped resource
-     * has live Edit permission, an installed command version, and 3.5 readiness for journal mode.
+     * has live Edit permission, an installed command version, and an available command owner in journal mode.
      *
      * @param  list<string>  $resourceIds
      * @return list<OfficeTool>
