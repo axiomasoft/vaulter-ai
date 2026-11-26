@@ -88,7 +88,7 @@ function createDocumentSuggestionsSchema(VaulterDatabase $db): void
 test('ContentProtectionPolicy enforces hidden on read/chat and read_only on prepare/commit + OfficeToolSchema', function (): void {
     Config::set('vaulter-ai-documents.default_tenant_id', '701');
 
-    $actor = TestActor::query()->create(['name' => 'Writer', 'email' => 'f07a-writer@example.test']);
+    $actor = TestActor::query()->create(['name' => 'Writer', 'email' => 'writer@example.test']);
     $owner = TestOwner::query()->create(['name' => 'Org 701']);
     $systemDrive = Vaulter::drive($owner)->asSystem('seed');
     $systemDrive->access()->grant($systemDrive->root()->id, new GrantInput(Subject::ofModel($actor), RoleRegistry::WRITER));
@@ -277,7 +277,7 @@ test('EditorContextSchema strips DOM hooks and TextReader::editorContext filters
         ->and($arr['serializedSchema']['marks']['bold'])->not->toHaveKey('renderHTML');
 
     Config::set('vaulter-ai-documents.default_tenant_id', '702');
-    $actor = TestActor::query()->create(['name' => 'Reader', 'email' => 'f07a-reader@example.test']);
+    $actor = TestActor::query()->create(['name' => 'Reader', 'email' => 'reader@example.test']);
     $owner = TestOwner::query()->create(['name' => 'Org 702']);
     $systemDrive = Vaulter::drive($owner)->asSystem('seed');
     $systemDrive->access()->grant($systemDrive->root()->id, new GrantInput(Subject::ofModel($actor), RoleRegistry::WRITER));
@@ -305,8 +305,8 @@ test('ProposalSuggestionBridge syncs v_ai_proposals with v_document_suggestions 
     Config::set('vaulter-ai-documents.default_tenant_id', '703');
     createDocumentSuggestionsSchema($this->app->make(VaulterDatabase::class));
 
-    $actor = TestActor::query()->create(['name' => 'Author', 'email' => 'f07a-author@example.test']);
-    $approver = TestActor::query()->create(['name' => 'Reviewer', 'email' => 'f07a-reviewer@example.test']);
+    $actor = TestActor::query()->create(['name' => 'Author', 'email' => 'author@example.test']);
+    $approver = TestActor::query()->create(['name' => 'Reviewer', 'email' => 'reviewer@example.test']);
     $owner = TestOwner::query()->create(['name' => 'Org 703']);
     $systemDrive = Vaulter::drive($owner)->asSystem('seed');
     $systemDrive->access()->grant($systemDrive->root()->id, new GrantInput(Subject::ofModel($actor), RoleRegistry::WRITER));

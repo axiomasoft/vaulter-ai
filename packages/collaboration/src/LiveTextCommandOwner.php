@@ -50,7 +50,7 @@ final readonly class LiveTextCommandOwner implements CommandOwner, LiveTextJourn
     }
 
     /**
-     * Verify whether a live-journal resource meets the 3.5 strict-profile journal requirement.
+     * Verify whether a live-journal resource meets the strict-profile journal requirement.
      */
     public function supportsLiveJournal(CallContext $context, ResourceEntry $resource, int $generation, int $version): bool
     {
