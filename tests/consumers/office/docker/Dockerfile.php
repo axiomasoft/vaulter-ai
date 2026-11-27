@@ -1,10 +1,13 @@
-# Multi-stage PHP 8.4 consumer stand image (composer artifact build -> clean runtime).
+# Multi-stage PHP 8.4 consumer stand image (composer artifact build -> clean runtime + optional test-runtime).
+FROM node:26.13.1-bookworm-slim AS node_bin
+
 FROM composer:2 AS composer_bin
 
 FROM php:8.4-cli AS base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        libatomic1 \
         libpq-dev \
         libsodium-dev \
         libzip-dev \
@@ -23,6 +26,9 @@ RUN apt-get update \
         bcmath \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=node_bin /usr/local/bin/node /usr/local/bin/node
+RUN node -e "process.exit(0)"
 
 FROM base AS builder
 
@@ -43,6 +49,11 @@ COPY . /app
 RUN mkdir -p /app/bootstrap/cache /app/storage/app /app/storage/framework/cache /app/storage/framework/sessions /app/storage/framework/views /app/storage/logs \
     && php artisan package:discover --no-interaction
 
+FROM builder AS test-builder
+
+RUN composer config allow-plugins.pestphp/pest-plugin true \
+    && composer require --dev --prefer-dist --no-interaction --no-scripts --no-progress 'pestphp/pest:^5.2'
+
 FROM base AS runtime
 
 WORKDIR /app
@@ -54,6 +65,7 @@ COPY --from=builder /app/database /app/database
 COPY --from=builder /app/public /app/public
 COPY --from=builder /app/resources /app/resources
 COPY --from=builder /app/routes /app/routes
+COPY --from=builder /app/sheets-runtime /app/sheets-runtime
 COPY --from=builder /app/artisan /app/artisan
 COPY --from=builder /app/vendor /app/vendor
 COPY --from=builder /app/composer.json /app/composer.json
@@ -65,3 +77,10 @@ RUN mkdir -p /app/storage/app /app/storage/framework/cache /app/storage/framewor
 EXPOSE 8000
 
 CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]
+
+FROM runtime AS test-runtime
+
+COPY --from=test-builder /app/vendor /app/vendor
+COPY --from=test-builder /app/composer.json /app/composer.json
+COPY --from=test-builder /app/composer.lock /app/composer.lock
+RUN mkdir -p /app/tests

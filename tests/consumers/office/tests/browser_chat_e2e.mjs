@@ -165,44 +165,68 @@ $app->handleRequest(\\Illuminate\\Http\\Request::capture());
 `
 }
 
-async function runProfileE2E(playwright, profile) {
-  const runtimeDir = fs.mkdtempSync(path.join('/tmp', `vai-pw-${profile}-`))
-  fs.mkdirSync(path.join(runtimeDir, 'bootstrap'), { recursive: true })
-  fs.mkdirSync(path.join(runtimeDir, 'storage/framework/views'), { recursive: true })
-  fs.mkdirSync(path.join(runtimeDir, 'storage/logs'), { recursive: true })
-  fs.mkdirSync(path.join(runtimeDir, 'views'), { recursive: true })
+async function waitForWorkspaceApprovalSettled(pageB, workspaceUrl, timeoutMs = 25000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const bodyTextB = await pageB.locator('body').innerText()
+    if (bodyTextB.includes('Принято человеком') && bodyTextB.includes('Сохранено владельцем')) {
+      const articleTextB = await pageB.locator('article[data-proposal-id]').first().innerText()
+      const receiptMatch = articleTextB.match(/Квитанция:\s*([0-9a-f-]{36})/i)
+      if (receiptMatch && receiptMatch[1]) {
+        return { bodyTextB, receiptId: receiptMatch[1] }
+      }
+    }
+    await new Promise((r) => setTimeout(r, 400))
+    await pageB.goto(workspaceUrl, { waitUntil: 'domcontentloaded' })
+  }
+  throw new Error(`Proposal approval did not settle via async queue:work within ${timeoutMs}ms at ${workspaceUrl}`)
+}
 
-  const dbPath = path.join(runtimeDir, 'stand.sqlite')
-  fs.writeFileSync(dbPath, '')
-  const fixtureToken = 'pw-fixture-token-92'
-
-  fs.writeFileSync(path.join(runtimeDir, 'bootstrap/packages.php'), buildPackagesManifestPhp(profile))
-  fs.writeFileSync(path.join(runtimeDir, '.env'), buildEnvContent({ dbPath, runtimeDir, fixtureToken, profile }))
-
-  const routerPath = path.join(runtimeDir, 'router.php')
-  fs.writeFileSync(routerPath, buildBootstrapScript(runtimeDir, dbPath, profile, fixtureToken))
-
-  execFileSync('php', [routerPath, '--migrate'], { cwd: repoRoot, stdio: 'pipe' })
-
-  const port = await allocatePort()
-  const baseUrl = `http://127.0.0.1:${port}`
+async function runProfileE2E(playwright, profile, remoteConfig = null) {
+  let runtimeDir = null
+  let server = null
   const serverLogs = []
-  const server = spawn('php', ['-S', `127.0.0.1:${port}`, routerPath], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      PHP_CLI_SERVER_WORKERS: '6',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  server.stdout.on('data', (chunk) => serverLogs.push(chunk.toString()))
-  server.stderr.on('data', (chunk) => serverLogs.push(chunk.toString()))
+  let baseUrl = remoteConfig ? remoteConfig.baseUrl : ''
+  let fixtureToken = remoteConfig ? remoteConfig.fixtureToken : 'pw-fixture-token-92'
+
+  if (!remoteConfig) {
+    runtimeDir = fs.mkdtempSync(path.join('/tmp', `vai-pw-${profile}-`))
+    fs.mkdirSync(path.join(runtimeDir, 'bootstrap'), { recursive: true })
+    fs.mkdirSync(path.join(runtimeDir, 'storage/framework/views'), { recursive: true })
+    fs.mkdirSync(path.join(runtimeDir, 'storage/logs'), { recursive: true })
+    fs.mkdirSync(path.join(runtimeDir, 'views'), { recursive: true })
+
+    const dbPath = path.join(runtimeDir, 'stand.sqlite')
+    fs.writeFileSync(dbPath, '')
+
+    fs.writeFileSync(path.join(runtimeDir, 'bootstrap/packages.php'), buildPackagesManifestPhp(profile))
+    fs.writeFileSync(path.join(runtimeDir, '.env'), buildEnvContent({ dbPath, runtimeDir, fixtureToken, profile }))
+
+    const routerPath = path.join(runtimeDir, 'router.php')
+    fs.writeFileSync(routerPath, buildBootstrapScript(runtimeDir, dbPath, profile, fixtureToken))
+
+    execFileSync('php', [routerPath, '--migrate'], { cwd: repoRoot, stdio: 'pipe' })
+
+    const port = await allocatePort()
+    baseUrl = `http://127.0.0.1:${port}`
+    server = spawn('php', ['-S', `127.0.0.1:${port}`, routerPath], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PHP_CLI_SERVER_WORKERS: '6',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    server.stdout.on('data', (chunk) => serverLogs.push(chunk.toString()))
+    server.stderr.on('data', (chunk) => serverLogs.push(chunk.toString()))
+  }
 
   const browser = await playwright.chromium.launch({
     executablePath: process.env.VAULTER_CHROMIUM_PATH || playwright.chromium.executablePath(),
     headless: true,
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
   })
+  const consoleErrorsA = []
   try {
     await waitForReady(baseUrl)
 
@@ -210,20 +234,23 @@ async function runProfileE2E(playwright, profile) {
       method: 'POST',
       headers: {
         'X-Fixture-Token': fixtureToken,
+        'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
+      body: JSON.stringify({ approval: 'human' }),
     })
     const seedRaw = await seedRes.text()
     assert.equal(seedRes.status, 200, `Seed failed: ${seedRaw}`)
     const seed = JSON.parse(seedRaw)
-    const docId = seed.resource_id
+    const isSheetProfile = profile === 'ai-sheets' && Boolean(seed.sheet_resource_id)
+    const docId = isSheetProfile ? seed.sheet_resource_id : seed.resource_id
 
     const contextA = await browser.newContext()
     const contextB = await browser.newContext()
 
     const cookieBase = {
       name: 'stand_token',
-      domain: '127.0.0.1',
+      domain: new URL(baseUrl).hostname,
       path: '/',
       httpOnly: false,
       sameSite: 'Lax',
@@ -233,14 +260,30 @@ async function runProfileE2E(playwright, profile) {
 
     // 1. Writer (Context A) opens /office/chat with bounded selection and observes SSE + waiting approval.
     const pageA = await contextA.newPage()
-    const consoleErrorsA = []
-    pageA.on('pageerror', (err) => consoleErrorsA.push(err.message))
+    pageA.on('pageerror', (err) => consoleErrorsA.push(`pageerror: ${err.message}`))
+    pageA.on('console', (msg) => {
+      if (msg.type() === 'error') {
+        const loc = msg.location()?.url || ''
+        consoleErrorsA.push(`console.error: ${msg.text()}${loc ? ` (${loc})` : ''}`)
+      }
+    })
+    pageA.on('response', (res) => {
+      if (res.status() >= 400) {
+        consoleErrorsA.push(`http_${res.status()}: ${res.url()}`)
+      }
+    })
+    pageA.on('requestfailed', (req) => consoleErrorsA.push(`requestfailed: ${req.url()} (${req.failure()?.errorText || 'unknown'})`))
 
-    const chatUrl = `${baseUrl}/office/chat?resource_id=${encodeURIComponent(docId)}&block_id=p42&excerpt=${encodeURIComponent('Pay within 15 working days.')}`
+    const chatUrl = isSheetProfile
+      ? `${baseUrl}/office/chat?resource_id=${encodeURIComponent(docId)}&sheet_id=expenses&table_id=costs`
+      : `${baseUrl}/office/chat?resource_id=${encodeURIComponent(docId)}&block_id=p42&excerpt=${encodeURIComponent('Pay within 15 working days.')}`
     await pageA.goto(chatUrl, { waitUntil: 'domcontentloaded' })
 
     await pageA.locator('[data-testid="office-chat-panel"]').waitFor({ state: 'visible' })
-    await pageA.locator('[data-testid="chat-selection-excerpt"]').waitFor({ state: 'visible' })
+    await pageA.locator('[data-testid="chat-editor-selection"]').waitFor({ state: 'visible' })
+    if (!isSheetProfile) {
+      await pageA.locator('[data-testid="chat-selection-excerpt"]').waitFor({ state: 'visible' })
+    }
     await pageA.waitForFunction(() => {
       const el = document.querySelector('[data-testid="chat-stream-status"]')
       return el && el.getAttribute('data-connected') === 'true'
@@ -249,15 +292,18 @@ async function runProfileE2E(playwright, profile) {
     const initialSessionId = await pageA.locator('[data-testid="office-chat-panel"]').getAttribute('data-session-id')
     assert.ok(initialSessionId && initialSessionId.length > 10, 'Expected ChatPanel to allocate session_id')
 
-    await pageA.locator('[data-testid="chat-input"]').fill('Замени 15 на 30 в блоке p42')
+    const promptText = isSheetProfile
+      ? 'Замени формулу delta в таблице costs'
+      : 'Замени 15 на 30 в блоке p42'
+    await pageA.locator('[data-testid="chat-input"]').fill(promptText)
     await pageA.locator('[data-action="send-chat"]').click()
 
     await pageA.locator('[data-testid="chat-bound-run-id"]').waitFor({ state: 'visible' })
     const boundRunId = await pageA.locator('[data-testid="office-chat-panel"]').getAttribute('data-run-id')
     assert.ok(boundRunId && boundRunId.length > 10, 'Expected bound run_id after sending message')
 
-    await pageA.locator('[data-testid="chat-status-waiting-approval"]').waitFor({ state: 'visible' })
-    await pageA.locator('[data-testid="chat-proposals"] [data-proposal-id]').waitFor({ state: 'visible' })
+    await pageA.locator('[data-testid="chat-status-waiting-approval"]').waitFor({ state: 'visible', timeout: 25000 })
+    await pageA.locator('[data-testid="chat-proposals"] [data-proposal-id]').waitFor({ state: 'visible', timeout: 25000 })
 
     const pageATextBeforeClose = await pageA.locator('body').innerText()
     assert.ok(!pageATextBeforeClose.includes('sk-'), 'API key prefix must never appear in chat DOM')
@@ -268,32 +314,31 @@ async function runProfileE2E(playwright, profile) {
 
     // 2. Reviewer (Context B) opens /office/workspace and approves the proposal P.
     const pageB = await contextB.newPage()
-    await pageB.goto(`${baseUrl}/office/workspace?resource_id=${encodeURIComponent(docId)}`, { waitUntil: 'domcontentloaded' })
+    const workspaceUrl = `${baseUrl}/office/workspace?resource_id=${encodeURIComponent(docId)}`
+    await pageB.goto(workspaceUrl, { waitUntil: 'domcontentloaded' })
     await pageB.locator('[data-action="approve"]').first().waitFor({ state: 'visible' })
     await Promise.all([
       pageB.waitForNavigation({ waitUntil: 'domcontentloaded' }),
       pageB.locator('[data-action="approve"]').first().click(),
     ])
-    const bodyTextB = await pageB.locator('body').innerText()
-    assert.ok(bodyTextB.includes('Принято человеком'), 'Expected human approval label in Reviewer Context B')
-    assert.ok(bodyTextB.includes('Сохранено владельцем'), 'Expected owner commit label in Reviewer Context B')
-
-    const articleTextB = await pageB.locator('article[data-proposal-id]').first().innerText()
-    const receiptMatch = articleTextB.match(/Квитанция:\s*([0-9a-f-]{36})/i)
-    const receiptId = receiptMatch ? receiptMatch[1] : ''
-    assert.ok(receiptId !== '', `Expected receipt UUID in Reviewer proposal card: ${articleTextB}`)
+    const { receiptId } = await waitForWorkspaceApprovalSettled(pageB, workspaceUrl)
 
     // 3. Reopen a brand new tab in Context A for the saved session -> observes committed, verified & assistant reply.
     const pageA2 = await contextA.newPage()
     await pageA2.goto(`${baseUrl}/office/chat?session_id=${encodeURIComponent(initialSessionId)}`, { waitUntil: 'domcontentloaded' })
-    await pageA2.locator('[data-testid="chat-status-owner-committed"]').waitFor({ state: 'visible' })
-    await pageA2.locator('[data-testid="chat-status-verified"]').waitFor({ state: 'visible' })
+    await pageA2.locator('[data-testid="chat-status-owner-committed"]').waitFor({ state: 'visible', timeout: 25000 })
+    await pageA2.locator('[data-testid="chat-status-verified"]').waitFor({ state: 'visible', timeout: 25000 })
+    await pageA2.waitForFunction(() => {
+      const el = document.querySelector('[data-testid="chat-messages"]')
+      const text = el ? el.innerText : ''
+      return text.includes('Квитанция:') || text.includes('подтверждено')
+    }, null, { timeout: 25000 })
 
     const reopenedRunId = await pageA2.locator('[data-testid="office-chat-panel"]').getAttribute('data-run-id')
     assert.equal(reopenedRunId, boundRunId, 'Reopened chat panel must stay bound to the same run_id')
 
     const reopenedText = await pageA2.locator('[data-testid="chat-messages"]').innerText()
-    assert.ok(reopenedText.includes('Замени 15 на 30'), 'Reopened chat must retain decrypted user prompt')
+    assert.ok(reopenedText.includes(promptText), 'Reopened chat must retain decrypted user prompt')
     assert.ok(reopenedText.includes('Квитанция:') || reopenedText.includes('подтверждено'), 'Reopened chat must display completed assistant response')
     if (receiptId !== '') {
       const fullText = await pageA2.locator('[data-testid="office-chat-panel"]').innerText()
@@ -324,7 +369,7 @@ async function runProfileE2E(playwright, profile) {
 
     const redactedDomText = await pageA2.locator('[data-testid="office-chat-panel"]').innerText()
     assert.ok(!redactedDomText.includes('Pay within 15 working days'), 'Revoked selection excerpt leaked into DOM')
-    assert.ok(!redactedDomText.includes('Замени 15 на 30'), 'Revoked prompt text leaked into DOM')
+    assert.ok(!redactedDomText.includes(promptText), 'Revoked prompt text leaked into DOM')
     if (receiptId !== '') {
       assert.ok(!redactedDomText.includes(receiptId), 'Revoked receipt_id leaked into DOM')
     }
@@ -333,6 +378,7 @@ async function runProfileE2E(playwright, profile) {
     await contextB.close()
     console.log(JSON.stringify({
       ok: true,
+      mode: remoteConfig ? 'remote-pg-async' : 'local-sqlite-sync',
       profile,
       session_id: initialSessionId,
       run_id: boundRunId,
@@ -340,19 +386,37 @@ async function runProfileE2E(playwright, profile) {
     }))
   } catch (err) {
     console.error(`Browser E2E failure [${profile}]:`, err)
+    if (consoleErrorsA.length > 0) {
+      console.error('Console/page errors:', consoleErrorsA.join('\n'))
+    }
     if (serverLogs.length > 0) {
       console.error('Server logs:', serverLogs.join('\n'))
     }
     throw err
   } finally {
     await browser.close()
-    server.kill('SIGTERM')
-    fs.rmSync(runtimeDir, { recursive: true, force: true })
+    if (server) {
+      server.kill('SIGTERM')
+    }
+    if (runtimeDir) {
+      fs.rmSync(runtimeDir, { recursive: true, force: true })
+    }
   }
 }
 
 async function main() {
   const playwright = loadPlaywright()
+  const ownerHttpUrl = (process.env.OWNER_HTTP_URL || '').trim().replace(/\/+$/, '')
+  const fixtureToken = (process.env.FIXTURE_TOKEN || '').trim()
+  if (ownerHttpUrl !== '') {
+    if (fixtureToken === '') {
+      throw new Error('FIXTURE_TOKEN is required when OWNER_HTTP_URL is set')
+    }
+    const profile = process.env.STAND_PROFILE || 'ai-text'
+    await runProfileE2E(playwright, profile, { baseUrl: ownerHttpUrl, fixtureToken })
+    return
+  }
+
   const profiles = process.argv.slice(2)
   const targets = profiles.length > 0 ? profiles : ['ai-text', 'ai-agentools']
   for (const profile of targets) {

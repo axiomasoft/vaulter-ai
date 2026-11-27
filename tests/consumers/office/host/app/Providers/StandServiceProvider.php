@@ -17,9 +17,11 @@ use Laravel\Ai\Responses\Data\ToolCall;
 use RuntimeException;
 use Vaulter\Ai\Core\Contracts\ApprovedCommandContextResolver;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
+use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Contracts\RunContextResolver;
 use Vaulter\Ai\Core\Data\CallContext;
 use Vaulter\Ai\Core\Enums\OfficeOperation;
+use Vaulter\Ai\Core\Enums\ResourceType;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Persistence\OwnerRoutes;
 use Vaulter\Ai\Core\Persistence\Runs;
@@ -31,6 +33,12 @@ final class StandServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
+        if ((string) config('stand.profile', 'ai-text') === 'ai-collaboration') {
+            config()->set('auth.providers.users.model', StandActor::class);
+            config()->set('vaulter.modules.collaboration', true);
+            config()->set('vaulter-collaboration.strict_profile', true);
+        }
+
         $this->app->singleton(CallContextResolver::class, static fn (): CallContextResolver => new class implements CallContextResolver
         {
             public function resolve(Request $request): ?CallContext
@@ -172,13 +180,15 @@ final class StandServiceProvider extends ServiceProvider
                 }
 
                 $command = $proposalRow !== null && is_string($proposalRow->command ?? null) ? $proposalRow->command : '';
-                $profile = str_starts_with($command, 'sheet.') ? 'sheets' : 'documents';
                 $tokenRow = DB::table('stand_tokens')
                     ->where('tenant_id', $tenantId)
                     ->where('project_scope', $projectScope)
                     ->where('user_id', $actor->getKey())
                     ->orderByDesc('created_at')
                     ->first();
+                $profile = $tokenRow !== null && is_string($tokenRow->profile ?? null) && $tokenRow->profile !== ''
+                    ? (string) $tokenRow->profile
+                    : (str_starts_with($command, 'sheet.') ? 'sheets' : 'documents');
 
                 return new CallContext(
                     tenantId: (string) $source->tenant_id,
@@ -203,22 +213,60 @@ final class StandServiceProvider extends ServiceProvider
         config()->set('vaulter-ai-documents.default_tenant_id', '61');
         config()->set('vaulter-ai-documents.default_project_scope', 'default');
         config()->set('vaulter-ai-documents.read.live_fallback_on_lag', true);
+        config()->set('vaulter-ai-sheets.default_tenant_id', '61');
+        config()->set('vaulter-ai-sheets.default_project_scope', 'default');
+        foreach ([
+            base_path('sheets-runtime/dist/cli.js'),
+            dirname(base_path(), 3).'/vaulter-sheets/packages/runtime/dist/cli.js',
+            dirname(__DIR__, 6).'/vaulter-sheets/packages/runtime/dist/cli.js',
+        ] as $sheetsCli) {
+            if (is_file($sheetsCli)) {
+                config()->set('vaulter-sheets.runtime_command', ['node', $sheetsCli]);
+                break;
+            }
+        }
+        if ($profile === 'ai-collaboration') {
+            config()->set('auth.providers.users.model', StandActor::class);
+            config()->set('vaulter.modules.collaboration', true);
+            config()->set('vaulter-collaboration.strict_profile', true);
+            config()->set('vaulter-collaboration.hub.jwt_keys', ['k1' => 'stand-collab-jwt-secret-key-at-least-32-bytes']);
+            config()->set('vaulter-collaboration.hub.jwt_active_kid', 'k1');
+            config()->set('vaulter-collaboration.hub.issuer', 'https://stand.vaulter-ai.local');
+            config()->set('vaulter-collaboration.hub.webhook_secret', 'stand-collab-webhook-secret-different');
+            config()->set('vaulter-collaboration.control.transport', 'http');
+            config()->set('vaulter-collaboration.control.http.urls', [rtrim((string) config('app.url', 'http://owner-http:8000'), '/').'/_fixture/hub-control']);
+        }
         $approval = (string) config('stand.approval', 'automatic');
         if (! in_array($approval, ['automatic', 'human'], true)) {
             $approval = 'automatic';
         }
+        $executor = $profile === 'ai-agentools' ? 'agentools' : 'laravel-ai';
         config()->set('vaulter-ai.profiles.documents', [
-            'executor' => $profile === 'ai-agentools' ? 'agentools' : 'laravel-ai',
+            'executor' => $executor,
             'provider_connection' => 'office_model',
             'commands' => ['text.replace_exact@1'],
             'approval' => $approval,
             'revision' => 'stand-rev-1',
         ]);
-        config()->set('vaulter-ai.profiles.sheets', [
-            'executor' => $profile === 'ai-agentools' ? 'agentools' : 'laravel-ai',
+        config()->set('vaulter-ai.profiles.documents_human', [
+            'executor' => $executor,
             'provider_connection' => 'office_model',
-            'commands' => ['sheet.fill_formula@1'],
+            'commands' => ['text.replace_exact@1'],
+            'approval' => 'human',
+            'revision' => 'stand-rev-1',
+        ]);
+        config()->set('vaulter-ai.profiles.sheets', [
+            'executor' => $executor,
+            'provider_connection' => 'office_model',
+            'commands' => ['sheet.fill_formula@1', 'text.replace_exact@1'],
             'approval' => $approval,
+            'revision' => 'stand-rev-1',
+        ]);
+        config()->set('vaulter-ai.profiles.sheets_human', [
+            'executor' => $executor,
+            'provider_connection' => 'office_model',
+            'commands' => ['sheet.fill_formula@1', 'text.replace_exact@1'],
+            'approval' => 'human',
             'revision' => 'stand-rev-1',
         ]);
 
@@ -228,7 +276,14 @@ final class StandServiceProvider extends ServiceProvider
         $this->loadMigrationsFrom(base_path('database/migrations'));
 
         Artisan::command('stand:verify-schema', function (): int {
+            $profile = config('stand.profile');
             $requiredTables = ['v_ai_runs', 'v_ai_run_steps', 'v_ai_proposals', 'v_ai_owner_routes', 'v_ai_text_commands', 'v_outbox', 'jobs'];
+            if ($profile === 'ai-sheets') {
+                $requiredTables[] = 'v_sheets_commands';
+            } elseif ($profile === 'ai-collaboration') {
+                $requiredTables[] = 'v_collaboration_commands';
+                $requiredTables[] = 'v_collaboration_heads';
+            }
             foreach ($requiredTables as $table) {
                 if (! Schema::hasTable($table)) {
                     $this->error("Missing required table: {$table}");
@@ -237,11 +292,10 @@ final class StandServiceProvider extends ServiceProvider
                 }
             }
 
-            $profile = config('stand.profile');
             $registry = app(OfficeRegistry::class);
-            if ($profile === 'ai-text') {
+            if (in_array($profile, ['ai-text', 'ai-sheets', 'ai-collaboration'], true)) {
                 if ($registry->executor('laravel-ai') === null || $registry->executor('agentools') !== null) {
-                    $this->error('Invalid executor composition for ai-text.');
+                    $this->error("Invalid executor composition for {$profile}.");
 
                     return 1;
                 }
@@ -251,6 +305,16 @@ final class StandServiceProvider extends ServiceProvider
 
                     return 1;
                 }
+            }
+            if ($profile === 'ai-sheets' && $registry->command('sheet.fill_formula@1') === null) {
+                $this->error('Missing sheet.fill_formula@1 command registration for ai-sheets.');
+
+                return 1;
+            }
+            if ($profile === 'ai-collaboration' && $registry->ownerFor('text.replace_exact@1', 'journal') === null) {
+                $this->error('Missing live-journal command owner for ai-collaboration.');
+
+                return 1;
             }
 
             if (DB::connection()->getDriverName() === 'pgsql') {
@@ -321,14 +385,23 @@ final class StandServiceProvider extends ServiceProvider
                     return ['type' => 'text', 'text' => 'No document in chat scope.'];
                 }
 
+                $tokenRow = DB::table('stand_tokens')
+                    ->where('tenant_id', (string) $runRow->tenant_id)
+                    ->where('project_scope', (string) $runRow->project_scope)
+                    ->where('user_id', $actor->getKey())
+                    ->orderByDesc('created_at')
+                    ->first();
+
                 $context = new CallContext(
                     tenantId: (string) $runRow->tenant_id,
                     projectScope: (string) $runRow->project_scope,
                     effectiveSubject: $subject,
-                    profile: 'documents',
+                    profile: $tokenRow !== null ? (string) $tokenRow->profile : 'documents',
                     policyRevision: (string) $runRow->profile_revision,
+                    driveId: $tokenRow !== null ? (string) $tokenRow->drive_id : null,
                     actor: $actor,
                 );
+                $isSheet = app(ResourceDirectory::class)->findAccessible($context, $resourceId, 'view')?->resourceType === ResourceType::Sheet;
 
                 $steps = $runs->listSteps($context, $runId);
                 $ops = array_map(static fn ($s): string => $s->operation->value, $steps);
@@ -348,7 +421,12 @@ final class StandServiceProvider extends ServiceProvider
                         'type' => 'tool',
                         'id' => 'chat_tc_read',
                         'tool' => 'office_read',
-                        'input' => ['resource_id' => $resourceId, 'selector' => ['kind' => 'text_block', 'block_id' => 'p42']],
+                        'input' => [
+                            'resource_id' => $resourceId,
+                            'selector' => $isSheet
+                                ? ['kind' => 'sheet_table', 'sheet_id' => 'expenses', 'table_id' => 'costs', 'columns' => ['plan', 'actual', 'delta'], 'row_ids' => ['r-telecom', 'r-travel']]
+                                : ['kind' => 'text_block', 'block_id' => 'p42'],
+                        ],
                     ];
                 }
 
@@ -357,12 +435,25 @@ final class StandServiceProvider extends ServiceProvider
                         'type' => 'tool',
                         'id' => 'chat_tc_prepare',
                         'tool' => 'office_prepare',
-                        'input' => [
-                            'resource_id' => $resourceId,
-                            'command' => 'text.replace_exact@1',
-                            'read_token' => (string) ($latest(OfficeOperation::Read)['result']['read_token'] ?? ''),
-                            'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
-                        ],
+                        'input' => $isSheet
+                            ? [
+                                'resource_id' => $resourceId,
+                                'command' => 'sheet.fill_formula@1',
+                                'read_token' => (string) ($latest(OfficeOperation::Read)['result']['read_token'] ?? ''),
+                                'arguments' => [
+                                    'sheet_id' => 'expenses',
+                                    'table_id' => 'costs',
+                                    'scope' => 'fixed_members',
+                                    'destination_column_id' => 'delta',
+                                    'expression' => ['op' => 'subtract', 'left_column_id' => 'actual', 'right_column_id' => 'plan'],
+                                ],
+                            ]
+                            : [
+                                'resource_id' => $resourceId,
+                                'command' => 'text.replace_exact@1',
+                                'read_token' => (string) ($latest(OfficeOperation::Read)['result']['read_token'] ?? ''),
+                                'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+                            ],
                     ];
                 }
 
@@ -448,19 +539,36 @@ final class StandServiceProvider extends ServiceProvider
                         return $match;
                     };
 
+                    $isSheet = app(ResourceDirectory::class)->findAccessible($context, (string) $runCtx->resource_id, 'view')?->resourceType === ResourceType::Sheet;
+
                     if (! in_array(OfficeOperation::Read->value, $ops, true)) {
                         return new ToolCall('stand_tc_read', 'office_read', [
                             'resource_id' => (string) $runCtx->resource_id,
-                            'selector' => ['kind' => 'text_block', 'block_id' => 'p42'],
+                            'selector' => $isSheet
+                                ? ['kind' => 'sheet_table', 'sheet_id' => 'expenses', 'table_id' => 'costs', 'columns' => ['plan', 'actual', 'delta'], 'row_ids' => ['r-telecom', 'r-travel']]
+                                : ['kind' => 'text_block', 'block_id' => 'p42'],
                         ]);
                     }
                     if (! in_array(OfficeOperation::Prepare->value, $ops, true)) {
-                        return new ToolCall('stand_tc_prepare', 'office_prepare', [
-                            'resource_id' => (string) $runCtx->resource_id,
-                            'command' => 'text.replace_exact@1',
-                            'read_token' => (string) ($latest(OfficeOperation::Read)['result']['read_token'] ?? ''),
-                            'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
-                        ]);
+                        return new ToolCall('stand_tc_prepare', 'office_prepare', $isSheet
+                            ? [
+                                'resource_id' => (string) $runCtx->resource_id,
+                                'command' => 'sheet.fill_formula@1',
+                                'read_token' => (string) ($latest(OfficeOperation::Read)['result']['read_token'] ?? ''),
+                                'arguments' => [
+                                    'sheet_id' => 'expenses',
+                                    'table_id' => 'costs',
+                                    'scope' => 'fixed_members',
+                                    'destination_column_id' => 'delta',
+                                    'expression' => ['op' => 'subtract', 'left_column_id' => 'actual', 'right_column_id' => 'plan'],
+                                ],
+                            ]
+                            : [
+                                'resource_id' => (string) $runCtx->resource_id,
+                                'command' => 'text.replace_exact@1',
+                                'read_token' => (string) ($latest(OfficeOperation::Read)['result']['read_token'] ?? ''),
+                                'arguments' => ['block_id' => 'p42', 'expected' => '15', 'replacement' => '30'],
+                            ]);
                     }
 
                     $prepareRes = $latest(OfficeOperation::Prepare)['result'] ?? [];

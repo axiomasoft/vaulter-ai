@@ -27,7 +27,8 @@ use Laravel\Ai\Responses\Data\ToolResult;
 use Laravel\Ai\Streaming\Events\Error as StreamErrorEvent;
 use Laravel\Ai\Streaming\Events\TextDelta;
 use Laravel\Ai\Streaming\Events\ToolCall as ToolCallEvent;
-use ReflectionProperty;
+use Laravel\Ai\Streaming\Events\ToolInputDelta;
+use Laravel\Ai\Streaming\Events\ToolInputStart;
 use stdClass;
 use Throwable;
 use Vaulter\Ai\Core\Contracts\LlmPort;
@@ -43,6 +44,8 @@ use Vaulter\Ai\Core\Registry\OfficeRegistry;
  * Streaming Laravel AI LlmPort bridge for ChatTurn.
  * Resolves credentials via ProviderSecretStore on the server, exposes only authorized versioned
  * catalog tools, enforces limits/retries, and keeps tool execution under ChatTurn's approval fence.
+ *
+ * @phpstan-import-type LlmEvent from LlmPort
  */
 final readonly class LaravelAiLlmPort implements LlmPort
 {
@@ -57,11 +60,7 @@ final readonly class LaravelAiLlmPort implements LlmPort
      * @param  list<array<string, mixed>>  $messages
      * @param  array<string, array<string, mixed>>  $tools
      * @param  Closure(): bool  $cancelled
-     * @return iterable<
-     *     array{type:'textDelta', text:string}
-     *     |array{type:'toolInputComplete', tool:string, input:string, providerToolCallId?:string, replayCallId?:string}
-     *     |array{type:'finish'}
-     * >
+     * @return iterable<LlmEvent>
      */
     public function stream(array $messages, array $tools, HostProfile $profile, Closure $cancelled): iterable
     {
@@ -81,6 +80,11 @@ final readonly class LaravelAiLlmPort implements LlmPort
         $instructions = $this->instructions($profile, $tools);
 
         $isFaked = $this->ai->hasFakeGatewayFor(OfficeAgent::class);
+        $fakeAgent = $isFaked ? new OfficeAgent(
+            context: new CallContext('0', 'default', 'system/chat', $profile->name, $profile->revision),
+            profile: $profile,
+            tools: [],
+        ) : null;
         $attempt = 0;
 
         while (true) {
@@ -93,25 +97,8 @@ final readonly class LaravelAiLlmPort implements LlmPort
             $builtOnDemand = false;
 
             try {
-                $probeAgent = new OfficeAgent(
-                    context: new CallContext('0', 'default', 'system/chat', $profile->name, $profile->revision),
-                    profile: $profile,
-                    tools: [],
-                    config: $this->config,
-                    providerConnection: $profile->providerConnection,
-                    timeoutSeconds: $timeout,
-                );
-                [$provider, $gateway, $model, $builtOnDemand] = $this->resolveGateway($profile, $isFaked, $probeAgent);
-
-                $agent = new OfficeAgent(
-                    context: new CallContext('0', 'default', 'system/chat', $profile->name, $profile->revision),
-                    profile: $profile,
-                    tools: [],
-                    config: $this->config,
-                    providerConnection: $profile->providerConnection,
-                    modelName: $model,
-                    timeoutSeconds: $timeout,
-                );
+                [$provider, $gateway, $model, $builtOnDemand] = $this->resolveGateway($profile, $fakeAgent);
+                $toolEvent = null;
 
                 $stepStream = $gateway->generateStreamStep(
                     invocationId: (string) Str::uuid7(),
@@ -121,7 +108,7 @@ final readonly class LaravelAiLlmPort implements LlmPort
                     messages: $mappedMessages,
                     tools: $catalogTools,
                     schema: null,
-                    options: TextGenerationOptions::forAgent($agent),
+                    options: new TextGenerationOptions(maxTokens: $profile->maxTokens, agent: $fakeAgent),
                     timeout: $timeout,
                     stepContext: new StepContext(stepNumber: 0, isFinalStep: false),
                 );
@@ -136,7 +123,22 @@ final readonly class LaravelAiLlmPort implements LlmPort
 
                             continue 2;
                         }
-                        throw OfficeException::temporarilyUnavailable();
+                        yield ['type' => 'error', 'code' => ErrorCode::TemporarilyUnavailable];
+
+                        return;
+                    }
+
+                    if ($event instanceof ToolInputStart) {
+                        $yielded = true;
+                        yield ['type' => 'toolInputStart', 'tool' => $event->toolName, 'providerToolCallId' => $event->toolId];
+
+                        continue;
+                    }
+                    if ($event instanceof ToolInputDelta) {
+                        $yielded = true;
+                        yield ['type' => 'toolInputDelta', 'delta' => $event->delta, 'providerToolCallId' => $event->toolId];
+
+                        continue;
                     }
 
                     if ($event instanceof TextDelta && $event->delta !== '') {
@@ -150,7 +152,7 @@ final readonly class LaravelAiLlmPort implements LlmPort
                         continue;
                     }
 
-                    if ($event instanceof ToolCallEvent) {
+                    if ($event instanceof ToolCallEvent && $toolEvent === null) {
                         if ($priorToolCount >= $maxToolCalls) {
                             throw new OfficeException(ErrorCode::LimitExceeded);
                         }
@@ -162,22 +164,32 @@ final readonly class LaravelAiLlmPort implements LlmPort
                             $toolCall->arguments === [] ? new stdClass : $toolCall->arguments,
                             JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES,
                         );
-                        $yielded = true;
-                        yield [
+                        $toolEvent = [
                             'type' => 'toolInputComplete',
                             'tool' => $toolCall->name,
                             'input' => $encodedInput,
                             'providerToolCallId' => $toolCall->id,
                         ];
 
-                        return;
                     }
                 }
 
-                if ($stepStream->getReturn()?->finishReason !== FinishReason::Stop) {
+                $result = $stepStream->getReturn();
+                if ($result === null || $result->finishReason === FinishReason::Unknown) {
                     throw OfficeException::temporarilyUnavailable();
                 }
+                yield ['type' => 'usage', 'inputTokens' => $result->usage->inputTokens, 'outputTokens' => $result->usage->outputTokens];
+                if ($toolEvent !== null && in_array($result->finishReason, [FinishReason::ToolCalls, FinishReason::Stop], true)) {
+                    yield $toolEvent;
 
+                    return;
+                }
+                if ($result->finishReason !== FinishReason::Stop) {
+                    yield ['type' => 'error', 'code' => $result->finishReason === FinishReason::Length
+                        ? ErrorCode::LimitExceeded : ErrorCode::TemporarilyUnavailable];
+
+                    return;
+                }
                 yield ['type' => 'finish'];
 
                 return;
@@ -205,17 +217,17 @@ final readonly class LaravelAiLlmPort implements LlmPort
     /**
      * @return array{TextProvider, StepTextGateway, string, bool}
      */
-    private function resolveGateway(HostProfile $profile, bool $isFaked, OfficeAgent $probeAgent): array
+    private function resolveGateway(HostProfile $profile, ?OfficeAgent $fakeAgent): array
     {
         $connection = $profile->providerConnection ?? 'office_model';
 
-        if ($isFaked) {
+        if ($fakeAgent !== null) {
             $status = $this->secretStore->status($connection);
             $providerKey = $status['driver'] ?? $this->configuredDefaultProviderName();
             $provider = $this->ai->textProvider($providerKey);
             $model = $status['model'] ?? $this->defaultModel($provider);
 
-            return [$provider, $this->ai->fakeGatewayFor($probeAgent), $model, false];
+            return [$provider, $this->ai->fakeGatewayFor($fakeAgent), $model, false];
         }
 
         $secret = $this->secretStore->resolve($connection);
@@ -238,8 +250,7 @@ final readonly class LaravelAiLlmPort implements LlmPort
             throw OfficeException::temporarilyUnavailable();
         }
 
-        $loop = $provider->textGenerationLoop();
-        $gateway = (new ReflectionProperty($loop, 'gateway'))->getValue($loop);
+        $gateway = is_callable([$provider, 'textGateway']) ? $provider->textGateway() : null;
         if (! $gateway instanceof StepTextGateway) {
             $this->ai->flushState();
             throw OfficeException::temporarilyUnavailable();
@@ -327,6 +338,11 @@ final readonly class LaravelAiLlmPort implements LlmPort
         $mapped = [];
         foreach ($messages as $item) {
             $role = $item['role'] ?? null;
+            if ($role === 'assistant' && is_string($item['content'] ?? null)) {
+                $mapped[] = new AssistantMessage($item['content']);
+
+                continue;
+            }
             if ($role === 'user') {
                 $text = is_string($item['content'] ?? null) ? $item['content'] : '';
                 if (is_array($item['selection'] ?? null)) {

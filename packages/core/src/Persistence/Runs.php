@@ -304,6 +304,7 @@ final readonly class Runs
             $this->db->query('ai_runs')
                 ->where('run_id', $runId)
                 ->whereNull('lease_token')
+                ->where('cancel_requested', false)
                 ->update([
                     'state' => $nextState,
                     'updated_at' => $now,
@@ -427,6 +428,7 @@ final readonly class Runs
                 $this->db->query('ai_runs')
                     ->where('run_id', $rawRunId)
                     ->whereNull('lease_token')
+                    ->where('cancel_requested', false)
                     ->update([
                         'state' => $nextState,
                         'updated_at' => $now,
@@ -1128,7 +1130,9 @@ final readonly class Runs
             channel: QueryRecord::str($row, 'channel'),
             sourceEventId: QueryRecord::str($row, 'source_event_id'),
             profileRevision: QueryRecord::str($row, 'profile_revision'),
-            state: QueryRecord::str($row, 'state'),
+            state: QueryRecord::str($row, 'state') === 'rejected' && QueryRecord::bool($row, 'cancel_requested')
+                ? 'cancelled'
+                : QueryRecord::str($row, 'state'),
             input: $decodedInput,
             leaseToken: is_string($leaseToken) ? $leaseToken : null,
             leaseUntil: $leaseUntil,

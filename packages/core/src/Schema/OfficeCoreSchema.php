@@ -7,7 +7,7 @@ namespace Vaulter\Ai\Core\Schema;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 
 /**
- * Physical schema builder for the 10 AI Core tables defined in plan/spec/database/sql/ai-core.sql.
+ * Physical schema builder for the 10 AI Core tables defined in docs/database/sql/ai-core.sql.
  * Supports PostgreSQL 18+ (native uuidv7(), COLLATE "C", bytea, CHECKs, partial indexes) and SQLite for unit tests.
  */
 final readonly class OfficeCoreSchema

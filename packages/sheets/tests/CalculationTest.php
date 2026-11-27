@@ -26,6 +26,7 @@ use Vaulter\Ai\Sheets\Writing\SheetCommandOwner;
 use Vaulter\Ai\Tests\Support\LaravelAiTestCase;
 use Vaulter\Documents\Facades\Documents;
 use Vaulter\Drive\Operations\DriveContext;
+use Vaulter\Schema\SchemaHelpers;
 use Vaulter\Sheets\Contracts\WorkbookOperations;
 use Vaulter\Sheets\Contracts\WorkbookRuntime;
 use Vaulter\Sheets\Data\WorkbookCommand;
@@ -301,7 +302,12 @@ test('corrupted cache 999 is recalculated on read/verify and literal constant re
         'proposal_id' => $p2->proposal_id,
         'digest' => $p2->digest,
     ]);
+    expect($c2->ok)->toBeTrue();
 
+    // A ready projection serves reads without the runtime. Remove this workbook's head to exercise the fallback.
+    $schema = $this->app->make(SchemaHelpers::class);
+    $schema->dbConnection()->table($schema->table('sheets_projection_heads'))
+        ->where('document_id', $freshForCache->snapshot()->documentId)->delete();
     $runtime->corruptRead = true;
     $cacheFail = $freshForCache->call(OfficeOperation::Verify, ['receipt_id' => $c2->result->receipt_id, 'mode' => 'current']);
     expect($cacheFail->ok)->toBeTrue()

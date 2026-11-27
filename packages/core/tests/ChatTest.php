@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use Illuminate\Contracts\Bus\Dispatcher;
+use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Bus;
@@ -9,8 +11,10 @@ use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Testing\TestResponse;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use Vaulter\Ai\AgenTools\AgenToolsOfficeExecutor;
 use Vaulter\Ai\Core\Actions\ResolveProposal;
 use Vaulter\Ai\Core\Contracts\CallContextResolver;
+use Vaulter\Ai\Core\Contracts\HostPolicy;
 use Vaulter\Ai\Core\Contracts\LlmPort;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Contracts\RunContextResolver;
@@ -21,9 +25,14 @@ use Vaulter\Ai\Core\Enums\OfficeOperation;
 use Vaulter\Ai\Core\Exceptions\OfficeException;
 use Vaulter\Ai\Core\Jobs\DispatchApprovedCommand;
 use Vaulter\Ai\Core\Jobs\ExecuteChatRun;
+use Vaulter\Ai\Core\Jobs\ResumeOfficeRun;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
+use Vaulter\Ai\Core\Persistence\OwnerRoutes;
+use Vaulter\Ai\Core\Persistence\Proposals;
 use Vaulter\Ai\Core\Persistence\Runs;
 use Vaulter\Ai\Core\Persistence\ToolCallLedger;
+use Vaulter\Ai\Core\Registry\OfficeRegistry;
+use Vaulter\Ai\Core\Workspace\ChatEventWakeup;
 use Vaulter\Ai\Core\Workspace\ChatTurn;
 use Vaulter\Ai\Core\Workspace\ChatWorkspace;
 use Vaulter\Ai\Tests\Support\OfficeTestCase;
@@ -172,6 +181,232 @@ test('chat accepts a message and schedules its durable run only after commit', f
     expect($db->query('ai_runs')->count())->toBe(1)
         ->and($db->query('ai_chat_messages')->count())->toBe(1);
     Bus::assertNotDispatched(ExecuteChatRun::class, fn (ExecuteChatRun $job): bool => $job->runId !== $runId);
+});
+
+test('chat carries completed turns into the next prompt and persists usage before stopping at the profile budget', function (): void {
+    Bus::fake([ExecuteChatRun::class]);
+    $fixture = new TextCommandFixture($this->app);
+    $chat = $this->app->make(ChatWorkspace::class);
+    $turn = $this->app->make(ChatTurn::class);
+    $runs = $this->app->make(Runs::class);
+    $context = $fixture->context;
+    $session = $chat->open($context);
+    $first = $chat->post($context, $session, 'first', 'First question', []);
+    $turn->execute($context, $first, new ScriptedChatLlm(function (): iterable {
+        yield ['type' => 'textDelta', 'text' => 'First answer'];
+        yield ['type' => 'finish'];
+    }));
+
+    Config::set('vaulter-ai.profiles.'.$context->profile.'.max_tokens', 10);
+    $second = $chat->post($context, $session, 'second', 'Follow-up question', []);
+    $turn->execute($context, $second, new ScriptedChatLlm(function (array $messages): iterable {
+        expect($messages)->toBe([
+            ['role' => 'user', 'content' => 'First question'],
+            ['role' => 'assistant', 'content' => 'First answer'],
+            ['role' => 'user', 'content' => 'Follow-up question'],
+        ]);
+        yield ['type' => 'usage', 'inputTokens' => 8, 'outputTokens' => 3];
+        throw new LogicException('Chat did not stop at the profile budget.');
+    }));
+
+    $steps = $runs->listSteps($context, $second);
+    expect($steps)->toHaveCount(1)
+        ->and($steps[0]->inputTokens)->toBe(8)
+        ->and($steps[0]->outputTokens)->toBe(3)
+        ->and($runs->find($context, $second)?->state)->toBe('rejected')
+        ->and(array_column($chat->events($context, $session, 0), 'data'))->toContain([
+            'run_id' => $second, 'state' => 'rejected', 'error' => 'budget_exceeded',
+        ]);
+});
+
+test('chat cancels a leased turn, retries once per failed run and paginates events through JSON', function (): void {
+    Bus::fake([ExecuteChatRun::class]);
+    $fixture = new TextCommandFixture($this->app);
+    $fixture->authorizeHttp();
+    $this->withToken('scenario-test-token');
+    $context = $fixture->context;
+    $chat = $this->app->make(ChatWorkspace::class);
+    $session = $chat->open($context);
+    $otherSession = $chat->open($context);
+    $runId = $chat->post($context, $session, 'm1', 'Please continue', []);
+    $url = '/office/chat/sessions/'.$session;
+    $this->postJson('/office/chat/sessions/'.$otherSession.'/runs/'.$runId.'/cancel')->assertNotFound();
+    $this->getJson('/office/chat/sessions')->assertOk()->assertJsonCount(2, 'data.sessions');
+    $this->app->make(ChatTurn::class)->execute($context, $runId, new ScriptedChatLlm(function () use ($url, $runId): iterable {
+        $this->postJson($url.'/runs/'.$runId.'/cancel')->assertAccepted()->assertJsonPath('data.state', 'cancelling');
+        yield ['type' => 'finish'];
+    }));
+
+    $this->getJson($url.'/events')->assertOk()
+        ->assertJsonPath('data.0.data.state', 'cancelled')
+        ->assertJsonPath('next_cursor', 1);
+    $this->getJson($url.'/events?cursor=1')->assertOk()->assertJsonCount(0, 'data');
+    $this->postJson($url.'/runs/'.$runId.'/cancel')->assertOk()->assertJsonPath('data.state', 'cancelled');
+    $retry = $this->postJson($url.'/runs/'.$runId.'/retry')->assertAccepted()->json('data.run_id');
+    expect($retry)->toBeString()->not->toBe($runId);
+    $this->postJson($url.'/runs/'.$runId.'/retry')->assertAccepted()->assertJsonPath('data.run_id', $retry);
+    $this->postJson($url.'/archive')->assertOk()->assertJsonPath('data.state', 'archived');
+    $this->postJson($url.'/messages', ['message_id' => 'm2', 'content' => 'archived'])->assertConflict();
+});
+
+test('chat reads cancellation from the writer with the run owner scope', function (): void {
+    Bus::fake([ExecuteChatRun::class]);
+    $fixture = new TextCommandFixture($this->app);
+    $context = $fixture->context;
+    $db = $this->app->make(OfficeDatabase::class);
+    $chat = $this->app->make(ChatWorkspace::class);
+    $session = $chat->open($context);
+    $run = $chat->post($context, $session, 'm1', 'Please continue', []);
+    expect($chat->cancel($context, $session, $run))->toBe('cancelled');
+
+    $connection = $db->connection();
+    $transactions = 0;
+    $connection->getEventDispatcher()?->listen(TransactionBeginning::class, static function (TransactionBeginning $event) use ($connection, &$transactions): void {
+        if ($event->connection === $connection) {
+            $transactions++;
+        }
+    });
+
+    $otherSubject = new CallContext($context->tenantId, $context->projectScope, 'user/other');
+    expect($chat->cancellationRequested($context, $run))->toBeTrue()
+        ->and($chat->cancellationRequested($otherSubject, $run))->toBeFalse()
+        ->and($transactions)->toBe($db->driver() === 'pgsql' ? 2 : 0);
+});
+
+test('office recovery queues expired leases and resumes a persisted AgenTools scenario', function (): void {
+    Bus::fake([DispatchApprovedCommand::class, ExecuteChatRun::class, ResumeOfficeRun::class]);
+    $fixture = new TextCommandFixture($this->app);
+    $context = $fixture->context;
+    $policy = $this->app->make(HostPolicy::class);
+    $runs = $this->app->make(Runs::class);
+    $db = $this->app->make(OfficeDatabase::class);
+    $profile = $policy->profile($context);
+    $input = ['profile' => $profile->name, 'executor' => 'agentools',
+        'scenario' => ['spec_rev' => '2026-09', 'scenario_id' => 'resume-test', 'steps' => []], 'scenario_context' => []];
+    $expired = $runs->createOrFind($context, 'agentools', 'expired', $profile->revision, $input);
+    $live = $runs->createOrFind($context, 'agentools', 'live', $profile->revision, $input);
+    $oldLease = $runs->claimLease($context, $expired->runId);
+    $liveLease = $runs->claimLease($context, $live->runId);
+    $stamp = $db->utcTimestamp($db->clockNow($this->fixedClock)->modify('-1 second'));
+    $db->query('ai_runs')->where('run_id', $expired->runId)
+        ->update(['lease_until' => $stamp]);
+
+    $chat = $this->app->make(ChatWorkspace::class);
+    $session = $chat->open($context);
+    $chatRun = $chat->post($context, $session, 'recovery-tool', 'Read a block', [$fixture->node->id]);
+    $chatLease = $runs->claimLease($context, $chatRun);
+    $ledger = $this->app->make(ToolCallLedger::class);
+    $read = json_encode(['resource_id' => $fixture->node->id, 'selector' => ['kind' => 'text_block', 'block_id' => 'p42']], JSON_THROW_ON_ERROR);
+    $call = $db->transaction(fn (): array => $ledger->request($context, $chatRun, (string) $chatLease, 1, OfficeOperation::Read, $read), $context->tenantId);
+    expect($ledger->claim($context, $chatRun, (string) $chatLease, $call['id']))->not->toBeNull();
+    $db->query('ai_tool_calls')->where('call_id', $call['id'])->update(['lease_until' => $stamp]);
+
+    $proposal = $fixture->prepare();
+    $plan = $this->app->make(Proposals::class)->find($context, $fixture->node->id, $proposal->proposal_id)?->plan;
+    expect($plan)->not->toBeNull();
+    $this->app->make(OwnerRoutes::class)->bind(new CommandScope($context, $fixture->node->id, 'recover-dispatch'), $plan);
+    $db->query('ai_dispatches')->insert([
+        'event_id' => $db->newUuid(), 'proposal_id' => $proposal->proposal_id, 'state' => 'leased',
+        'attempts' => 1, 'lease_token' => $db->newUuid(), 'lease_until' => $stamp,
+    ]);
+
+    $this->artisan('office:recover-runs')->assertSuccessful();
+    Bus::assertDispatched(ResumeOfficeRun::class, fn (ResumeOfficeRun $job): bool => $job->runId === $expired->runId);
+    Bus::assertNotDispatched(ResumeOfficeRun::class, fn (ResumeOfficeRun $job): bool => $job->runId === $live->runId);
+    Bus::assertDispatched(DispatchApprovedCommand::class, fn (DispatchApprovedCommand $job): bool => $job->proposalId === $proposal->proposal_id);
+    expect($runs->find($context, $live->runId)?->leaseToken)->toBe($liveLease)
+        ->and($runs->find($context, $expired->runId)?->leaseToken)->toBeNull()
+        ->and($runs->finishRun($context, $expired->runId, (string) $oldLease, 'completed'))->toBeFalse()
+        ->and($db->query('ai_tool_calls')->where('call_id', $call['id'])->value('lease_token'))->toBeNull()
+        ->and($db->query('ai_tool_calls')->where('call_id', $call['id'])->value('state'))->toBe('dispatched')
+        ->and($db->query('ai_dispatches')->where('proposal_id', $proposal->proposal_id)->value('state'))->toBe('ready');
+
+    $registry = new OfficeRegistry;
+    $registry->registerExecutor($this->app->make(AgenToolsOfficeExecutor::class));
+    $job = new ResumeOfficeRun($context->tenantId, $expired->runId);
+    $job->handle($runs, $policy, $registry, $this->app->make(Dispatcher::class), new ChatTestContext($context));
+    expect($runs->find($context, $expired->runId)?->state)->toBe('completed');
+});
+
+test('office prune deletes expired session contents and inputs while preserving live data', function (): void {
+    Bus::fake([ExecuteChatRun::class]);
+    $fixture = new TextCommandFixture($this->app);
+    $context = $fixture->context;
+    $db = $this->app->make(OfficeDatabase::class);
+    $chat = $this->app->make(ChatWorkspace::class);
+    $expired = $chat->open($context);
+    $live = $chat->open($context);
+    $run = $chat->post($context, $expired, 'old', 'Expired message', []);
+    $chat->append($context, $expired, $run, 'assistant.delta', ['text' => 'expired events'], []);
+    $stamp = $db->utcTimestamp($db->clockNow($this->fixedClock)->modify('-1 second'));
+    $db->query('ai_chat_sessions')->where('session_id', $expired)->update([
+        'created_at' => $db->utcTimestamp($db->clockNow($this->fixedClock)->modify('-2 seconds')),
+        'retention_until' => $stamp,
+    ]);
+    $db->query('ai_run_inputs')->where('run_id', $run)->update(['expires_at' => $stamp]);
+
+    $this->artisan('office:prune-data')->assertSuccessful();
+    expect($db->query('ai_chat_sessions')->pluck('session_id')->all())->toBe([$live])
+        ->and($db->query('ai_chat_messages')->count())->toBe(0)
+        ->and($db->query('ai_chat_events')->count())->toBe(0)
+        ->and($db->query('ai_run_inputs')->where('run_id', $run)->exists())->toBeFalse()
+        ->and($db->query('ai_runs')->where('run_id', $run)->exists())->toBeTrue();
+});
+
+test('PostgreSQL chat wakeups are session-specific and delivered only after commit', function (): void {
+    $fixture = new TextCommandFixture($this->app);
+    $context = $fixture->context;
+    $db = $this->app->make(OfficeDatabase::class);
+    if ($db->driver() !== 'pgsql') {
+        expect($db->driver())->toBe('sqlite');
+
+        return;
+    }
+    $chat = $this->app->make(ChatWorkspace::class);
+    $wakeup = $this->app->make(ChatEventWakeup::class);
+    $session = $chat->open($context);
+    $otherSession = $chat->open($context);
+    $wait = $wakeup->subscribe($session);
+    $queries = 0;
+    $db->connection()->listen(static function () use (&$queries): void {
+        $queries++;
+    });
+    expect($wait(10))->toBeFalse()->and($queries)->toBe(0);
+    $chat->append($context, $otherSession, null, 'assistant.delta', ['text' => 'other'], []);
+    expect($wait(10))->toBeFalse();
+    $db->transaction(function () use ($context, $chat, $session, $wait): void {
+        $chat->append($context, $session, null, 'assistant.delta', ['text' => 'new event'], []);
+        expect($wait(10))->toBeFalse();
+    }, $context->tenantId);
+    expect($wait(1000))->toBeTrue();
+});
+
+test('Centrifugo delivers a wakeup without falling back to SQLite polling', function (): void {
+    $url = getenv('VAULTER_AI_TEST_CENTRIFUGO_URL');
+    if ($url === false) {
+        expect($this->app->make(ChatEventWakeup::class))->toBeInstanceOf(ChatEventWakeup::class);
+
+        return;
+    }
+    Config::set('vaulter-ai.chat.centrifugo', [
+        'url' => $url,
+        'api_key' => 'f05-test-http-key',
+        'token_secret' => 'f05-test-signing-secret-at-least-thirty-two-bytes',
+    ]);
+    $fixture = new TextCommandFixture($this->app);
+    $context = $fixture->context;
+    $db = $this->app->make(OfficeDatabase::class);
+    expect($db->driver())->toBe('sqlite');
+    $chat = $this->app->make(ChatWorkspace::class);
+    $wakeup = $this->app->make(ChatEventWakeup::class);
+    $session = $chat->open($context);
+    $wait = $wakeup->subscribe($session);
+    expect($wait(10))->toBeFalse();
+    $db->transaction(function () use ($context, $chat, $session, $wait): void {
+        $chat->append($context, $session, null, 'assistant.delta', ['text' => 'Wake after commit'], []);
+        expect($wait(10))->toBeFalse();
+    }, $context->tenantId);
+    expect($wait(1000))->toBeTrue();
 });
 
 test('chat never exposes protected frames on reconnect and keeps the cursor across hidden frames', function (): void {

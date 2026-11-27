@@ -137,8 +137,6 @@ jobs:
 
       - name: Setup Node.js
         uses: $/.github/actions/setup-node
-        with:
-          install: "false"
 
       - name: Build vaulter-sheets runtime and vue, install Playwright Chromium
         run: |
@@ -146,12 +144,14 @@ jobs:
           workspace="$(dirname "$GITHUB_WORKSPACE")"
           vaulter="${workspace}/vaulter"
           sheets="${workspace}/vaulter-sheets"
+          collab="${workspace}/vaulter-collaboration"
           (cd "${vaulter}" && npm ci --no-audit --no-fund)
           (cd "${vaulter}/packages/vue" && npm run build)
           (cd "${sheets}" && npm ci --no-audit --no-fund)
           (cd "${sheets}" && npm run build --workspace @vaulter/sheets-runtime)
           (cd "${sheets}" && npm run build --workspace @vaulter/sheets-realtime)
           (cd "${sheets}" && npm run build --workspace @vaulter/sheets-vue)
+          (cd "${collab}" && npm ci --no-audit --no-fund)
           (cd "${sheets}" && npx playwright install --with-deps chromium)
 
       - name: Migrate vaulter-ai packages and require zero unindexed foreign keys
@@ -196,6 +196,76 @@ jobs:
           DB_USERNAME: vaulter
           DB_PASSWORD: vaulter
         run: composer test
+
+      - name: Run bench/office compare (PostgreSQL 100x + PG buffers)
+        if: matrix.php == '8.4' && matrix.postgres == '18.7'
+        env:
+          DB_CONNECTION: pgsql
+          DB_HOST: 127.0.0.1
+          DB_PORT: "5432"
+          DB_DATABASE: vaulter_ai_test
+          DB_USERNAME: vaulter
+          DB_PASSWORD: vaulter
+        run: |
+          set -euo pipefail
+          php bench/office/compare.php --dry-run >/dev/null
+          php bench/office/compare.php --warmup=0 --measured=2 --output="$RUNNER_TEMP/office-bench-pg.json"
+          jq -e '
+            .comparison_valid == true
+            and .corpus_100x.correct == true
+            and .corpus_100x.explain_analyze_buffers.status == "measured"
+            and .corpus_100x.explain_analyze_buffers.queries.text_blocks_lookup.verified_rows == 20
+            and .corpus_100x.explain_analyze_buffers.queries.text_blocks_lookup.fixture_total_rows == 1100
+            and .corpus_100x.explain_analyze_buffers.queries.sheet_rows_lookup.verified_rows == 20
+            and .corpus_100x.explain_analyze_buffers.queries.sheet_rows_lookup.fixture_total_rows == 300
+            and .corpus_100x.explain_analyze_buffers.queries.chat_events_cursor.verified_rows >= 2
+            and .tokens_summary.status == "measured"
+            and .tokens_summary.source == "gpt-tokenizer"
+            and .tokens_summary.tokenizer == "cl100k_base"
+            and .tokens_summary.payload_scope == "full_model_payload"
+            and .tokens_summary.provider_usage_status == "unmeasured"
+            and .profiles.text.tokens.provider_input.status == "unmeasured"
+            and .profiles.text.tokens.tokenizer_estimate_input.source == "gpt-tokenizer"
+            and .profiles.text.tokens.tokenizer_estimate_input.payload_scope == "full_model_payload"
+            and .profiles.chat.sse_frames_received > 0
+            and .profiles.chat.sse_delta_frames > 0
+            and .profiles.chat.consumer_elapsed_ms > 0
+          ' "$RUNNER_TEMP/office-bench-pg.json"
+
+  consumer-stand:
+    needs: quality
+    name: Consumer Stand (PG 18.7 + Playwright + queue:work)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout sibling repositories
+        env:
+          VAULTER_READ_TOKEN: ${{ secrets.VAULTER_READ_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: bash scripts/ci/checkout-ecosystem.sh
+
+      - name: Install PHP dependencies
+        uses: $/.github/actions/setup-php
+        with:
+          php-version: '8.4'
+
+      - name: Setup Node.js
+        uses: $/.github/actions/setup-node
+
+      - name: Build Vue assets and vaulter-sheets runtime
+        run: |
+          set -euo pipefail
+          workspace="$(dirname "$GITHUB_WORKSPACE")"
+          npm --prefix packages/vue run build
+          (cd "${workspace}/vaulter-sheets" && npm ci --no-audit --no-fund && npm run build --workspace @vaulter/sheets-runtime)
+
+      - name: Run isolated Docker stand matrix (ai-text, ai-sheets, ai-collaboration)
+        run: bash tests/consumers/office/stack.sh test
 
   vue:
     needs: quality
@@ -247,7 +317,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [quality, php, vue, python]
+    needs: [quality, php, vue, python, consumer-stand]
     timeout-minutes: 5
     runs-on: ubuntu-24.04
     steps:

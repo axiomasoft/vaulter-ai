@@ -105,7 +105,7 @@ test('projector handles duplicate delivery, missed updates, after_receipt lag/fa
         proposalId: (string) Str::uuid7(),
         receiptId: $receiptId,
         marker: new Marker($snap3->epoch, $snap3->stateVersion),
-        dedupeUntil: $this->fixedClock->now()->modify('+7 days'),
+        dedupeUntil: new DateTimeImmutable('+7 days'),
     );
 
     // Fail closed with projection_pending: NEVER return stale "15 дней" for after_receipt!
@@ -422,7 +422,7 @@ test('after_receipt read rejects concurrent restore with generation_changed and 
         proposalId: (string) Str::uuid7(),
         receiptId: $receiptId,
         marker: new Marker($snap3->epoch, $snap3->stateVersion),
-        dedupeUntil: $this->fixedClock->now()->modify('+7 days'),
+        dedupeUntil: new DateTimeImmutable('+7 days'),
     );
 
     $restoreRaceTriggered = false;

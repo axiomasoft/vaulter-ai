@@ -48,8 +48,61 @@ if (! class_exists(StandServiceProvider::class)) {
  * exercises routes/web.php + resources/views/proposals.blade.php under two reviewers,
  * P/Q decision race, permission revocations, restart recovery, and two-resource partial resume.
  */
+function isAsyncPgStand(): bool
+{
+    return getenv('STAND_PG_ASYNC') === '1' || getenv('DB_CONNECTION') === 'pgsql';
+}
+
+function standRemoteGet(string $baseUrl, string $path, string $bearerToken): array
+{
+    $url = rtrim($baseUrl, '/').$path;
+    $ctx = stream_context_create([
+        'http' => [
+            'method' => 'GET',
+            'header' => "Authorization: Bearer {$bearerToken}\r\nAccept: text/html,application/json\r\n",
+            'ignore_errors' => true,
+            'timeout' => 15,
+        ],
+    ]);
+    $body = (string) @file_get_contents($url, false, $ctx);
+    $status = 0;
+    foreach ($http_response_header ?? [] as $line) {
+        if (preg_match('/^HTTP\/\S+\s+(\d+)/', $line, $m) === 1) {
+            $status = (int) $m[1];
+        }
+    }
+
+    return ['status' => $status, 'body' => $body];
+}
+
 function bootConsumerStandHost(string $sqliteFile, string $runtimeTmpDir): Application
 {
+    if (isAsyncPgStand() && is_file('/app/bootstrap/app.php')) {
+        file_put_contents($runtimeTmpDir.'/.env', "APP_ENV=testing\n");
+        putenv('VAULTER_AI_STAND_APPROVAL=human');
+        $_ENV['VAULTER_AI_STAND_APPROVAL'] = 'human';
+        $_SERVER['VAULTER_AI_STAND_APPROVAL'] = 'human';
+
+        /** @var Application $app */
+        $app = require '/app/bootstrap/app.php';
+        $app->useEnvironmentPath($runtimeTmpDir);
+        $kernel = $app->make(HttpKernel::class);
+        $kernel->bootstrap();
+        restore_error_handler();
+        restore_exception_handler();
+
+        $app['config']->set('stand.approval', 'human');
+        $app['config']->set('vaulter-ai.profiles.documents.approval', 'human');
+        $app['config']->set('vaulter-ai.profiles.documents_human.approval', 'human');
+        $app['config']->set('vaulter-ai.profiles.sheets.approval', 'human');
+        $app['config']->set('vaulter-ai.profiles.sheets_human.approval', 'human');
+        if (is_dir($runtimeTmpDir.'/views')) {
+            $app['config']->set('view.compiled', $runtimeTmpDir.'/views');
+        }
+
+        return $app;
+    }
+
     putenv('APP_ENV=testing');
     putenv('DB_CONNECTION=sqlite');
     putenv('DB_DATABASE='.$sqliteFile);
@@ -167,12 +220,17 @@ test('consumer stand web view and P/Q approval handlers enforce race safety, sep
     touch($dbPath);
 
     try {
+        $asyncPg = isAsyncPgStand();
+        $fixtureToken = getenv('FIXTURE_TOKEN') ?: 'stand-test-fixture-token';
         $app = bootConsumerStandHost($dbPath, $runtimeDir);
-        Artisan::call('migrate', ['--force' => true, '--no-interaction' => true]);
+        if (! $asyncPg) {
+            Artisan::call('migrate', ['--force' => true, '--no-interaction' => true]);
+        }
 
         // Seed stand workspace (writer, reviewer, reader, foreign, doc1, doc2).
-        $seedResp = standRequest($app, 'POST', '/_fixture/seed', '', [], [
-            'X-Fixture-Token' => 'stand-test-fixture-token',
+        $seedResp = standRequest($app, 'POST', '/_fixture/seed', '', ['approval' => 'human'], [
+            'X-Fixture-Token' => $fixtureToken,
+            'Content-Type' => 'application/json',
             'Accept' => 'application/json',
         ]);
         expect($seedResp->getStatusCode())->toBe(200);
@@ -238,9 +296,11 @@ test('consumer stand web view and P/Q approval handlers enforce race safety, sep
             ->and($html)->toContain('data-action="approve"')
             ->and($html)->toContain('data-action="reject"');
 
-        // Pause queue so browser disconnect after decision leaves human_status != owner_status.
+        // Pause sync queue (or observe async PG queue:work) so reviewer 2's CAS rejection loses cleanly and Q stays pending.
         $realDispatcher = $app->make(Dispatcher::class);
-        Bus::fake([DispatchApprovedCommand::class]);
+        if (! $asyncPg) {
+            Bus::fake([DispatchApprovedCommand::class]);
+        }
         $approveForm = standRequest($app, 'POST', '/office/proposals/'.$pData['proposal_id'].'/decision', $reviewerToken, [
             'digest' => $pData['digest'],
             'approved' => '1',
@@ -256,21 +316,44 @@ test('consumer stand web view and P/Q approval handlers enforce race safety, sep
         expect($rejectSecond->getStatusCode())->toBe(200);
         $raceBody = json_decode((string) $rejectSecond->getContent(), true)['data'];
         expect($raceBody['won'])->toBeFalse()
-            ->and($raceBody['proposal']['approval']['human_status'])->toBe('approved')
-            ->and($raceBody['proposal']['execution']['owner_status'])->toBe('pending_dispatch');
+            ->and($raceBody['proposal']['approval']['human_status'])->toBe('approved');
+        if ($asyncPg) {
+            expect($raceBody['proposal']['execution']['owner_status'])->toBeIn(['pending_dispatch', 'dispatched', 'committed']);
+        } else {
+            expect($raceBody['proposal']['execution']['owner_status'])->toBe('pending_dispatch');
+        }
 
         $qView = json_decode((string) standRequest($app, 'GET', '/office/proposals/'.$qData['proposal_id'], $writerToken, [], ['Accept' => 'application/json'])->getContent(), true)['data'];
         expect($qView['approval']['human_status'])->toBe('pending');
 
-        // Execute queued dispatch once, then reboot a brand new consumer stand container from the same SQLite DB.
-        Bus::swap($realDispatcher);
-        $app->call([new DispatchApprovedCommand('61', $pData['proposal_id']), 'handle']);
+        if ($asyncPg) {
+            // Wait for background agent-worker (`queue:work` on PostgreSQL 18.7) to settle owner route receipt.
+            $deadline = microtime(true) + 25.0;
+            while (microtime(true) < $deadline) {
+                $settled = DB::table('v_ai_owner_routes')
+                    ->where('proposal_id', $pData['proposal_id'])
+                    ->whereNotNull('receipt_id')
+                    ->exists();
+                if ($settled) {
+                    break;
+                }
+                usleep(200_000);
+            }
+            expect(DB::table('v_ai_owner_routes')->where('proposal_id', $pData['proposal_id'])->whereNotNull('receipt_id')->exists())->toBeTrue();
+        } else {
+            // Execute queued dispatch once, then reboot a brand new consumer stand container from the same SQLite DB.
+            Bus::swap($realDispatcher);
+            $app->call([new DispatchApprovedCommand('61', $pData['proposal_id']), 'handle']);
+        }
         $app->flush();
 
         $restartedApp = bootConsumerStandHost($dbPath, $runtimeDir);
         Facade::clearResolvedInstances();
         Facade::setFacadeApplication($restartedApp);
-        $restartedHtml = (string) standRequest($restartedApp, 'GET', '/office/workspace', $reviewerToken)->getContent();
+        $ownerHttpUrl = getenv('OWNER_HTTP_URL');
+        $restartedHtml = $asyncPg && is_string($ownerHttpUrl) && $ownerHttpUrl !== ''
+            ? standRemoteGet($ownerHttpUrl, '/office/workspace', $reviewerToken)['body']
+            : (string) standRequest($restartedApp, 'GET', '/office/workspace', $reviewerToken)->getContent();
         expect($restartedHtml)->toContain('Принято человеком')
             ->and($restartedHtml)->toContain('Сохранено владельцем')
             ->and($restartedHtml)->toContain('Проверено');
@@ -282,8 +365,8 @@ test('consumer stand web view and P/Q approval handlers enforce race safety, sep
         expect($readerHtml)->toContain($pData['proposal_id'])
             ->and($readerHtml)->not->toContain('data-action="approve"');
 
-        $driveOwner = StandOwner::query()->firstOrFail();
-        $readerActor = StandActor::query()->where('email', 'like', 'reader-%')->firstOrFail();
+        $driveOwner = StandOwner::query()->findOrFail($seed['owner_id']);
+        $readerActor = StandActor::query()->findOrFail($seed['reader_user_id']);
         $drive = Vaulter::drive($driveOwner)->asSystem('revoke-reader');
         foreach ($drive->access()->grants($drive->root()->id) as $grant) {
             if ((string) $grant->subject->id === (string) $readerActor->getKey()) {
@@ -297,7 +380,11 @@ test('consumer stand web view and P/Q approval handlers enforce race safety, sep
         // Multi-resource partial run on stand host: doc1 succeeds, doc2 hits precondition_failed, resume continues only doc2.
         $writerActor = StandActor::query()->findOrFail($seed['writer_user_id']);
         $writerCtx = new CallContext('61', 'default', 'user/'.$writerActor->getKey(), 'documents', 'stand-rev-1', (string) $seed['drive_id'], $writerActor);
+        $restartedApp['config']->set('stand.approval', 'automatic');
         $restartedApp['config']->set('vaulter-ai.profiles.documents.approval', 'automatic');
+        $restartedApp['config']->set('vaulter-ai.profiles.documents_human.approval', 'automatic');
+        $restartedApp['config']->set('vaulter-ai.profiles.sheets.approval', 'automatic');
+        $restartedApp['config']->set('vaulter-ai.profiles.sheets_human.approval', 'automatic');
 
         $doc2Snap = Documents::in($drive)->content($doc2);
         Documents::in($drive)->update($doc2, [

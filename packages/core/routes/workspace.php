@@ -19,7 +19,11 @@ Route::prefix(is_string($prefix) ? trim($prefix, '/') : 'office')
         Route::get('/runs/{id}', [RunWorkspaceController::class, 'show'])->name('vaulter-ai.workspace.runs.show');
         Route::post('/runs/{id}/resume', [RunWorkspaceController::class, 'resume'])->name('vaulter-ai.workspace.runs.resume');
         Route::post('/chat/sessions', [ChatWorkspaceController::class, 'open'])->name('vaulter-ai.workspace.chat.open');
+        Route::get('/chat/sessions', [ChatWorkspaceController::class, 'index'])->name('vaulter-ai.workspace.chat.index');
         Route::get('/chat/sessions/{id}', [ChatWorkspaceController::class, 'show'])->name('vaulter-ai.workspace.chat.show');
+        Route::post('/chat/sessions/{id}/archive', [ChatWorkspaceController::class, 'archive'])->name('vaulter-ai.workspace.chat.archive');
         Route::post('/chat/sessions/{id}/messages', [ChatWorkspaceController::class, 'post'])->name('vaulter-ai.workspace.chat.messages');
         Route::get('/chat/sessions/{id}/events', [ChatWorkspaceController::class, 'events'])->name('vaulter-ai.workspace.chat.events');
+        Route::post('/chat/sessions/{id}/runs/{runId}/cancel', [ChatWorkspaceController::class, 'cancel'])->name('vaulter-ai.workspace.chat.cancel');
+        Route::post('/chat/sessions/{id}/runs/{runId}/retry', [ChatWorkspaceController::class, 'retry'])->name('vaulter-ai.workspace.chat.retry');
     });

@@ -43,7 +43,7 @@
         "scheduler"
       ],
       "executor": "laravel-ai",
-      "test_suites": ["laravel-ai", "python-remote"]
+      "test_suites": ["laravel-ai", "stand-php", "browser", "python-remote"]
     },
     "ai-agentools": {
       "description": "Isolated AI SDK core + documents + AgenTools ToolPort executor.",
@@ -87,7 +87,102 @@
         "scheduler"
       ],
       "executor": "agentools",
-      "test_suites": ["agentools", "python-remote"]
+      "test_suites": ["agentools", "stand-php", "browser", "python-remote"]
+    },
+    "ai-sheets": {
+      "description": "Isolated AI SDK core + documents + sheets + Laravel AI executor + Node runtime.",
+      "composer_packages": [
+        "axiomasoft/vaulter-ai-core",
+        "axiomasoft/vaulter-ai-documents",
+        "axiomasoft/vaulter-ai-sheets",
+        "axiomasoft/vaulter-ai-laravel-ai",
+        "axiomasoft/vaulter",
+        "axiomasoft/vaulter-core",
+        "axiomasoft/vaulter-drive",
+        "axiomasoft/vaulter-documents",
+        "axiomasoft/vaulter-sheets",
+        "axiomasoft/vaulter-media",
+        "axiomasoft/packman",
+        "axiomasoft/packman-plugins",
+        "axiomasoft/packman-schema"
+      ],
+      "forbidden_packages": [
+        "axiomasoft/vaulter-ai-agentools",
+        "agentools/sdk",
+        "handsontable",
+        "hyperformula",
+        "dunglas/mercure",
+        "minio/minio",
+        "libclamav"
+      ],
+      "required_tables": [
+        "v_ai_runs",
+        "v_ai_run_steps",
+        "v_ai_proposals",
+        "v_ai_owner_routes",
+        "v_ai_text_commands",
+        "v_sheets_commands",
+        "v_outbox"
+      ],
+      "images": ["postgres"],
+      "compose_profiles": [],
+      "long_lived_services": [
+        "postgres",
+        "owner-http",
+        "agent-worker",
+        "projection-worker",
+        "scheduler"
+      ],
+      "executor": "laravel-ai",
+      "test_suites": ["laravel-ai", "sheets", "stand-php", "browser", "python-remote"]
+    },
+    "ai-collaboration": {
+      "description": "Isolated AI SDK core + documents + live collaboration journal + Laravel AI executor.",
+      "composer_packages": [
+        "axiomasoft/vaulter-ai-core",
+        "axiomasoft/vaulter-ai-documents",
+        "axiomasoft/vaulter-ai-collaboration",
+        "axiomasoft/vaulter-ai-laravel-ai",
+        "axiomasoft/vaulter",
+        "axiomasoft/vaulter-core",
+        "axiomasoft/vaulter-drive",
+        "axiomasoft/vaulter-documents",
+        "axiomasoft/vaulter-collaboration",
+        "axiomasoft/vaulter-media",
+        "axiomasoft/packman",
+        "axiomasoft/packman-plugins",
+        "axiomasoft/packman-schema"
+      ],
+      "forbidden_packages": [
+        "axiomasoft/vaulter-ai-agentools",
+        "agentools/sdk",
+        "handsontable",
+        "hyperformula",
+        "dunglas/mercure",
+        "minio/minio",
+        "libclamav"
+      ],
+      "required_tables": [
+        "v_ai_runs",
+        "v_ai_run_steps",
+        "v_ai_proposals",
+        "v_ai_owner_routes",
+        "v_ai_text_commands",
+        "v_collaboration_commands",
+        "v_collaboration_heads",
+        "v_outbox"
+      ],
+      "images": ["postgres"],
+      "compose_profiles": [],
+      "long_lived_services": [
+        "postgres",
+        "owner-http",
+        "agent-worker",
+        "projection-worker",
+        "scheduler"
+      ],
+      "executor": "laravel-ai",
+      "test_suites": ["laravel-ai", "collaboration", "stand-php", "browser", "python-remote"]
     }
   }
 }

@@ -24,6 +24,7 @@ use Vaulter\Drive\Access\Roles\RoleRegistry;
 use Vaulter\Drive\Access\ValueObjects\Subject;
 use Vaulter\Drive\Data\Access\GrantInput;
 use Vaulter\Drive\Facades\Vaulter;
+use Vaulter\Sheets\Content\WorkbookCodec;
 
 if (! function_exists('assertStandFixtureToken')) {
     function assertStandFixtureToken(Request $request): ?JsonResponse
@@ -122,6 +123,66 @@ Route::post('/_fixture/seed', static function (Request $request): JsonResponse {
     ]);
 
     $driveId = $drive->snapshot()->id;
+    $standProfile = (string) config('stand.profile', 'ai-text');
+    $requestedApproval = $request->input('approval');
+    $approval = in_array($requestedApproval, ['human', 'automatic'], true)
+        ? $requestedApproval
+        : (string) config('stand.approval', 'automatic');
+    $tokenProfile = $standProfile === 'ai-sheets'
+        ? ($approval === 'human' ? 'sheets_human' : 'sheets')
+        : ($approval === 'human' ? 'documents_human' : 'documents');
+
+    $sheetNode = null;
+    if ($standProfile === 'ai-sheets') {
+        $workbookProfile = json_decode(json_encode(WorkbookCodec::profile(), JSON_THROW_ON_ERROR), true, 512, JSON_THROW_ON_ERROR);
+        $sheetNode = Documents::in($drive->actingAs($writer))->create('Бюджет', 'vaulter/spreadsheet', [
+            'format_version' => 2,
+            'profile' => $workbookProfile,
+            'native' => [
+                'id' => 'stand-budget-native',
+                'name' => 'Бюджет',
+                'appVersion' => '1.5.2',
+                'locale' => 'ruRU',
+                'styles' => [],
+                'resources' => [['name' => 'SHEET_DEFINED_NAME_PLUGIN', 'data' => '']],
+                'sheetOrder' => ['expenses'],
+                'sheets' => [
+                    'expenses' => [
+                        'id' => 'expenses',
+                        'name' => 'Расходы',
+                        'rowCount' => 100,
+                        'columnCount' => 20,
+                        'cellData' => [
+                            '0' => ['1' => ['t' => 1, 'v' => 'План'], '2' => ['t' => 1, 'v' => 'Факт'], '3' => ['t' => 1, 'v' => 'Отклонение']],
+                            '1' => ['0' => ['t' => 1, 'v' => 'r-telecom'], '1' => ['t' => 2, 'v' => 100], '2' => ['t' => 2, 'v' => 120]],
+                            '2' => ['0' => ['t' => 1, 'v' => 'r-travel'], '1' => ['t' => 2, 'v' => 200], '2' => ['t' => 2, 'v' => 180]],
+                            '3' => ['0' => ['t' => 1, 'v' => 'r-fees'], '1' => ['t' => 2, 'v' => 10], '2' => ['t' => 2, 'v' => 20], '3' => ['t' => 2, 'v' => 77]],
+                        ],
+                    ],
+                ],
+            ],
+            'tables' => [[
+                'table_id' => 'costs',
+                'sheet_id' => 'expenses',
+                'header_row' => 1,
+                'columns' => [
+                    ['column_id' => 'plan', 'column' => 2],
+                    ['column_id' => 'actual', 'column' => 3],
+                    ['column_id' => 'delta', 'column' => 4],
+                ],
+                'rows' => [
+                    ['row_id' => 'r-telecom', 'row' => 2],
+                    ['row_id' => 'r-travel', 'row' => 3],
+                    ['row_id' => 'r-fees', 'row' => 4],
+                ],
+            ]],
+        ]);
+    }
+
+    if ($standProfile === 'ai-collaboration' && $request->boolean('journal')) {
+        Documents::in($drive->actingAs($writer))->collaborationSession($node);
+    }
+
     $writerToken = 'w-'.bin2hex(random_bytes(16));
     $reviewerToken = 'v-'.bin2hex(random_bytes(16));
     $readerToken = 'r-'.bin2hex(random_bytes(16));
@@ -139,13 +200,14 @@ Route::post('/_fixture/seed', static function (Request $request): JsonResponse {
             'project_scope' => $scope,
             'user_id' => $uid,
             'drive_id' => $did,
-            'profile' => 'documents',
+            'profile' => $tokenProfile,
             'policy_revision' => 'stand-rev-1',
         ]);
     }
 
     return response()->json([
         'resource_id' => $node->id,
+        'sheet_resource_id' => $sheetNode?->id,
         'second_resource_id' => $secondNode->id,
         'tenant_id' => '61',
         'project_scope' => 'default',
@@ -153,12 +215,15 @@ Route::post('/_fixture/seed', static function (Request $request): JsonResponse {
         'owner_id' => $owner->getKey(),
         'writer_user_id' => $writer->getKey(),
         'reviewer_user_id' => $reviewer->getKey(),
+        'reader_user_id' => $reader->getKey(),
         'writer_token' => $writerToken,
         'reviewer_token' => $reviewerToken,
         'reader_token' => $readerToken,
         'foreign_token' => $foreignToken,
     ]);
 });
+
+Route::post('/_fixture/hub-control', static fn (): JsonResponse => response()->json(['ok' => true]));
 
 Route::post('/_fixture/revoke', static function (Request $request): JsonResponse {
     if (($deny = assertStandFixtureToken($request)) !== null) {
@@ -201,11 +266,19 @@ Route::post('/_fixture/runs', static function (Request $request, OfficeRegistry 
         return response()->json(['error' => 'invalid_seed_ref'], 400);
     }
 
-    $context = new CallContext('61', 'default', 'user/'.$actor->getKey(), 'documents', 'stand-rev-1', $driveId, $actor);
+    $standProfile = (string) config('stand.profile', 'ai-text');
+    $tokenProfile = DB::table('stand_tokens')
+        ->where('user_id', $actor->getKey())
+        ->where('drive_id', $driveId)
+        ->orderByDesc('created_at')
+        ->value('profile');
+    $runProfile = is_string($tokenProfile) && $tokenProfile !== ''
+        ? $tokenProfile
+        : ($standProfile === 'ai-sheets' ? 'sheets' : 'documents');
+    $context = new CallContext('61', 'default', 'user/'.$actor->getKey(), $runProfile, 'stand-rev-1', $driveId, $actor);
     $sourceEventId = 'stand-evt-'.(string) Str::uuid7();
-    $profile = (string) config('stand.profile');
 
-    if ($profile === 'ai-agentools') {
+    if ($standProfile === 'ai-agentools') {
         $executor = $registry->executor('agentools');
         if ($executor === null) {
             return response()->json(['error' => 'agentools_unavailable'], 500);
@@ -230,7 +303,7 @@ Route::post('/_fixture/runs', static function (Request $request, OfficeRegistry 
     $run = $runs->createOrFind($context, 'laravel-ai', $sourceEventId, 'stand-rev-1', [
         'prompt' => 'Change payment days in 4.2 from 15 to 30.',
         'resource_id' => $resourceId,
-        'profile' => 'documents',
+        'profile' => $runProfile,
     ]);
     DB::table('stand_run_contexts')->insert([
         'run_id' => $run->runId,
@@ -239,7 +312,7 @@ Route::post('/_fixture/runs', static function (Request $request, OfficeRegistry 
         'user_id' => $actor->getKey(),
         'drive_id' => $driveId,
         'resource_id' => $resourceId,
-        'profile' => 'documents',
+        'profile' => $runProfile,
         'policy_revision' => 'stand-rev-1',
         'fault_mode' => $faultMode,
     ]);
@@ -439,7 +512,7 @@ Route::post('/office/channel/events', static function (
     $run = $runs->createOrFind($viewer, $channel, $eventId, $profileRevision, [
         'prompt' => 'Change payment days in 4.2 from 15 to 30.',
         'resource_id' => $resourceId,
-        'profile' => 'documents',
+        'profile' => $viewer->profile,
         'session_id' => $sessionId,
         'chat_session_id' => $chatSessionId,
         'event_id' => $eventId,
@@ -468,7 +541,7 @@ Route::post('/office/channel/events', static function (
             'user_id' => $userId,
             'drive_id' => $viewer->driveId,
             'resource_id' => $resourceId,
-            'profile' => 'documents',
+            'profile' => $viewer->profile,
             'policy_revision' => $run->profileRevision,
             'fault_mode' => null,
         ]);

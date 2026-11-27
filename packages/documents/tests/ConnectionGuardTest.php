@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\Schema\Blueprint;
 use Vaulter\Ai\Core\Exceptions\OfficeRegistryException;
 use Vaulter\Ai\Core\Persistence\OfficeDatabase;
 use Vaulter\Ai\Core\Registry\OfficeRegistry;
@@ -42,6 +43,36 @@ test('writer activation is refused when the documents connection differs from Of
     expect(fn () => (new DocumentsAiServiceProvider($this->app))->boot())
         ->toThrow(RuntimeException::class, 'OfficeDatabase connection [office_split]');
     expect($registry->ownerFor('text.replace_exact@1', 'snapshot'))->toBeNull();
+});
+
+test('chat cancellation rollback tolerates a missing table or column on a separate SQLite writer', function (): void {
+    $config = $this->app['config'];
+    $previous = $config->get('vaulter-ai.database.connection');
+    $config->set('database.connections.office_rollback', ['driver' => 'sqlite', 'database' => ':memory:']);
+    $config->set('vaulter-ai.database.connection', 'office_rollback');
+
+    try {
+        $db = $this->app->make(OfficeDatabase::class);
+        $schema = $db->connection()->getSchemaBuilder();
+        $runs = $db->table('ai_runs');
+        $migration = require __DIR__.'/../../core/database/migrations/0001_01_01_000706_add_chat_cancellation.php';
+        expect($migration->getConnection())->toBe('office_rollback');
+
+        $migration->down();
+        expect($schema->hasTable($runs))->toBeFalse();
+        $schema->create($runs, static function (Blueprint $table): void {
+            $table->id();
+        });
+        $migration->down();
+        expect($schema->hasColumn($runs, 'id'))->toBeTrue();
+
+        $migration->up();
+        expect($schema->hasColumn($runs, 'cancel_requested'))->toBeTrue();
+        $migration->down();
+        expect($schema->hasColumn($runs, 'cancel_requested'))->toBeFalse();
+    } finally {
+        $config->set('vaulter-ai.database.connection', $previous);
+    }
 });
 
 test('a new scope rebuilds the frozen document registry and its owners', function (): void {

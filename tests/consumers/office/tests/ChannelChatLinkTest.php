@@ -45,6 +45,38 @@ if (! class_exists(StandServiceProvider::class)) {
 
 function bootChannelChatHost(string $sqliteFile, string $runtimeTmpDir, string $profile): Application
 {
+    if (getenv('STAND_PG_ASYNC') === '1' || getenv('DB_CONNECTION') === 'pgsql') {
+        if (is_file('/app/bootstrap/app.php')) {
+            file_put_contents($runtimeTmpDir.'/.env', "APP_ENV=testing\n");
+            putenv('VAULTER_AI_STAND_APPROVAL=human');
+            putenv('STAND_PROFILE='.$profile);
+            $_ENV['VAULTER_AI_STAND_APPROVAL'] = 'human';
+            $_ENV['STAND_PROFILE'] = $profile;
+            $_SERVER['VAULTER_AI_STAND_APPROVAL'] = 'human';
+            $_SERVER['STAND_PROFILE'] = $profile;
+
+            /** @var Application $app */
+            $app = require '/app/bootstrap/app.php';
+            $app->useEnvironmentPath($runtimeTmpDir);
+            $kernel = $app->make(HttpKernel::class);
+            $kernel->bootstrap();
+            restore_error_handler();
+            restore_exception_handler();
+
+            $app['config']->set('stand.profile', $profile);
+            $app['config']->set('stand.approval', 'human');
+            $app['config']->set('vaulter-ai.profiles.documents.approval', 'human');
+            $app['config']->set('vaulter-ai.profiles.documents_human.approval', 'human');
+            $app['config']->set('vaulter-ai.profiles.sheets.approval', 'human');
+            $app['config']->set('vaulter-ai.profiles.sheets_human.approval', 'human');
+            if (is_dir($runtimeTmpDir.'/views')) {
+                $app['config']->set('view.compiled', $runtimeTmpDir.'/views');
+            }
+
+            return $app;
+        }
+    }
+
     putenv('APP_ENV=testing');
     putenv('DB_CONNECTION=sqlite');
     putenv('DB_DATABASE='.$sqliteFile);
@@ -169,11 +201,16 @@ test('external channel links partial/final/duplicate/approval cleanly to a persi
     touch($dbPath);
 
     try {
+        $asyncPg = getenv('STAND_PG_ASYNC') === '1' || getenv('DB_CONNECTION') === 'pgsql';
+        $fixtureToken = getenv('FIXTURE_TOKEN') ?: 'stand-test-fixture-token';
         $app = bootChannelChatHost($dbPath, $runtimeDir, $profile);
-        Artisan::call('migrate', ['--force' => true, '--no-interaction' => true]);
+        if (! $asyncPg) {
+            Artisan::call('migrate', ['--force' => true, '--no-interaction' => true]);
+        }
 
-        $seedResp = channelChatReq($app, 'POST', '/_fixture/seed', '', [], [
-            'X-Fixture-Token' => 'stand-test-fixture-token',
+        $seedResp = channelChatReq($app, 'POST', '/_fixture/seed', '', ['approval' => 'human'], [
+            'X-Fixture-Token' => $fixtureToken,
+            'Content-Type' => 'application/json',
             'Accept' => 'application/json',
         ]);
         $seed = json_decode((string) $seedResp->getContent(), true, 512, JSON_THROW_ON_ERROR);
@@ -181,10 +218,15 @@ test('external channel links partial/final/duplicate/approval cleanly to a persi
         $writerToken = (string) $seed['writer_token'];
         $reviewerToken = (string) $seed['reviewer_token'];
 
+        $extSession = 'ext-sess-'.bin2hex(random_bytes(4));
+        $partEvt = 'evt-p1-'.bin2hex(random_bytes(3));
+        $finalEvt = 'evt-f1-'.bin2hex(random_bytes(3));
+        $unlinkEvt = 'evt-unlinked-'.bin2hex(random_bytes(3));
+
         // 1. Partial event links a chat_session_id with ZERO runs and ZERO chat messages.
         $partialResp = channelChatReq($app, 'POST', '/office/channel/events', $writerToken, [
-            'session_id' => 'ext-sess-92',
-            'event_id' => 'evt-p1',
+            'session_id' => $extSession,
+            'event_id' => $partEvt,
             'phase' => 'partial',
             'resource_id' => $doc,
         ], ['Content-Type' => 'application/json', 'Accept' => 'application/json']);
@@ -201,12 +243,12 @@ test('external channel links partial/final/duplicate/approval cleanly to a persi
             ->and($shownPartial['messages'])->toBe([]);
 
         // 2. Final event creates 1 run linked into that same chat_session_id and mirrors awaiting_approval state.
-        if ($expectedChannel === 'laravel-ai') {
+        if (! $asyncPg && $expectedChannel === 'laravel-ai') {
             Bus::fake([ExecuteOfficeRun::class]);
         }
         $finalResp = channelChatReq($app, 'POST', '/office/channel/events', $writerToken, [
-            'session_id' => 'ext-sess-92',
-            'event_id' => 'evt-f1',
+            'session_id' => $extSession,
+            'event_id' => $finalEvt,
             'phase' => 'final',
             'resource_id' => $doc,
         ], ['Content-Type' => 'application/json', 'Accept' => 'application/json']);
@@ -223,37 +265,48 @@ test('external channel links partial/final/duplicate/approval cleanly to a persi
             expect($context)->toBeInstanceOf(CallContext::class);
             $runs = $app->make(Runs::class);
             $chat = $app->make(ChatWorkspace::class);
-            expect($runs->listSteps($context, $runId))->toBe([]);
-            Bus::assertDispatched(ExecuteOfficeRun::class);
-            $job = Bus::dispatched(ExecuteOfficeRun::class)->sole();
-            $app->call([$job, 'handle']);
+            if ($asyncPg) {
+                $deadline = microtime(true) + 25.0;
+                while (microtime(true) < $deadline) {
+                    $eventTypes = array_column($chat->events($context, $chatSessionId, 0), 'type');
+                    if (in_array('approval.required', $eventTypes, true)) {
+                        break;
+                    }
+                    usleep(200_000);
+                }
+            } else {
+                expect($runs->listSteps($context, $runId))->toBe([]);
+                Bus::assertDispatched(ExecuteOfficeRun::class);
+                $job = Bus::dispatched(ExecuteOfficeRun::class)->sole();
+                $app->call([$job, 'handle']);
+            }
             expect(array_column($chat->events($context, $chatSessionId, 0), 'type'))->toContain('approval.required');
             expect(array_column($chat->show($context, $chatSessionId)['tool_calls'], 'state'))->toContain('awaiting_approval');
 
             $otherDoc = (string) $seed['second_resource_id'];
-            $unlinked = $runs->createOrFind($context, $expectedChannel, 'evt-unlinked', $context->policyRevision, [
+            $unlinked = $runs->createOrFind($context, $expectedChannel, $unlinkEvt, $context->policyRevision, [
                 'resource_id' => $doc,
-                'session_id' => 'ext-sess-92',
+                'session_id' => $extSession,
                 'chat_session_id' => $chatSessionId,
             ]);
             foreach ([
-                ['session_id' => 'ext-sess-92', 'resource_id' => $otherDoc],
+                ['session_id' => $extSession, 'resource_id' => $otherDoc],
                 ['session_id' => 'wrong-session', 'resource_id' => $doc],
             ] as $mismatch) {
                 $response = channelChatReq($app, 'POST', '/office/channel/events', $writerToken, $mismatch + [
-                    'event_id' => 'evt-unlinked',
+                    'event_id' => $unlinkEvt,
                     'phase' => 'final',
                 ], ['Content-Type' => 'application/json', 'Accept' => 'application/json']);
                 expect($response->getStatusCode())->toBe(409)
                     ->and($chat->sessionBindingForRun($context, $unlinked->runId))->toBeNull();
             }
-            expect(DB::table('stand_channel_inbox')->where('event_id', 'evt-unlinked')->exists())->toBeFalse();
+            expect(DB::table('stand_channel_inbox')->where('event_id', $unlinkEvt)->exists())->toBeFalse();
         }
 
         // Duplicate final event keeps 1 run_id and same chat_session_id without duplicating chat messages or events.
         $dupResp = channelChatReq($app, 'POST', '/office/channel/events', $writerToken, [
-            'session_id' => 'ext-sess-92',
-            'event_id' => 'evt-f1',
+            'session_id' => $extSession,
+            'event_id' => $finalEvt,
             'phase' => 'final',
             'resource_id' => $doc,
         ], ['Content-Type' => 'application/json', 'Accept' => 'application/json']);
@@ -277,6 +330,17 @@ test('external channel links partial/final/duplicate/approval cleanly to a persi
             'digest' => $digest,
             'approved' => true,
         ], ['Content-Type' => 'application/json', 'Accept' => 'application/json']);
+        if ($asyncPg) {
+            $deadline = microtime(true) + 25.0;
+            while (microtime(true) < $deadline) {
+                $committedCount = DB::table('v_ai_text_commands')->where('resource_id', $doc)->count();
+                $shownProbe = json_decode((string) channelChatReq($app, 'GET', '/office/chat/sessions/'.$chatSessionId, $writerToken)->getContent(), true, 512, JSON_THROW_ON_ERROR)['data'];
+                if ($committedCount === 1 && ($shownProbe['last_seq'] ?? 0) >= 4) {
+                    break;
+                }
+                usleep(200_000);
+            }
+        }
         expect(DB::table('v_ai_text_commands')->where('resource_id', $doc)->count())->toBe(1);
 
         $shownAfterCommit = json_decode((string) channelChatReq($app, 'GET', '/office/chat/sessions/'.$chatSessionId, $writerToken)->getContent(), true, 512, JSON_THROW_ON_ERROR)['data'];
@@ -318,7 +382,7 @@ test('external channel links partial/final/duplicate/approval cleanly to a persi
             ->and($collected)->toContain('event: tool.committed');
 
         // 4. Revoke writer access -> chat session show & SSE replay redact cleanly.
-        $driveOwner = StandOwner::query()->firstOrFail();
+        $driveOwner = StandOwner::query()->findOrFail($seed['owner_id']);
         $writerActor = StandActor::query()->findOrFail($seed['writer_user_id']);
         $drive = Vaulter::drive($driveOwner)->asSystem('revoke-channel-chat');
         foreach ($drive->access()->grants($drive->root()->id) as $grant) {
@@ -338,7 +402,16 @@ test('external channel links partial/final/duplicate/approval cleanly to a persi
         }
         @rmdir($runtimeDir);
     }
-})->with([
-    'laravel-ai profile' => ['ai-text', 'laravel-ai'],
-    'agentools profile' => ['ai-agentools', 'agentools'],
-]);
+})->with(static function (): array {
+    if (getenv('STAND_PG_ASYNC') === '1' || getenv('DB_CONNECTION') === 'pgsql') {
+        $profile = getenv('STAND_PROFILE') ?: 'ai-text';
+        $channel = $profile === 'ai-agentools' ? 'agentools' : 'laravel-ai';
+
+        return ["{$profile} profile" => [$profile, $channel]];
+    }
+
+    return [
+        'laravel-ai profile' => ['ai-text', 'laravel-ai'],
+        'agentools profile' => ['ai-agentools', 'agentools'],
+    ];
+});

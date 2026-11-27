@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Isolated Docker Compose consumer stand controller matching plan/spec/implementation/processes.md.
+# Isolated Docker Compose consumer stand controller matching docs/testing-processes.md.
 #
 # Usage:
 #   run_id=$(./stack.sh prepare <profile> /abs/path/to/artifacts.json)
@@ -75,9 +75,11 @@ cmd_prepare() {
     python3 - "$PROFILES_FILE" "$artifacts_json" "$profile" "$run_dir" "$STAND_DIR" "$REPO_ROOT" "$owner_port" >&2 <<'PY'
 import hashlib
 import json
+import os
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import zipfile
 
@@ -169,6 +171,68 @@ shutil.copytree(stand_dir / 'host', host_dir, dirs_exist_ok=True)
 artisan_path = host_dir / 'artisan'
 if artisan_path.is_file():
     artisan_path.chmod(0o755)
+
+# Bundle Vue stand assets into host/public/_stand-assets so owner-http serves them offline inside Docker.
+assets_dst = host_dir / 'public' / '_stand-assets'
+assets_dst.mkdir(parents=True, exist_ok=True)
+vue_src = repo_root / 'node_modules' / 'vue' / 'dist' / 'vue.esm-browser.prod.js'
+ai_vue_src = repo_root / 'packages' / 'vue' / 'dist' / 'vaulter-ai-vue.js'
+if not vue_src.is_file():
+    raise SystemExit(f'Missing Vue browser asset: {vue_src}')
+if not ai_vue_src.is_file():
+    raise SystemExit(f'Missing vaulter-ai-vue bundle: {ai_vue_src}')
+shutil.copy2(vue_src, assets_dst / 'vue.esm-browser.prod.js')
+esbuild_bin = repo_root / 'node_modules' / '.bin' / 'esbuild'
+if esbuild_bin.is_file():
+    env = dict(os.environ)
+    env['NODE_PATH'] = f"{repo_root / 'node_modules'}:{repo_root / 'packages' / 'vue' / 'node_modules'}"
+    subprocess.run(
+        [
+            str(esbuild_bin),
+            str(ai_vue_src),
+            '--bundle',
+            '--format=esm',
+            '--platform=browser',
+            '--external:vue',
+            f"--outfile={assets_dst / 'vaulter-ai-vue.js'}",
+        ],
+        check=True,
+        env=env,
+    )
+else:
+    shutil.copy2(ai_vue_src, assets_dst / 'vaulter-ai-vue.js')
+
+# Bundle @vaulter/sheets-runtime CLI and production JS dependencies for ai-sheets container runs.
+sheets_dst = host_dir / 'sheets-runtime'
+sheets_dst.mkdir(parents=True, exist_ok=True)
+(sheets_dst / '.keep').write_text('keep\n', encoding='utf-8')
+if profile_name == 'ai-sheets':
+    sheets_repo = repo_root.parent / 'vaulter-sheets'
+    runtime_src = sheets_repo / 'packages' / 'runtime'
+    shutil.copytree(runtime_src / 'dist', sheets_dst / 'dist', dirs_exist_ok=True, symlinks=False)
+    shutil.copytree(runtime_src / 'contracts', sheets_dst / 'contracts', dirs_exist_ok=True, symlinks=False)
+    shutil.copy2(runtime_src / 'package.json', sheets_dst / 'package.json')
+    nm_src = sheets_repo / 'node_modules'
+    nm_dst = sheets_dst / 'node_modules'
+    nm_dst.mkdir(parents=True, exist_ok=True)
+    root_manifest = json.loads((runtime_src / 'package.json').read_text(encoding='utf-8'))
+    queue = list((root_manifest.get('dependencies') or {}).keys()) + list((root_manifest.get('peerDependencies') or {}).keys())
+    copied = set()
+    while queue:
+        pkg_name = queue.pop(0)
+        if pkg_name in copied:
+            continue
+        pkg_dir = nm_src / pkg_name
+        pkg_manifest_path = pkg_dir / 'package.json'
+        if not pkg_manifest_path.is_file():
+            continue
+        copied.add(pkg_name)
+        shutil.copytree(pkg_dir, nm_dst / pkg_name, dirs_exist_ok=True, symlinks=False)
+        pkg_manifest = json.loads(pkg_manifest_path.read_text(encoding='utf-8'))
+        for group in ('dependencies', 'peerDependencies'):
+            for dep in (pkg_manifest.get(group) or {}).keys():
+                if dep not in copied:
+                    queue.append(dep)
 
 # Optional air-gapped third-party vendor mirror from artifacts.json.
 repositories = [
@@ -325,7 +389,7 @@ PY
     compose_for_run "$run_dir" config --quiet
     trap - ERR
 
-    # ONLY the run-id is printed to stdout per processes.md contract.
+    # ONLY the run-id is printed to stdout per testing-processes.md contract.
     printf '%s\n' "$run_id"
 }
 
@@ -364,7 +428,7 @@ cmd_restart() {
     fi
 }
 
-cmd_test() {
+cmd_test_run() {
     local run_id="${1:-}"
     local mode="${2:-standard}"
     local run_dir
@@ -379,10 +443,12 @@ cmd_test() {
     local seed_json
     seed_json="$(curl --silent --show-error --fail -X POST -H "X-Fixture-Token: $fix_tok" -H "Content-Type: application/json" -d '{}' "http://127.0.0.1:${port}/_fixture/seed")"
 
-    local resource_id writer_user_id drive_id
+    local resource_id writer_user_id drive_id sheet_resource_id writer_token
     resource_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["resource_id"])' "$seed_json")"
     writer_user_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["writer_user_id"])' "$seed_json")"
     drive_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["drive_id"])' "$seed_json")"
+    sheet_resource_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("sheet_resource_id") or "")' "$seed_json")"
+    writer_token="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["writer_token"])' "$seed_json")"
 
     local run_req
     run_req="$(python3 -c 'import json,sys; print(json.dumps({"resource_id":sys.argv[1],"writer_user_id":int(sys.argv[2]),"drive_id":sys.argv[3],"fault_mode":sys.argv[4] or None}))' "$resource_id" "$writer_user_id" "$drive_id" "$([[ "$mode" == "sigkill-recovery" ]] && echo "kill_after_owner_commit" || echo "")")"
@@ -433,10 +499,185 @@ assert data.get('verify_outcome') == 'passed', f'Expected verify_outcome=passed:
 assert data.get('verify_receipt_id') == data['receipt_id'], f'Verify receipt mismatch: {data}'
 PY
 
+    if [[ "$profile" == "ai-sheets" ]]; then
+        log "Verifying sheet.fill_formula@1 over HTTP with Node runtime inside container [$run_id]..."
+        python3 - "$port" "$sheet_resource_id" "$writer_token" >&2 <<'PY'
+import json
+import sys
+import urllib.request
+
+port, sheet_id, token = sys.argv[1], sys.argv[2], sys.argv[3]
+assert sheet_id, 'Missing sheet_resource_id in ai-sheets seed'
+
+def op(name, inp):
+    body = json.dumps({'version': 1, 'operation': name, 'input': inp}).encode('utf-8')
+    req = urllib.request.Request(
+        f'http://127.0.0.1:{port}/api/vaulter-ai/v1/operations',
+        data=body,
+        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json', 'Accept': 'application/json'},
+        method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        res = json.loads(resp.read().decode('utf-8'))
+        assert res.get('ok') is True, f'{name} failed: {res}'
+        return res['result']
+
+r = op('office.read', {'resource_id': sheet_id, 'selector': {'kind': 'sheet_table', 'sheet_id': 'expenses', 'table_id': 'costs', 'columns': ['plan', 'actual', 'delta'], 'row_ids': ['r-telecom', 'r-travel']}})
+p = op('office.prepare', {'resource_id': sheet_id, 'command': 'sheet.fill_formula@1', 'read_token': r['read_token'], 'arguments': {'sheet_id': 'expenses', 'table_id': 'costs', 'scope': 'fixed_members', 'destination_column_id': 'delta', 'expression': {'op': 'subtract', 'left_column_id': 'actual', 'right_column_id': 'plan'}}})
+c = op('office.commit', {'resource_id': sheet_id, 'command_id': 'stand-sheet-1', 'proposal_id': p['proposal_id'], 'digest': p['digest']})
+assert c['state'] == 'committed' and c['receipt_id'], c
+v = op('office.verify', {'resource_id': sheet_id, 'receipt_id': c['receipt_id'], 'mode': 'at_commit'})
+assert v['outcome'] == 'passed', v
+PY
+    fi
+
+    if [[ "$profile" == "ai-collaboration" ]]; then
+        log "Verifying Hub A42 live-journal routing, settle, and outbox wakeup over HTTP inside container [$run_id]..."
+        local journal_seed
+        journal_seed="$(curl --silent --show-error --fail -X POST -H "X-Fixture-Token: $fix_tok" -H "Content-Type: application/json" -d '{"journal":true}' "http://127.0.0.1:${port}/_fixture/seed")"
+        python3 - "$port" "$journal_seed" >&2 <<'PY'
+import base64, hashlib, hmac, json, sys, time, urllib.request, uuid
+
+port = sys.argv[1]
+seed = json.loads(sys.argv[2])
+node_id = seed['resource_id']
+token = seed['writer_token']
+secret = 'stand-collab-webhook-secret-different'
+
+def op(name, inp):
+    body = json.dumps({'version': 1, 'operation': name, 'input': inp}).encode('utf-8')
+    req = urllib.request.Request(
+        f'http://127.0.0.1:{port}/api/vaulter-ai/v1/operations',
+        data=body,
+        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json', 'Accept': 'application/json'},
+        method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        res = json.loads(resp.read().decode('utf-8'))
+        assert res.get('ok') is True, f'{name} failed: {res}'
+        return res['result']
+
+def hub(endpoint, payload):
+    payload = dict(payload, nonce=uuid.uuid4().hex[:16])
+    raw = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+    ts = int(time.time())
+    sig = hmac.new(secret.encode('utf-8'), f'{ts}.'.encode('utf-8') + raw, hashlib.sha256).hexdigest()
+    req = urllib.request.Request(
+        f'http://127.0.0.1:{port}/api/vaulter/v1/collaboration/hub/{endpoint}',
+        data=raw,
+        headers={
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'X-Vaulter-Collab-Protocol': '2',
+            'X-Vaulter-Collab-Timestamp': str(ts),
+            'X-Vaulter-Collab-Signature': sig,
+        },
+        method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
+r = op('office.read', {'resource_id': node_id, 'selector': {'kind': 'text_block', 'block_id': 'p42'}})
+p = op('office.prepare', {'resource_id': node_id, 'command': 'text.replace_exact@1', 'read_token': r['read_token'], 'arguments': {'block_id': 'p42', 'expected': '15', 'replacement': '30'}})
+c = op('office.commit', {'resource_id': node_id, 'command_id': 'stand-collab-1', 'proposal_id': p['proposal_id'], 'digest': p['digest']})
+assert c['state'] == 'running', c
+
+targets_resp = hub('commands/next', {})
+targets = targets_resp.get('targets', [])
+assert targets, f'Expected pending collaboration target: {targets_resp}'
+doc_id = str(targets[-1]['document'])
+gen = int(targets[-1]['generation'])
+
+owner_id = str(uuid.uuid4())
+acq = hub('ownership/acquire', {'document_id': doc_id, 'generation': gen, 'owner_id': owner_id, 'include_log': True})
+fence = int(acq['owner_fence'])
+head_seq = int(acq['head_seq'])
+if head_seq == 0:
+    seed_bytes = b'yjs-stand-seed'
+    seed_ack = hub('commands/settle', {
+        'document_id': doc_id, 'generation': gen, 'owner_id': owner_id, 'owner_fence': fence,
+        'base_seq': 0, 'kind': 'seed', 'seed_state_version': 2,
+        'update': {'update_id': str(uuid.uuid4()), 'payload': base64.b64encode(seed_bytes).decode(), 'sha256': hashlib.sha256(seed_bytes).hexdigest()},
+    })
+    head_seq = int(seed_ack['seq'])
+
+nxt = hub('commands/next', {'document_id': doc_id, 'generation': gen, 'owner_id': owner_id, 'owner_fence': fence})
+cmd = nxt['command']
+upd_bytes = b'yjs-stand-update-30'
+settle = hub('commands/settle', {
+    'id': cmd['id'], 'fingerprint': cmd['fingerprint'], 'document_id': doc_id, 'generation': gen,
+    'owner_id': owner_id, 'owner_fence': fence, 'base_seq': head_seq, 'kind': 'commit',
+    'updates': [{'update_id': str(uuid.uuid4()), 'payload': base64.b64encode(upd_bytes).decode(), 'sha256': hashlib.sha256(upd_bytes).hexdigest()}],
+    'evidence': {'ranges': [{'block_id': 'p42', 'start_utf16': 14, 'length_utf16': 2, 'replacement': '30', 'window': '😀 Pay within 30 working days.', 'window_leading_utf16': 0, 'relative_start': base64.b64encode(b'rel-start').decode(), 'relative_end': base64.b64encode(b'rel-end').decode(), 'attributes': {'marks': ['bold']}, 'block': {'type': 'paragraph', 'attrs': {'blockId': 'p42'}, 'content': [{'type': 'text', 'text': '😀 Pay within '}, {'type': 'text', 'text': '30', 'marks': [{'type': 'bold'}]}, {'type': 'text', 'text': ' working days.'}]}}]},
+})
+assert settle['state'] == 'committed' and settle['receipt_id'], settle
+
+st = op('office.status', {'resource_id': node_id, 'command_id': 'stand-collab-1'})
+assert st['state'] == 'committed' and st['receipt_id'] == settle['receipt_id'], st
+vr = op('office.verify', {'resource_id': node_id, 'receipt_id': st['receipt_id'], 'mode': 'at_commit'})
+assert vr['outcome'] == 'passed', vr
+PY
+    fi
+
+    log "Running in-container PHP consumer suite (ProposalDecisionTest, FinalMessageTest, ChannelChatLinkTest) on PG 18.7 + queue:work..."
+    compose_for_run "$run_dir" build php-test >&2
+    if ! compose_for_run "$run_dir" --profile test run --rm php-test >&2; then
+        compose_for_run "$run_dir" logs --tail=80 owner-http agent-worker projection-worker >&2 || true
+        exit 1
+    fi
+
+    log "Running Playwright Chromium browser_chat_e2e against PG 18.7 + queue:work for [$profile]..."
+    compose_for_run "$run_dir" build browser-test >&2
+    if ! compose_for_run "$run_dir" --profile browser run --rm browser-test >&2; then
+        compose_for_run "$run_dir" logs --tail=80 owner-http agent-worker projection-worker >&2 || true
+        compose_for_run "$run_dir" exec -T postgres psql -U vaulter -d vaulter_ai_office -c "SELECT id, queue, attempts, reserved_at FROM jobs ORDER BY id DESC LIMIT 10; SELECT run_id, state, channel FROM v_ai_runs ORDER BY updated_at DESC LIMIT 10; SELECT seq, event_type FROM v_ai_chat_events ORDER BY seq DESC LIMIT 15;" >&2 || true
+        exit 1
+    fi
+
     log "Running isolated python-client remote HTTP test..."
     compose_for_run "$run_dir" build python-client >&2
     compose_for_run "$run_dir" --profile test run --rm python-client >&2
     log "Stand tests PASSED for [$run_id]"
+}
+
+cmd_test() {
+    if [[ $# -ge 1 && -n "${1:-}" ]]; then
+        cmd_test_run "$@"
+        return
+    fi
+
+    _STACK_ARTIFACTS_DIR="$(mktemp -d)"
+    _STACK_ACTIVE_RUNS=()
+    cleanup_all_runs() {
+        local rid
+        for rid in "${_STACK_ACTIVE_RUNS[@]:-}"; do
+            if [[ -n "$rid" ]]; then
+                cmd_clean "$rid" >/dev/null 2>&1 || true
+            fi
+        done
+        if [[ -n "${_STACK_ARTIFACTS_DIR:-}" ]]; then
+            rm -rf "$_STACK_ARTIFACTS_DIR"
+        fi
+    }
+    trap cleanup_all_runs EXIT
+
+    log "Building local consumer artifacts manifest..."
+    local artifacts_json
+    artifacts_json="$(php "$STAND_DIR/bin/build-artifacts.php" --out="$_STACK_ARTIFACTS_DIR")"
+
+    local entry profile mode run_id
+    for entry in "ai-text:sigkill-recovery" "ai-sheets:standard" "ai-collaboration:standard"; do
+        profile="${entry%%:*}"
+        mode="${entry#*:}"
+        log "=== Consumer stand matrix: profile=[$profile] mode=[$mode] ==="
+        run_id="$(cmd_prepare "$profile" "$artifacts_json")"
+        _STACK_ACTIVE_RUNS+=("$run_id")
+        cmd_up "$run_id"
+        cmd_test_run "$run_id" "$mode"
+        cmd_clean "$run_id"
+        _STACK_ACTIVE_RUNS=()
+    done
+    log "Full consumer stand matrix PASSED across ai-text, ai-sheets, ai-collaboration"
 }
 
 cmd_down() {
@@ -451,6 +692,10 @@ cmd_clean() {
     local run_dir
     run_dir="$(require_run_dir "$run_id")"
     compose_for_run "$run_dir" down --volumes --remove-orphans --timeout 10 >&2 || true
+    local repo
+    for repo in vaulter-ai-stand-php vaulter-ai-stand-php-test vaulter-ai-stand-browser vaulter-ai-stand-python; do
+        docker image rm -f "${repo}:${run_id}" >/dev/null 2>&1 || true
+    done
     rm -rf "$run_dir"
     log "Cleaned [$run_id]"
 }

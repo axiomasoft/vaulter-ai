@@ -12,6 +12,7 @@ use Packman\Plugins\Laravel\PluginRegistrar;
 use Vaulter\Ai\AgenTools\AgenToolsServiceProvider;
 use Vaulter\Ai\AgenTools\OfficeToolDescriptorRegistry;
 use Vaulter\Ai\Collaboration\CollaborationAiServiceProvider;
+use Vaulter\Ai\Collaboration\Tests\Support\LiveJournalTestCase;
 use Vaulter\Ai\Core\Contracts\Office;
 use Vaulter\Ai\Core\Contracts\ResourceDirectory;
 use Vaulter\Ai\Core\Data\OfficeRequest;
@@ -96,6 +97,11 @@ final class LiveJournalDriverServiceProvider extends ServiceProvider
 
 class LiveJournalWithoutCollabTestCase extends OfficeTestCase
 {
+    protected function suiteDatabaseConnection(): array
+    {
+        return LiveJournalTestCase::resolveSuiteDatabaseConnection();
+    }
+
     protected function getPackageProviders($app): array
     {
         return [

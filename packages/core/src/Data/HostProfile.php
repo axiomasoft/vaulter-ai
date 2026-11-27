@@ -21,5 +21,16 @@ final readonly class HostProfile
         public array $commands,
         public ApprovalMode $approval,
         public string $revision = '1',
+        public ?int $maxTokens = null,
+        public ?int $maxCostMicros = null,
+        public int $inputCostMicrosPerMillion = 0,
+        public int $outputCostMicrosPerMillion = 0,
     ) {}
+
+    public function exceedsUsageBudget(int $input, int $output): bool
+    {
+        return ($this->maxTokens !== null && $input + $output > $this->maxTokens)
+            || ($this->maxCostMicros !== null &&
+                ($input * $this->inputCostMicrosPerMillion + $output * $this->outputCostMicrosPerMillion) / 1000000 > $this->maxCostMicros);
+    }
 }

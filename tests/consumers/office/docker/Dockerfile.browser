@@ -1,7 +1,8 @@
 # Browser smoke runtime pinned to Node >= 26.13.1 LTS with mandatory libatomic1 (engineering standards).
 FROM node:26.13.1-bookworm-slim
 
-RUN apt-get update \
+RUN printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99network \
+    && apt-get update \
     && apt-get install -y --no-install-recommends libatomic1 ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -9,3 +10,13 @@ RUN apt-get update \
 RUN node -e "process.exit(0)"
 
 WORKDIR /work
+
+RUN npm install --no-save --no-audit --no-fund playwright@1.65.1 \
+    && npx playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
+
+ENV VAULTER_PLAYWRIGHT_PATH=/work/node_modules/playwright
+
+COPY tests/browser_chat_e2e.mjs /work/tests/browser_chat_e2e.mjs
+
+CMD ["node", "/work/tests/browser_chat_e2e.mjs"]

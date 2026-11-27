@@ -1,16 +1,20 @@
 {
   "schema": 1,
+  "archived": true,
+  "note": "Historical provenance of the copied Office wire fixtures. source_root is the archived catalogue directory and source_path is the path under it. They are stored apart so this file is not a live link.",
   "source_repo": "axiomasoft/vaulter",
   "source_commit": "00200679ab438d20c47318b908275459d791162e",
   "files": [
     {
-      "source_path": "plan/spec/schemas/office-v1.schema.json",
+      "source_root": "plan",
+      "source_path": "spec/schemas/office-v1.schema.json",
       "target_path": "packages/core/resources/contracts/office-v1.schema.json",
-      "sha256": "8af9a105011812c7f0552dcccb32300eb178bd6d5f7b01db52033749f856a5ce",
-      "bytes": 33886
+      "sha256": "2d9ba328de5afb7b118fa767469872795a04b9c9ea39162b6f9b57c4e60bd4ef",
+      "bytes": 33877
     },
     {
-      "source_path": "plan/examples/office-sdk.json",
+      "source_root": "plan",
+      "source_path": "examples/office-sdk.json",
       "target_path": "tests/Fixtures/office-sdk.json",
       "sha256": "ad0678a94058829f0d2682f56e0cca1b5971dbb3561108e678d6f02e6648641c",
       "bytes": 48016
