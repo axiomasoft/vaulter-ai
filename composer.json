@@ -148,7 +148,7 @@
         "prepare": "bash scripts/dev/prepare-siblings.sh",
         "lint": "@php vendor/bin/pint",
         "lint:check": "@php vendor/bin/pint --test",
-        "phpstan": "@php vendor/bin/phpstan analyse -c phpstan.neon.dist --memory-limit=1G --no-progress",
+        "phpstan": "bash scripts/ci/phpstan.sh",
         "quality": [
             "@composer validate --strict --no-check-publish",
             "@lint:check",

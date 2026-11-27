@@ -9,7 +9,7 @@ Compare two ways of giving one scripted office assignment its context, on the sa
 
 The write is always `sheet.fill_formula@1` / `fixed_members` on `r-telecom` and `r-travel` (`actual − plan`). `r-fees` stays `77`. Both branches must verify `passed` at `at_commit` and `current`. A mismatched truth sets `comparison_valid` to `false`; the numeric comparison is then not a verdict.
 
-`1×` is 11 contract blocks and 3 sheet rows. `10×` is 110 blocks and 30 rows. Thirty rows exceed the first-profile page of 20, and the larger contract exceeds 16 KiB, so the full branch must narrow with an explicit selector instead of treating a truncated page as the write area. This corpus is the office assignment, not the storage physical-schema corpus (1 100 blocks / 100 000 cells) measured by `vaulter`’s `plan/checks/storage-benchmark.sh`.
+`1×` is 11 contract blocks and 3 sheet rows. `10×` is 110 blocks and 30 rows. Thirty rows exceed the first-profile page of 20, and the larger contract exceeds 16 KiB, so the full branch must narrow with an explicit selector instead of treating a truncated page as the write area. This corpus is the office assignment, not the storage physical-schema corpus (1 100 blocks / 100 000 cells) measured by `vaulter`’s `load/scripts/bench-storage-cold-wal.py`.
 
 ## First profile
 

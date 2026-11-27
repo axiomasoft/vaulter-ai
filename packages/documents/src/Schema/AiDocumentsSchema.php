@@ -14,7 +14,7 @@ use Vaulter\Schema\HostKeyColumns;
 use Vaulter\Schema\SchemaHelpers;
 
 /**
- * Schema builder for the 4 AI Documents tables (plan/spec/database/sql/ai-documents.sql)
+ * Schema builder for the 4 AI Documents tables (docs/database/sql/ai-documents.sql)
  * on the Vaulter OWNER database connection, aligned with Vaulter's IdStrategy and HostKeyColumns.
  */
 final readonly class AiDocumentsSchema

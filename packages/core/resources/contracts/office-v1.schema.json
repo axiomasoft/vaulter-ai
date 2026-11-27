@@ -5,7 +5,7 @@
   "oneOf": [{"$ref": "#/$defs/request"}, {"$ref": "#/$defs/success"}, {"$ref": "#/$defs/failure"}],
   "$defs": {
     "id": {"type": "string", "minLength": 1},
-    "digest": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 строчным hex от UTF-8 RFC 8785 {version:1,prepare_input,plan без digest}; профиль чисел — безопасные целые. Векторы: plan/examples/reference/proposal-digest/vectors.json"},
+    "digest": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 строчным hex от UTF-8 RFC 8785 {version:1,prepare_input,plan без digest}; профиль чисел — безопасные целые. Векторы: tests/Fixtures/proposal-digest-vectors.json"},
     "marker": {
       "type": "object",
       "required": ["generation", "position"],

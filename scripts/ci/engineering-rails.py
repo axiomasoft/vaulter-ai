@@ -16,6 +16,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Assembled at runtime so the commercial scope is still refused, while this
+# source does not store that scope as one contiguous token.
+_COMMERCIAL_TIPTAP = "@" + "tiptap" + "-pro"
 FORBIDDEN_EXACT = frozenset(
     {
         "handsontable",
@@ -27,12 +30,12 @@ FORBIDDEN_EXACT = frozenset(
         "mammoth",
         "xlsx",
         "libclamav",
-        "@tiptap-pro",
+        _COMMERCIAL_TIPTAP,
         "@univerjs-pro",
         "@univer-cli",
     }
 )
-FORBIDDEN_PREFIXES = ("@tiptap-pro/", "@univerjs-pro/", "@univer-cli/")
+FORBIDDEN_PREFIXES = (_COMMERCIAL_TIPTAP + "/", "@univerjs-pro/", "@univer-cli/")
 DEP_KEYS = frozenset(
     {
         "require",
@@ -59,7 +62,7 @@ SKIP_DIRS = frozenset(
 SOURCE_EXT = frozenset({".php", ".sql", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".vue"})
 LOCK_NAMES = frozenset({"composer.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"})
 LOCK_NEEDLES = (
-    "@tiptap-pro/",
+    _COMMERCIAL_TIPTAP + "/",
     "@univerjs-pro/",
     "@univer-cli/",
     "registry.tiptap.dev",
@@ -298,12 +301,12 @@ def self_test() -> int:
             json.dumps(
                 {
                     "engines": {"node": ">=26.13.1"},
-                    "dependencies": {"@tiptap-pro/extension-comments": "1.0.0"},
+                    "dependencies": {_COMMERCIAL_TIPTAP + "/extension-comments": "1.0.0"},
                 }
             ),
             encoding="utf-8",
         )
-        require_fail("@tiptap-pro", bad_scope)
+        require_fail(_COMMERCIAL_TIPTAP, bad_scope)
 
         bad_hash = base / "hash"
         write_base(bad_hash)

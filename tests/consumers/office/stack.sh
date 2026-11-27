@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Isolated Docker Compose consumer stand controller matching plan/spec/implementation/processes.md.
+# Isolated Docker Compose consumer stand controller matching docs/testing-processes.md.
 #
 # Usage:
 #   run_id=$(./stack.sh prepare <profile> /abs/path/to/artifacts.json)
@@ -389,7 +389,7 @@ PY
     compose_for_run "$run_dir" config --quiet
     trap - ERR
 
-    # ONLY the run-id is printed to stdout per processes.md contract.
+    # ONLY the run-id is printed to stdout per testing-processes.md contract.
     printf '%s\n' "$run_id"
 }
 
