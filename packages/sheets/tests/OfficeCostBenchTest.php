@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\DB;
+use Symfony\Component\Process\Process;
 use Vaulter\Ai\Bench\OfficeCostCompare;
 use Vaulter\Ai\Tests\Support\OfficeTestCase;
 
@@ -148,4 +150,77 @@ test('office cost bench records both branches on the 1x and 10x assignment corpo
         ->and($wide['branches']['full_snapshot']['snapshot_utf8_bytes'])->toBeGreaterThan(16384)
         ->and($wide['branches']['full_snapshot']['model_context_contains']['filler_block'])->toBeFalse()
         ->and($wide['branches']['full_snapshot']['model_context_limited_to_selection'])->toBeTrue();
+
+    expect($report['profiles']['chat']['correct'])->toBeTrue(implode('; ', $report['profiles']['chat']['errors'] ?? []))
+        ->and($report['profiles']['chat']['sse_delta_frames'])->toBeGreaterThanOrEqual(1)
+        ->and($report['profiles']['chat']['sse_deltas_during_turn'])->toBeGreaterThanOrEqual(1);
+});
+
+test('chat SSE bench rejects runs whose deltas all arrive after ChatTurn finishes', function (): void {
+    $postTurnOnly = [
+        'connected' => true,
+        'frames' => 11,
+        'delta_frames' => 10,
+        'deltas_during_turn' => 0,
+        'first_delta_ns' => 2_000_000,
+        'received_text' => 'hello',
+        'done' => true,
+    ];
+    expect(OfficeCostCompare::validateChatStream($postTurnOnly, 'hello', 1_500_000))
+        ->toContain('SSE consumer did not receive any assistant.delta frame while ChatTurn was active');
+
+    $activeTurn = [
+        ...$postTurnOnly,
+        'deltas_during_turn' => 3,
+        'first_delta_ns' => 1_000_000,
+    ];
+    expect(OfficeCostCompare::validateChatStream($activeTurn, 'hello', 1_500_000))->toBe([]);
+});
+
+test('failed benchmark boot cleans up its temporary PostgreSQL schema', function (): void {
+    $root = dirname(__DIR__, 3);
+    $driver = DB::connection()->getDriverName();
+    $before = $driver === 'pgsql'
+        ? array_map(
+            static fn (object $row): string => (string) $row->schema_name,
+            DB::select("SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 'vaulter_ai_bench_%'"),
+        )
+        : [];
+
+    $conn = $this->app['config']->get('database.connections.testing', []);
+    $env = [
+        'VAULTER_TEST_ID_STRATEGY' => 'h08_invalid',
+        'APP_ENV' => 'testing',
+        'APP_KEY' => 'base64:tJ4mVwShl8LETWdRtTCwcoKS7MS2ipekchk9seHrIVc=',
+        'DB_CONNECTION' => $driver,
+    ];
+    if ($driver === 'pgsql' && is_array($conn)) {
+        $env += [
+            'DB_HOST' => (string) ($conn['host'] ?? '127.0.0.1'),
+            'DB_PORT' => (string) ($conn['port'] ?? '5432'),
+            'DB_DATABASE' => (string) ($conn['database'] ?? 'vaulter_ai_test'),
+            'DB_USERNAME' => (string) ($conn['username'] ?? 'vaulter'),
+            'DB_PASSWORD' => (string) ($conn['password'] ?? 'vaulter'),
+        ];
+    } else {
+        $env['DB_DATABASE'] = ':memory:';
+    }
+
+    $process = new Process(
+        ['php', 'bench/office/compare.php', '--warmup=0', '--measured=1'],
+        $root,
+        $env,
+        timeout: 30,
+    );
+    $process->run();
+
+    expect($process->getExitCode())->not->toBe(0);
+
+    if ($driver === 'pgsql') {
+        $after = array_map(
+            static fn (object $row): string => (string) $row->schema_name,
+            DB::select("SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 'vaulter_ai_bench_%'"),
+        );
+        expect($after)->toBe($before);
+    }
 });

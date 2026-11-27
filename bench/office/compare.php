@@ -7,6 +7,7 @@ namespace Vaulter\Ai\Bench;
 use Composer\InstalledVersions;
 use Fiber;
 use Illuminate\Contracts\Http\Kernel;
+use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\Events\TransactionCommitted;
 use Illuminate\Foundation\Application;
@@ -270,8 +271,8 @@ final class OfficeCostCompare
         }
 
         $harness = new OfficeBenchHarness('boot');
-        $harness->boot(! $dryRun);
         try {
+            $harness->boot(! $dryRun);
             if ($dryRun) {
                 self::assertWorkload($workload);
                 $app = $harness->application();
@@ -1835,12 +1836,19 @@ JS;
             $rawData = implode("\n", $dataLines);
             $decoded = $rawData !== '' ? json_decode($rawData, true) : null;
             if ($event === 'assistant.delta') {
+                $nowNs = (int) hrtime(true);
                 $state['delta_frames'] = (int) ($state['delta_frames'] ?? 0) + 1;
+                if (($state['producer_active'] ?? false) === true) {
+                    $state['deltas_during_turn'] = (int) ($state['deltas_during_turn'] ?? 0) + 1;
+                }
+                if (($state['first_delta_ns'] ?? null) === null) {
+                    $state['first_delta_ns'] = $nowNs;
+                }
                 if (is_array($decoded) && is_string($decoded['text'] ?? null)) {
                     $state['received_text'] = ((string) ($state['received_text'] ?? '')).$decoded['text'];
                 }
                 if (($state['first_delta_ms'] ?? null) === null && (int) ($state['started_ns'] ?? 0) > 0) {
-                    $state['first_delta_ms'] = round((hrtime(true) - (int) $state['started_ns']) / 1_000_000, 3);
+                    $state['first_delta_ms'] = round(($nowNs - (int) $state['started_ns']) / 1_000_000, 3);
                 }
             }
             if (in_array($event, ['run.finished', 'run.failed', 'error'], true)) {
@@ -1859,14 +1867,17 @@ JS;
     private static function measureChatStreamProfile(Application $app, array $workload): array
     {
         $errors = [];
-        $chunks = (int) ($workload['chat_stream']['delta_chunks'] ?? 64);
+        $chatStream = is_array($workload['chat_stream'] ?? null) ? $workload['chat_stream'] : [];
+        $chunks = (int) ($chatStream['delta_chunks'] ?? 64);
+        $rawIntervalMs = $chatStream['delta_interval_ms'] ?? 5;
+        $deltaIntervalUs = max(0, (int) round((is_numeric($rawIntervalMs) ? (float) $rawIntervalMs : 5.0) * 1000));
         DB::table('users')->where('email', 'editor@example.test')->delete();
         $fixture = new TextCommandFixture($app, automatic: true);
         $fixture->authorizeHttp();
         Config::set('vaulter-ai.profiles.documents.commands', ['text.replace_exact@1']);
         Config::set('vaulter-ai.profiles.documents.approval', 'automatic');
-        Config::set('vaulter-ai.chat.delta_batch_bytes', (int) ($workload['chat_stream']['delta_batch_bytes'] ?? 256));
-        Config::set('vaulter-ai.chat.delta_batch_ms', (int) ($workload['chat_stream']['delta_batch_ms'] ?? 50));
+        Config::set('vaulter-ai.chat.delta_batch_bytes', (int) ($chatStream['delta_batch_bytes'] ?? 256));
+        Config::set('vaulter-ai.chat.delta_batch_ms', (int) ($chatStream['delta_batch_ms'] ?? 50));
 
         $chat = $app->make(ChatWorkspace::class);
         $turn = $app->make(ChatTurn::class);
@@ -1877,10 +1888,11 @@ JS;
 
         $deltasEmitted = 0;
         $assistantText = '';
-        $llm = new class($chunks, $deltasEmitted, $assistantText) implements LlmPort
+        $llm = new class($chunks, $deltaIntervalUs, $deltasEmitted, $assistantText) implements LlmPort
         {
             public function __construct(
                 private readonly int $chunks,
+                private readonly int $deltaIntervalUs,
                 private int &$deltasEmitted,
                 private string &$assistantText,
             ) {}
@@ -1888,10 +1900,19 @@ JS;
             public function stream(array $messages, array $tools, HostProfile $profile, \Closure $cancelled): iterable
             {
                 for ($i = 1; $i <= $this->chunks; $i++) {
+                    if ($cancelled()) {
+                        return;
+                    }
+                    if ($i > 1 && $this->deltaIntervalUs > 0) {
+                        usleep($this->deltaIntervalUs);
+                    }
                     $piece = sprintf('delta-%02d оплата проверена; ', $i);
                     $this->deltasEmitted++;
                     $this->assistantText .= $piece;
                     yield ['type' => 'textDelta', 'text' => $piece];
+                }
+                if ($this->deltaIntervalUs > 0 && ! $cancelled()) {
+                    usleep($this->deltaIntervalUs);
                 }
                 yield ['type' => 'finish'];
             }
@@ -1909,11 +1930,15 @@ JS;
             'connected' => false,
             'frames' => 0,
             'delta_frames' => 0,
+            'deltas_during_turn' => 0,
+            'producer_active' => false,
             'received_text' => '',
             'started_ns' => 0,
+            'first_delta_ns' => null,
             'first_delta_ms' => null,
             'done' => false,
         ];
+        $turnFinishedNs = null;
         $consumerElapsedMs = 0.0;
         $phase = ['ms' => 0.0, 'sql_queries' => 0, 'buffers' => self::bufferCounters()];
 
@@ -2002,7 +2027,14 @@ JS;
             if ($turnPid === 0) {
                 fclose($sseClient);
                 fclose($turnRead);
-                $childPhase = self::phase(static fn () => $turn->execute($fixture->context, $runId, $llm));
+                $childTurnFinishedNs = 0;
+                $childPhase = self::phase(static function () use ($turn, $fixture, $runId, $llm, &$childTurnFinishedNs): mixed {
+                    try {
+                        return $turn->execute($fixture->context, $runId, $llm);
+                    } finally {
+                        $childTurnFinishedNs = (int) hrtime(true);
+                    }
+                });
                 foreach (array_keys(Config::get('database.connections', [])) as $name) {
                     DB::disconnect($name);
                 }
@@ -2015,22 +2047,43 @@ JS;
                     ],
                     'raw_deltas' => $deltasEmitted,
                     'assistant_text' => $assistantText,
+                    'turn_finished_ns' => $childTurnFinishedNs,
                 ], JSON_THROW_ON_ERROR));
                 fclose($turnWrite);
                 exit(0);
             }
             fclose($turnWrite);
 
+            $sseState['producer_active'] = true;
+            $turnPipeOpen = true;
+            $turnPayloadRaw = '';
             $streamDeadline = hrtime(true) + 15_000_000_000;
             while (! $sseState['done'] && hrtime(true) < $streamDeadline) {
                 $line = fgets($sseClient);
                 if ($line === false) {
                     break;
                 }
+                if ($turnPipeOpen) {
+                    $read = [$turnRead];
+                    $write = null;
+                    $except = null;
+                    $selected = stream_select($read, $write, $except, 0, 0);
+                    if ($selected !== false && $selected > 0) {
+                        $sseState['producer_active'] = false;
+                        $chunk = fread($turnRead, 65536);
+                        if (is_string($chunk) && $chunk !== '') {
+                            $turnPayloadRaw .= $chunk;
+                        }
+                        if (feof($turnRead)) {
+                            $turnPipeOpen = false;
+                        }
+                    }
+                }
                 $sseState['wire_bytes'] += strlen($line);
                 $sseState['buffer'] .= $line;
                 self::drainSseBuffer($sseState);
             }
+            $sseState['producer_active'] = false;
             $consumerElapsedMs = round((hrtime(true) - $sseState['started_ns']) / 1_000_000, 3);
             fclose($sseClient);
             if (function_exists('posix_kill')) {
@@ -2038,10 +2091,15 @@ JS;
             }
             pcntl_waitpid($ssePid, $sseStatus);
 
-            $turnPayloadRaw = stream_get_contents($turnRead);
+            if ($turnPipeOpen) {
+                $rest = stream_get_contents($turnRead);
+                if (is_string($rest)) {
+                    $turnPayloadRaw .= $rest;
+                }
+            }
             fclose($turnRead);
             pcntl_waitpid($turnPid, $turnStatus);
-            if (! pcntl_wifexited($turnStatus) || pcntl_wexitstatus($turnStatus) !== 0 || ! is_string($turnPayloadRaw) || $turnPayloadRaw === '') {
+            if (! pcntl_wifexited($turnStatus) || pcntl_wexitstatus($turnStatus) !== 0 || $turnPayloadRaw === '') {
                 $errors[] = 'Forked ChatTurn execution failed';
             } else {
                 $decodedTurn = json_decode($turnPayloadRaw, true, 512, JSON_THROW_ON_ERROR);
@@ -2050,6 +2108,7 @@ JS;
                 }
                 $deltasEmitted = (int) ($decodedTurn['raw_deltas'] ?? 0);
                 $assistantText = (string) ($decodedTurn['assistant_text'] ?? '');
+                $turnFinishedNs = is_int($decodedTurn['turn_finished_ns'] ?? null) ? $decodedTurn['turn_finished_ns'] : null;
             }
         } else {
             $streamingActive = true;
@@ -2115,6 +2174,7 @@ JS;
                     if ($bytes !== '') {
                         $sseState['wire_bytes'] = (int) $sseState['wire_bytes'] + strlen($bytes);
                         $sseState['buffer'] = ((string) $sseState['buffer']).$bytes;
+                        OfficeCostCompare::drainSseBufferPub($sseState);
                     }
 
                     return '';
@@ -2131,6 +2191,7 @@ JS;
             self::drainSseBuffer($sseState);
 
             $sseState['started_ns'] = hrtime(true);
+            $sseState['producer_active'] = true;
             $listenerActive = true;
             Event::listen(TransactionCommitted::class, static function (TransactionCommitted $event) use (&$listenerActive, &$sseState, $sseFiber): void {
                 if (! $listenerActive || $sseState['done'] === true || $event->connection->transactionLevel() !== 0) {
@@ -2142,8 +2203,17 @@ JS;
             });
 
             try {
-                $phase = self::phase(static fn () => $turn->execute($fixture->context, $runId, $llm));
+                $phase = self::phase(static function () use ($turn, $fixture, $runId, $llm, &$sseState, &$turnFinishedNs): mixed {
+                    try {
+                        return $turn->execute($fixture->context, $runId, $llm);
+                    } finally {
+                        $sseState['producer_active'] = false;
+                        $turnFinishedNs = (int) hrtime(true);
+                    }
+                });
             } finally {
+                $sseState['producer_active'] = false;
+                $turnFinishedNs ??= (int) hrtime(true);
                 $listenerActive = false;
                 $streamingActive = false;
                 if ($sseFiber->isSuspended()) {
@@ -2156,18 +2226,7 @@ JS;
             $fixture->authorizeHttp();
         }
 
-        if ($sseState['connected'] !== true) {
-            $errors[] = 'SSE consumer did not receive connected prelude';
-        }
-        if ((int) $sseState['frames'] < 2 || (int) $sseState['delta_frames'] < 1) {
-            $errors[] = 'ChatTurn produced no assistant.delta SSE frames at consumer';
-        }
-        if ((string) $sseState['received_text'] !== $assistantText) {
-            $errors[] = 'SSE consumer delta payload differed from generated assistant text';
-        }
-        if ($sseState['done'] !== true) {
-            $errors[] = 'SSE consumer did not receive the run.finished frame';
-        }
+        $errors = [...$errors, ...self::validateChatStream($sseState, $assistantText, $turnFinishedNs)];
 
         $encoding = (string) ($workload['model']['tokenizer'] ?? 'cl100k_base');
         $fullInput = self::fullModelInputPayload($app, $fixture->context, [$fixture->node->id], $prompt);
@@ -2183,6 +2242,7 @@ JS;
             'raw_deltas' => $deltasEmitted,
             'sse_frames_received' => (int) $sseState['frames'],
             'sse_delta_frames' => (int) $sseState['delta_frames'],
+            'sse_deltas_during_turn' => (int) ($sseState['deltas_during_turn'] ?? 0),
             'sse_wire_bytes' => (int) $sseState['wire_bytes'],
             'consumer_elapsed_ms' => $consumerElapsedMs,
             'first_delta_ms' => $sseState['first_delta_ms'],
@@ -2203,6 +2263,38 @@ JS;
     public static function drainSseBufferPub(array &$state): bool
     {
         return self::drainSseBuffer($state);
+    }
+
+    /**
+     * Validate SSE consumer state, including proof that at least one delta reached the consumer before ChatTurn returned.
+     *
+     * @param  array<string, mixed>  $sseState
+     * @return list<string>
+     */
+    public static function validateChatStream(array $sseState, string $assistantText, ?int $turnFinishedNs): array
+    {
+        $errors = [];
+        if (($sseState['connected'] ?? false) !== true) {
+            $errors[] = 'SSE consumer did not receive connected prelude';
+        }
+        if ((int) ($sseState['frames'] ?? 0) < 2 || (int) ($sseState['delta_frames'] ?? 0) < 1) {
+            $errors[] = 'ChatTurn produced no assistant.delta SSE frames at consumer';
+        }
+        $firstDeltaNs = $sseState['first_delta_ns'] ?? null;
+        if ((int) ($sseState['deltas_during_turn'] ?? 0) < 1
+            || ! is_int($firstDeltaNs)
+            || ! is_int($turnFinishedNs)
+            || $firstDeltaNs >= $turnFinishedNs) {
+            $errors[] = 'SSE consumer did not receive any assistant.delta frame while ChatTurn was active';
+        }
+        if ((string) ($sseState['received_text'] ?? '') !== $assistantText) {
+            $errors[] = 'SSE consumer delta payload differed from generated assistant text';
+        }
+        if (($sseState['done'] ?? false) !== true) {
+            $errors[] = 'SSE consumer did not receive the run.finished frame';
+        }
+
+        return $errors;
     }
 
     /**
@@ -2635,32 +2727,50 @@ final class OfficeBenchHarness extends OfficeTestCase
 
         $this->shouldMigrate = $migrate;
         $this->ownedBenchSchema = null;
-        if ($migrate) {
-            $conn = $this->suiteDatabaseConnection();
-            if (($conn['driver'] ?? null) === 'pgsql') {
-                $schema = 'vaulter_ai_bench_'.bin2hex(random_bytes(8));
-                $pdo = $this->openPgPdo($conn);
-                $pdo->exec('CREATE SCHEMA "'.$schema.'"');
-                $this->ownedBenchSchema = $schema;
+        try {
+            if ($migrate) {
+                $conn = $this->suiteDatabaseConnection();
+                if (($conn['driver'] ?? null) === 'pgsql') {
+                    $schema = 'vaulter_ai_bench_'.bin2hex(random_bytes(8));
+                    $pdo = $this->openPgPdo($conn);
+                    $pdo->exec('CREATE SCHEMA "'.$schema.'"');
+                    $this->ownedBenchSchema = $schema;
+                }
             }
-        }
 
-        $this->setUp();
+            $this->setUp();
+        } catch (Throwable $exception) {
+            $this->cleanup();
+
+            throw $exception;
+        }
     }
 
     public function cleanup(): void
     {
-        if (isset($this->app)) {
-            foreach (array_keys(Config::get('database.connections', [])) as $name) {
-                DB::disconnect($name);
+        try {
+            if (isset($this->app)) {
+                if ($this->app->bound('db') && $this->app->resolved('db')) {
+                    $db = $this->app->make('db');
+                    if ($db instanceof DatabaseManager) {
+                        foreach (array_keys($db->getConnections()) as $name) {
+                            $db->disconnect((string) $name);
+                            $db->purge((string) $name);
+                        }
+                    }
+                }
+                if ($this->app->resolved(VaulterDatabase::class)) {
+                    $this->app->make(VaulterDatabase::class)->connection()->disconnect();
+                }
             }
-        }
-        if ($this->ownedBenchSchema !== null) {
-            $schema = $this->ownedBenchSchema;
-            $this->ownedBenchSchema = null;
-            $conn = $this->suiteDatabaseConnection();
-            $pdo = $this->openPgPdo($conn);
-            $pdo->exec('DROP SCHEMA IF EXISTS "'.$schema.'" CASCADE');
+        } finally {
+            if ($this->ownedBenchSchema !== null) {
+                $schema = $this->ownedBenchSchema;
+                $this->ownedBenchSchema = null;
+                $conn = $this->suiteDatabaseConnection();
+                $pdo = $this->openPgPdo($conn);
+                $pdo->exec('DROP SCHEMA IF EXISTS "'.$schema.'" CASCADE');
+            }
         }
     }
 
